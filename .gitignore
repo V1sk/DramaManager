@@ -1,0 +1,10 @@
+.claude
+.codex
+openspec
+out
+tmp
+venv
+CLAUDE.md
+input.mp4
+.idea
+app/oss_upload.py
