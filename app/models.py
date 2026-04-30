@@ -19,6 +19,8 @@ class EpisodeInfo(BaseModel):
     playUrl: str
     durationMs: int = Field(ge=0)
     coverUrl: Optional[str] = None
+    width: Optional[int] = Field(default=None, ge=1)
+    height: Optional[int] = Field(default=None, ge=1)
     initUrl: Optional[str] = None
     firstSegUrl: Optional[str] = None
     drm: Optional[DrmInfo] = None

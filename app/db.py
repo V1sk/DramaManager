@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS episodes (
   key_b64          TEXT,
   iv_hex           TEXT,
   cover_url        TEXT,
+  width            INTEGER,
+  height           INTEGER,
   source_filename  TEXT,
   error_message    TEXT,
   created_at       TEXT    NOT NULL,
@@ -39,6 +41,13 @@ def _connect(db_path: Path = None) -> sqlite3.Connection:
 def init_db() -> None:
     with _connect() as conn:
         conn.executescript(_SCHEMA)
+        # 老库（升级前不含 width / height 列）幂等加列。SQLite 没有 ADD COLUMN IF
+        # NOT EXISTS，捕 OperationalError 静默通过即可。
+        for col in ("width", "height"):
+            try:
+                conn.execute(f"ALTER TABLE episodes ADD COLUMN {col} INTEGER")
+            except sqlite3.OperationalError:
+                pass
 
 
 def _now_iso() -> str:
@@ -54,10 +63,15 @@ def upsert_pending(
     duration_ms: int,
     cover_url: str,
     source_filename: str,
+    width: int | None = None,
+    height: int | None = None,
 ) -> None:
     """Insert a new pending row, or overwrite an existing (drama_slug, ep_number) row
     in place. On overwrite, created_at is preserved, error_message is cleared, DRM
     fields are cleared, and updated_at is refreshed.
+
+    width / height 是源视频 codec dimension（episode-video-dimensions change 引入）。
+    可空：旧调用方不传时保持 NULL，新上传 handler 会填具体值。
     """
     now = _now_iso()
     with _connect() as conn:
@@ -70,13 +84,13 @@ def upsert_pending(
                 """
                 INSERT INTO episodes (
                   drama_slug, drama_name, ep_number, episode_id, status,
-                  duration_ms, cover_url, source_filename,
+                  duration_ms, cover_url, width, height, source_filename,
                   created_at, updated_at
-                ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     drama_slug, drama_name, ep_number, episode_id,
-                    duration_ms, cover_url, source_filename,
+                    duration_ms, cover_url, width, height, source_filename,
                     now, now,
                 ),
             )
@@ -89,6 +103,8 @@ def upsert_pending(
                   status = 'pending',
                   duration_ms = ?,
                   cover_url = ?,
+                  width = ?,
+                  height = ?,
                   source_filename = ?,
                   play_url = NULL,
                   key_uri = NULL,
@@ -99,7 +115,8 @@ def upsert_pending(
                 WHERE id = ?
                 """,
                 (
-                    drama_name, episode_id, duration_ms, cover_url, source_filename,
+                    drama_name, episode_id, duration_ms, cover_url,
+                    width, height, source_filename,
                     now, existing["id"],
                 ),
             )
@@ -136,6 +153,23 @@ def set_status(
             f"UPDATE episodes SET {', '.join(fields)} WHERE episode_id = ?",
             params,
         )
+
+
+def set_dimensions(episode_id: str, width: int, height: int) -> bool:
+    """回填 width / height（值为正整数）。仅在两列至少一个为 NULL 时更新；返回是否真的写了。
+
+    给一次性回填脚本（`scripts/backfill_video_dimensions.py`）用 —— 不动 status / 不刷
+    updated_at（避免老剧集"被推到剧目录顶端"）。
+    """
+    if width <= 0 or height <= 0:
+        raise ValueError(f"width/height must be positive: {width}x{height}")
+    with _connect() as conn:
+        cur = conn.execute(
+            "UPDATE episodes SET width=?, height=? "
+            "WHERE episode_id=? AND (width IS NULL OR height IS NULL)",
+            (width, height, episode_id),
+        )
+        return (cur.rowcount or 0) > 0
 
 
 def bump_updated_at(drama_slug: str, ep_number: int) -> None:

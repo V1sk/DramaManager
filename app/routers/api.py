@@ -47,6 +47,8 @@ def _row_to_episode_info(row: dict) -> EpisodeInfo:
         playUrl=row["play_url"],
         durationMs=row["duration_ms"],
         coverUrl=row["cover_url"],
+        width=row.get("width"),
+        height=row.get("height"),
         initUrl=f"{media_base}/720p/init-720p.mp4",
         firstSegUrl=f"{media_base}/720p/seg-720p-0.m4s",
         drm=drm,

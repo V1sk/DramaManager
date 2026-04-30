@@ -26,6 +26,16 @@
       "format": "uri-reference",
       "description": "Optional episode cover image URL. Default is a JPEG extracted from the source's first frame; operators may replace it via the management page."
     },
+    "width": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "description": "Source video codec width in pixels (not display dimension; SAR-corrected width is left to the client). May be null for episodes uploaded before this field existed."
+    },
+    "height": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "description": "Source video codec height in pixels (not display dimension). May be null for episodes uploaded before this field existed."
+    },
     "initUrl": {
       "type": ["string", "null"],
       "format": "uri-reference",
@@ -94,6 +104,8 @@
       "playUrl": "https://cdn.example.com/drama/42/ep-1/720p/media-720p.m3u8?token=xyz",
       "durationMs": 120000,
       "coverUrl": "https://cdn.example.com/drama/42/ep-1/cover.jpg",
+      "width": 720,
+      "height": 1280,
       "initUrl": "https://cdn.example.com/drama/42/ep-1/720p/init-720p.mp4?token=xyz",
       "firstSegUrl": "https://cdn.example.com/drama/42/ep-1/720p/seg-720p-0.m4s?token=xyz",
       "drm": {

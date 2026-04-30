@@ -10,7 +10,12 @@ from fastapi.templating import Jinja2Templates
 
 from .. import db
 from ..config import settings
-from ..ffmpeg_utils import FfmpegError, extract_first_frame, probe_duration_ms
+from ..ffmpeg_utils import (
+    FfmpegError,
+    extract_first_frame,
+    probe_duration_ms,
+    probe_video_dimensions,
+)
 from ..queue import Job, enqueue
 
 router = APIRouter()
@@ -90,6 +95,12 @@ async def admin_upload(
         tmp_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=f"ffprobe failed: {e}")
 
+    try:
+        width, height = probe_video_dimensions(tmp_path)
+    except FfmpegError as e:
+        tmp_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=f"ffprobe failed: {e}")
+
     cover_path = episode_dir / "cover.jpg"
     try:
         extract_first_frame(tmp_path, cover_path)
@@ -107,6 +118,8 @@ async def admin_upload(
         duration_ms=duration_ms,
         cover_url=cover_url,
         source_filename=video.filename,
+        width=width,
+        height=height,
     )
 
     await enqueue(
