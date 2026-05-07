@@ -1,0 +1,41 @@
+{% extends "_base.html" %}
+{% block title %}HLS 管理 · 短剧目录{% endblock %}
+
+{% block content %}
+<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+    <h1 style="margin: 0;">短剧目录</h1>
+    <a href="/admin/dramas/new" class="btn btn-success">+ 创建短剧</a>
+</div>
+
+{% if dramas %}
+<div class="cards-grid">
+    {% for d in dramas %}
+    <a class="card-drama" href="/admin/dramas/{{ d.slug|e }}">
+        {% if d.non_clean_count and d.non_clean_count > 0 %}
+        <div class="sync-corner" title="非 clean: {{ d.non_clean_count }}">非 clean: {{ d.non_clean_count }}</div>
+        {% endif %}
+        {% if d.poster_url %}
+        <img class="poster" src="{{ d.poster_url|e }}?t={{ d.latest_ready_updated_at or d.drama_created_at }}" alt="">
+        {% else %}
+        <div class="poster placeholder">无封面</div>
+        {% endif %}
+        <div class="body">
+            <div class="name">{{ d.name|e if d.name else d.slug|e }}</div>
+            <div class="synopsis">{{ d.synopsis_preview|e }}</div>
+            <div class="ep-info">
+                {% if d.ep_count > 0 %}
+                更新到第 {{ d.latest_ep_number }} 集 · 共 {{ d.ep_count }} 集
+                {% else %}
+                暂无已就绪集
+                {% endif %}
+            </div>
+        </div>
+    </a>
+    {% endfor %}
+</div>
+{% else %}
+<div class="cards-empty">
+    <p>暂无短剧。先到 <a href="/admin/languages">语言注册表</a> 添加至少一种语言，再 <a href="/admin/dramas/new">创建第一部短剧</a>。</p>
+</div>
+{% endif %}
+{% endblock %}

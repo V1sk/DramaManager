@@ -1,0 +1,224 @@
+{% extends "_base.html" %}
+{% block title %}创建短剧 · HLS 管理{% endblock %}
+
+{% block content %}
+<nav style="margin-bottom: 16px; font-size: 13px;">
+    <a href="/admin">← 返回首页</a>
+</nav>
+
+<h1>创建短剧</h1>
+<p class="meta">填写以下信息后，操作员会按顺序调用 5 个端点 (创建剧 → 写默认语言简介 → 上传海报 → 关联标签 → 关联演员)。任一步失败时已落库的部分会保留，可在剧详情页继续修复。</p>
+
+<form class="card" id="create-form" enctype="multipart/form-data">
+    <label for="slug">slug</label>
+    <input type="text" id="slug" name="drama_slug" required pattern="^[a-z0-9][a-z0-9-]*$"
+           placeholder="例如 langyabang">
+    <div class="hint">小写字母 / 数字 / 连字符；首字符非连字符</div>
+
+    <label for="default_lang">默认语言</label>
+    <select id="default_lang" name="default_lang" required></select>
+    <div class="hint" id="default_lang_hint" style="color: #888;">从语言注册表选择，默认语言下的简介必填</div>
+
+    <label for="name">剧名（默认语言）</label>
+    <input type="text" id="name" name="drama_name" required maxlength="200" placeholder="例如 琅琊榜">
+
+    <label for="synopsis">简介（默认语言）</label>
+    <textarea id="synopsis" name="synopsis" maxlength="1000" placeholder="可选；后续可在剧详情页编辑"></textarea>
+
+    <label for="poster">海报（默认语言）</label>
+    <input type="file" id="poster" name="poster" accept="image/jpeg,image/png,image/webp">
+    <div class="hint">可选；后续可为其它语言单独上传海报</div>
+
+    <label for="tags">标签</label>
+    <select id="tags" name="tags" multiple style="height: 100px;"></select>
+    <div class="hint">按住 Ctrl/Cmd 多选；先到 <a href="/admin/tags">标签库</a> 添加</div>
+
+    <label for="actors">演员</label>
+    <select id="actors" name="actors" multiple style="height: 100px;"></select>
+    <div class="hint">按住 Ctrl/Cmd 多选；先到 <a href="/admin/actors">演员库</a> 添加</div>
+
+    <div class="actions">
+        <button type="submit" id="submit-btn" class="btn-success">创建短剧</button>
+        <span id="progress-text" style="margin-left: 12px; color: #888; font-size: 12px;"></span>
+    </div>
+</form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadOptions() {
+    const langSel = document.getElementById('default_lang');
+    const tagSel = document.getElementById('tags');
+    const actorSel = document.getElementById('actors');
+    const submitBtn = document.getElementById('submit-btn');
+    const langHint = document.getElementById('default_lang_hint');
+
+    try {
+        const [langs, tags, actors] = await Promise.all([
+            fetch('/api/languages').then(r => r.json()),
+            fetch('/api/tags').then(r => r.json()),
+            fetch('/api/actors').then(r => r.json()),
+        ]);
+
+        langSel.innerHTML = '';
+        if (!langs.length) {
+            langSel.innerHTML = '<option value="">— 无可用语言 —</option>';
+            langSel.disabled = true;
+            submitBtn.disabled = true;
+            langHint.innerHTML = '⚠ 还没有可用语言，先到 <a href="/admin/languages">语言注册表</a> 添加。';
+            langHint.style.color = '#842029';
+        } else {
+            for (const l of langs) {
+                const opt = document.createElement('option');
+                opt.value = l.code;
+                opt.textContent = `${l.display_label} (${l.code})`;
+                langSel.appendChild(opt);
+            }
+        }
+
+        tagSel.innerHTML = '';
+        for (const t of tags) {
+            const opt = document.createElement('option');
+            opt.value = t.slug;
+            opt.textContent = `${t.label} (${t.slug})`;
+            tagSel.appendChild(opt);
+        }
+        actorSel.innerHTML = '';
+        for (const a of actors) {
+            const opt = document.createElement('option');
+            opt.value = a.slug;
+            opt.textContent = `${a.name} (${a.slug})`;
+            actorSel.appendChild(opt);
+        }
+    } catch (e) {
+        flash('加载选项失败: ' + e, 'error');
+    }
+}
+
+document.getElementById('create-form').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const form = ev.target;
+    const btn = document.getElementById('submit-btn');
+    const progress = document.getElementById('progress-text');
+    btn.disabled = true;
+
+    const slug = form.drama_slug.value.trim();
+    const defaultLang = form.default_lang.value;
+    const name = form.drama_name.value.trim();
+    const synopsis = form.synopsis.value.trim();
+    const posterFile = form.poster.files[0] || null;
+    const tagSlugs = Array.from(form.tags.selectedOptions).map(o => o.value);
+    const actorSlugs = Array.from(form.actors.selectedOptions).map(o => o.value);
+
+    if (!slug || !defaultLang || !name) {
+        flash('slug / 默认语言 / 剧名 都不能为空', 'error');
+        btn.disabled = false;
+        return;
+    }
+
+    // Step 1: create drama
+    progress.textContent = '创建剧…';
+    try {
+        const fd = new FormData();
+        fd.append('drama_slug', slug);
+        fd.append('drama_name', name);
+        fd.append('default_lang', defaultLang);
+        const res = await fetch('/admin/dramas', { method: 'POST', body: fd, redirect: 'manual' });
+        if (!(res.type === 'opaqueredirect' || res.ok || res.status === 302)) {
+            // Special case: slug already exists. Offer to navigate to the existing drama
+            // rather than just showing the raw error — this is by far the most common
+            // 409 failure mode (operator hit submit twice, or partial-failure recovery).
+            if (res.status === 409) {
+                const detailUrl = `/admin/dramas/${encodeURIComponent(slug)}`;
+                const useExisting = confirm(
+                    `slug "${slug}" 已存在。\n\n点击"确定"跳转到该剧详情页继续编辑；点击"取消"留在本页换一个 slug。`
+                );
+                if (useExisting) {
+                    window.location.href = detailUrl;
+                } else {
+                    flash(`slug "${slug}" 已存在。换一个 slug，或先到 ${detailUrl} 删除/编辑现有剧。`, 'warn');
+                    btn.disabled = false;
+                    progress.textContent = '';
+                }
+                return;
+            }
+            const txt = await res.text();
+            flash(`创建剧失败 (${res.status}): ${txt}`, 'error');
+            btn.disabled = false;
+            progress.textContent = '';
+            return;
+        }
+    } catch (e) {
+        flash('创建剧出错: ' + e, 'error');
+        btn.disabled = false;
+        progress.textContent = '';
+        return;
+    }
+
+    const partialErrors = [];
+
+    // Step 2: synopsis (optional)
+    if (synopsis) {
+        progress.textContent = '写入简介…';
+        try {
+            await fetchJSON(`/admin/dramas/${encodeURIComponent(slug)}/translations/${encodeURIComponent(defaultLang)}`, {
+                method: 'PUT',
+                body: { synopsis: synopsis },
+            });
+        } catch (e) {
+            partialErrors.push('写入简介失败: ' + (e.body && e.body.detail || e));
+        }
+    }
+
+    // Step 3: poster (optional)
+    if (posterFile) {
+        progress.textContent = '上传海报…';
+        try {
+            const fd = new FormData();
+            fd.append('file', posterFile);
+            const res = await fetch(`/admin/dramas/${encodeURIComponent(slug)}/poster?lang=${encodeURIComponent(defaultLang)}`, {
+                method: 'POST', body: fd,
+            });
+            if (!res.ok) {
+                const txt = await res.text();
+                partialErrors.push(`海报上传失败 (${res.status}): ${txt}`);
+            }
+        } catch (e) {
+            partialErrors.push('海报上传出错: ' + e);
+        }
+    }
+
+    // Step 4: tags
+    if (tagSlugs.length) {
+        progress.textContent = '关联标签…';
+        try {
+            await fetchJSON(`/admin/dramas/${encodeURIComponent(slug)}/tags`, {
+                method: 'PUT', body: tagSlugs,
+            });
+        } catch (e) {
+            partialErrors.push('关联标签失败: ' + (e.body && e.body.detail || e));
+        }
+    }
+
+    // Step 5: actors
+    if (actorSlugs.length) {
+        progress.textContent = '关联演员…';
+        try {
+            await fetchJSON(`/admin/dramas/${encodeURIComponent(slug)}/actors`, {
+                method: 'PUT', body: actorSlugs,
+            });
+        } catch (e) {
+            partialErrors.push('关联演员失败: ' + (e.body && e.body.detail || e));
+        }
+    }
+
+    progress.textContent = '完成 → 跳转中';
+    if (partialErrors.length) {
+        sessionStorage.setItem('drama-new-flash', JSON.stringify(partialErrors));
+    }
+    window.location.href = `/admin/dramas/${encodeURIComponent(slug)}`;
+});
+
+loadOptions();
+</script>
+{% endblock %}

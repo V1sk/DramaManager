@@ -15,7 +15,6 @@ log = logging.getLogger("hls.worker")
 class Job:
     episode_id: str
     drama_slug: str
-    drama_name: str
     ep_number: int
     tmp_path: Path
 
@@ -51,10 +50,15 @@ async def _handle_job(job: Job) -> None:
     # 相对路径：写进 m3u8 的 #EXT-X-KEY:URI 是同一个字符串，播放器按 playlist 自身的
     # host 补全；SDK 主动调用也基于同一个 host，和 m3u8 里 verbatim 一致。
     key_uri = f"/drm/{slug}/{ep_dir}/key"
-    play_url = f"/videos/{slug}/{ep_dir}/720p/media-720p.m3u8"
+    # The persisted play_url is informational; api.py derives the actual playUrl
+    # from settings.default_ladder at read time so flipping the env var takes
+    # effect without re-encoding. We still write a sensible value here so
+    # one-off DB inspections don't show NULL.
+    ladder = settings.default_ladder
+    play_url = f"/videos/{slug}/{ep_dir}/{ladder}/media-{ladder}.m3u8"
 
     db.set_status(ep_id, "encoding")
-    log.info("encoding start slug=%s name=%s ep=%s", slug, job.drama_name, ep_id)
+    log.info("encoding start slug=%s ep=%s", slug, ep_id)
 
     rc, stderr_tail = await run_pipeline(
         source=job.tmp_path,
@@ -108,12 +112,12 @@ async def _handle_job(job: Job) -> None:
             key_b64=key_b64,
             iv_hex=iv_hex,
         )
-        log.info("encoding ok slug=%s name=%s ep=%s", slug, job.drama_name, ep_id)
+        log.info("encoding ok slug=%s ep=%s", slug, ep_id)
     else:
         db.set_status(ep_id, "failed", error_message=stderr_tail)
         log.error(
-            "encoding failed slug=%s name=%s ep=%s rc=%s",
-            slug, job.drama_name, ep_id, rc,
+            "encoding failed slug=%s ep=%s rc=%s",
+            slug, ep_id, rc,
         )
 
 

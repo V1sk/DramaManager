@@ -32,9 +32,12 @@ def _reset_app_modules():
 def _seed_ready_row(slug: str, ep: int, *, width=None, height=None) -> None:
     from app import db
     db.init_db()
+    if db.get_language("zh-rCN") is None:
+        db.create_language(code="zh-rCN", display_label="简体中文")
+    if db.get_drama(slug) is None:
+        db.create_drama(slug=slug, name="测试剧", default_lang="zh-rCN")
     db.upsert_pending(
         drama_slug=slug,
-        drama_name="测试剧",
         ep_number=ep,
         episode_id=f"{slug}-ep-{ep}",
         duration_ms=120000,

@@ -1,0 +1,109 @@
+{% extends "_base.html" %}
+{% block title %}语言注册表 · HLS 管理{% endblock %}
+
+{% block content %}
+<h1>语言注册表</h1>
+<p class="meta">这里管理多语言内容（剧名、简介、标签、演员、字幕等）可用的语言代码。每种语言用 BCP-47 / Android 资源代码（如 <code>zh-rCN</code>、<code>en</code>、<code>ja-JP</code>）标识。下游剧/标签/演员的多语言字段都引用这些代码。</p>
+
+<h2>① 添加语言</h2>
+<form class="card" id="create-form">
+    <label for="code">代码</label>
+    <input type="text" id="code" name="code" required pattern="^[a-z]{2,3}(-[A-Za-z0-9]{2,8})?$" placeholder="例如 zh-rCN / en / ja-JP">
+    <div class="hint">BCP-47 风格，区分大小写</div>
+    <label for="display_label">显示名</label>
+    <input type="text" id="display_label" name="display_label" required maxlength="100" placeholder="例如 简体中文 / English / 日本語">
+    <div class="actions">
+        <button type="submit" id="create-btn" class="btn-success">添加</button>
+    </div>
+</form>
+
+<h2>② 当前语言</h2>
+<table>
+    <thead><tr><th>代码</th><th>显示名</th><th>状态</th><th>添加时间</th><th>更新时间</th><th>操作</th></tr></thead>
+    <tbody id="langs-body"><tr><td colspan="6" class="meta">加载中…</td></tr></tbody>
+</table>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const $body = document.getElementById('langs-body');
+
+function render(rows) {
+    if (!rows.length) {
+        $body.innerHTML = '<tr><td colspan="6" class="meta">暂无语言记录，使用上方表单添加。</td></tr>';
+        return;
+    }
+    $body.innerHTML = rows.map(r => `<tr>
+        <td class="mono">${escapeHtml(r.code)}</td>
+        <td>${escapeHtml(r.display_label)}</td>
+        <td>${r.is_active ? '<span class="badge active">active</span>' : '<span class="badge inactive">inactive</span>'}</td>
+        <td class="meta">${fmtTime(r.created_at)}</td>
+        <td class="meta">${fmtTime(r.updated_at)}</td>
+        <td class="actions-col">
+            <button class="btn btn-sm btn-ghost" data-action="toggle" data-code="${escapeHtml(r.code)}" data-active="${r.is_active ? 1 : 0}">${r.is_active ? '停用' : '启用'}</button>
+            <button class="btn btn-sm btn-danger" data-action="delete" data-code="${escapeHtml(r.code)}">删除</button>
+        </td>
+    </tr>`).join('');
+}
+
+async function refresh() {
+    try {
+        const res = await fetch('/admin/languages.json');
+        render(await res.json());
+    } catch (e) {
+        $body.innerHTML = `<tr><td colspan="6" class="meta">加载失败：${escapeHtml(e)}</td></tr>`;
+    }
+}
+
+$body.addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('[data-action]');
+    if (!btn) return;
+    const code = btn.dataset.code;
+    if (btn.dataset.action === 'toggle') {
+        const newActive = btn.dataset.active !== '1';
+        btn.disabled = true;
+        try {
+            const res = await fetch(`/admin/languages/${encodeURIComponent(code)}`, {
+                method: 'PATCH', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ is_active: newActive }),
+            });
+            if (!res.ok) { flash(`切换失败 (${res.status}): ${await res.text()}`, 'error'); btn.disabled = false; return; }
+            await refresh();
+        } catch (e) { flash('切换出错: ' + e, 'error'); btn.disabled = false; }
+    } else if (btn.dataset.action === 'delete') {
+        if (!confirm(`确定删除语言 "${code}"？`)) return;
+        btn.disabled = true;
+        try {
+            const res = await fetch(`/admin/languages/${encodeURIComponent(code)}`, { method: 'DELETE' });
+            if (res.status === 204) { await refresh(); return; }
+            if (res.status === 409) {
+                let body; try { body = await res.json(); } catch (_) { body = {detail: await res.text()}; }
+                const detail = body.detail || body;
+                flash(`无法删除：剧引用 ${detail.dramas ?? '?'} 条；翻译引用 ${detail.translations ?? '?'} 条`, 'error');
+                btn.disabled = false; return;
+            }
+            flash(`删除失败 (${res.status}): ${await res.text()}`, 'error');
+            btn.disabled = false;
+        } catch (e) { flash('删除出错: ' + e, 'error'); btn.disabled = false; }
+    }
+});
+
+document.getElementById('create-form').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const form = ev.target;
+    const btn = document.getElementById('create-btn');
+    btn.disabled = true;
+    try {
+        const res = await fetch('/admin/languages', { method: 'POST', body: new FormData(form), redirect: 'manual' });
+        if (res.type === 'opaqueredirect' || res.ok || res.status === 302) {
+            form.reset(); await refresh();
+        } else {
+            flash(`添加失败 (${res.status}): ${await res.text()}`, 'error');
+        }
+    } catch (e) { flash('添加出错: ' + e, 'error'); }
+    finally { btn.disabled = false; }
+});
+
+refresh();
+</script>
+{% endblock %}

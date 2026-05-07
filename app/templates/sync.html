@@ -1,0 +1,194 @@
+{% extends "_base.html" %}
+
+{% block title %}同步管理 — HLS 管理{% endblock %}
+
+{% block content %}
+<h1>业务服务器同步</h1>
+
+{% if not sync_enabled %}
+  <div class="flash warn">
+    业务服务器同步未启用。请设置 <code>BUSINESS_SYNC_BASE_URL</code> 与 <code>BUSINESS_SYNC_API_KEY</code> 环境变量后重启服务。
+  </div>
+{% endif %}
+
+<p class="meta">
+  本页列出全部 <strong>非 clean</strong> 的剧集与剧。"同步整部剧"会把剧元数据 + 该剧下全部 dirty/pending_delete 集一并入队。
+</p>
+
+<div style="margin-bottom: 16px;">
+  <button id="btn-sync-all" class="btn btn-primary" {% if not sync_enabled or (dramas|length == 0 and episodes|length == 0) %}disabled{% endif %}>
+    [同步全部]
+  </button>
+  <span class="meta" style="margin-left: 12px;">
+    剧 {{ dramas|length }} 部，集 {{ episodes|length }} 条
+  </span>
+</div>
+
+<h2>剧 ({{ dramas|length }})</h2>
+{% if dramas %}
+<table>
+  <thead>
+    <tr>
+      <th>剧</th>
+      <th>状态</th>
+      <th>last_synced_at</th>
+      <th>错误</th>
+      <th class="actions-col">操作</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for d in dramas %}
+    <tr data-slug="{{ d.slug }}">
+      <td>
+        <a href="/admin/dramas/{{ d.slug }}">{{ d.name or d.slug }}</a>
+        <div class="meta mono">{{ d.slug }}</div>
+      </td>
+      <td><span class="sync-badge {{ d.sync_status }}">{{ d.sync_status }}</span></td>
+      <td class="meta">{{ d.last_synced_at or '—' }}</td>
+      <td>
+        {% if d.sync_error %}
+          <details class="error">
+            <summary class="meta">查看错误</summary>
+            <pre>{{ d.sync_error }}</pre>
+          </details>
+        {% else %}—{% endif %}
+      </td>
+      <td class="actions-col">
+        <button class="btn btn-sm btn-primary btn-sync-drama" data-slug="{{ d.slug }}" {% if not sync_enabled %}disabled{% endif %}>
+          [同步整部剧]
+        </button>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="meta">所有剧均为 clean。</p>
+{% endif %}
+
+<h2 style="margin-top: 32px;">集 ({{ episodes|length }})</h2>
+{% if episodes %}
+<table>
+  <thead>
+    <tr>
+      <th>剧 / 集</th>
+      <th>编码状态</th>
+      <th>同步状态</th>
+      <th>last_synced_at</th>
+      <th>错误</th>
+      <th class="actions-col">操作</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for e in episodes %}
+    <tr data-slug="{{ e.drama_slug }}" data-ep="{{ e.ep_number }}">
+      <td>
+        <a href="/admin/dramas/{{ e.drama_slug }}/episodes/{{ e.ep_number }}">
+          {{ e.drama_slug }} / ep-{{ e.ep_number }}
+        </a>
+      </td>
+      <td><span class="badge {{ e.status }}">{{ e.status }}</span></td>
+      <td><span class="sync-badge {{ e.sync_status }}">{{ e.sync_status }}</span></td>
+      <td class="meta">{{ e.last_synced_at or '—' }}</td>
+      <td>
+        {% if e.sync_error %}
+          <details class="error">
+            <summary class="meta">查看错误</summary>
+            <pre>{{ e.sync_error }}</pre>
+          </details>
+        {% else %}—{% endif %}
+      </td>
+      <td class="actions-col">
+        <button class="btn btn-sm btn-primary btn-sync-ep" data-slug="{{ e.drama_slug }}" data-ep="{{ e.ep_number }}" {% if not sync_enabled %}disabled{% endif %}>
+          [同步本集]
+        </button>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="meta">所有集均为 clean。</p>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function syncDrama(slug) {
+  const r = await fetch(`/admin/dramas/${slug}/sync`, {method: 'POST'});
+  const data = await r.json().catch(() => ({}));
+  if (r.status === 503) {
+    alert('同步未启用');
+    return false;
+  }
+  if (!r.ok) {
+    alert(`同步失败: HTTP ${r.status} ${data.detail || ''}`);
+    return false;
+  }
+  return true;
+}
+
+async function syncEpisode(slug, ep) {
+  const r = await fetch(`/admin/episodes/${slug}/${ep}/sync`, {method: 'POST'});
+  const data = await r.json().catch(() => ({}));
+  if (r.status === 503) {
+    alert('同步未启用');
+    return false;
+  }
+  if (r.status === 409) {
+    alert(`需先同步整部剧: ${data.detail || ''}`);
+    return false;
+  }
+  if (!r.ok) {
+    alert(`同步失败: HTTP ${r.status} ${data.detail || ''}`);
+    return false;
+  }
+  return true;
+}
+
+document.querySelectorAll('.btn-sync-drama').forEach(b => {
+  b.addEventListener('click', async () => {
+    b.disabled = true; b.textContent = '入队中…';
+    if (await syncDrama(b.dataset.slug)) {
+      setTimeout(() => location.reload(), 800);
+    } else {
+      b.disabled = false; b.textContent = '[同步整部剧]';
+    }
+  });
+});
+
+document.querySelectorAll('.btn-sync-ep').forEach(b => {
+  b.addEventListener('click', async () => {
+    b.disabled = true; b.textContent = '入队中…';
+    if (await syncEpisode(b.dataset.slug, b.dataset.ep)) {
+      setTimeout(() => location.reload(), 800);
+    } else {
+      b.disabled = false; b.textContent = '[同步本集]';
+    }
+  });
+});
+
+const btnAll = document.getElementById('btn-sync-all');
+if (btnAll) {
+  btnAll.addEventListener('click', async () => {
+    btnAll.disabled = true;
+    btnAll.textContent = '入队中…';
+    for (const tr of document.querySelectorAll('tr[data-slug]')) {
+      const slug = tr.dataset.slug;
+      const ep = tr.dataset.ep;
+      if (ep) await syncEpisode(slug, ep);
+      else await syncDrama(slug);
+    }
+    setTimeout(() => location.reload(), 1500);
+  });
+}
+
+// Auto-refresh while a syncing badge exists.
+function hasSyncing() {
+  return !!document.querySelector('.sync-badge.syncing');
+}
+if (hasSyncing()) {
+  setTimeout(() => location.reload(), 3000);
+}
+</script>
+{% endblock %}

@@ -95,6 +95,35 @@
           "additionalProperties": false
         }
       ]
+    },
+    "subtitles": {
+      "description": "Side-loaded subtitle tracks (one per language). Empty / no subtitles → null. Players attach these to the playback session as text tracks; they are NOT inlined in the HLS playlist.",
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["langCode", "label", "url"],
+            "properties": {
+              "langCode": {
+                "type": "string",
+                "description": "BCP-47-style language code matching a row in the server's languages registry (e.g. zh-rCN, en, ja-JP)."
+              },
+              "label": {
+                "type": "string",
+                "description": "Display label for the subtitle picker, sourced from languages.display_label."
+              },
+              "url": {
+                "type": "string",
+                "format": "uri-reference",
+                "description": "WebVTT file URL. Host-relative when served by the business host (default); future OSS staging-prod separation may move to absolute OSS URLs."
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      ]
     }
   },
   "additionalProperties": false,
@@ -116,7 +145,19 @@
       "fallback": {
         "low": "https://cdn.example.com/drama/42/ep-1/540p/media-540p.m3u8?token=xyz",
         "high": "https://cdn.example.com/drama/42/ep-1/1080p/media-1080p.m3u8?token=xyz"
-      }
+      },
+      "subtitles": [
+        {
+          "langCode": "en",
+          "label": "English",
+          "url": "https://cdn.example.com/drama/42/ep-1/subtitles/en.vtt"
+        },
+        {
+          "langCode": "zh-rCN",
+          "label": "简体中文",
+          "url": "https://cdn.example.com/drama/42/ep-1/subtitles/zh-rCN.vtt"
+        }
+      ]
     },
     {
       "episodeId": "drama-free-ep-1",

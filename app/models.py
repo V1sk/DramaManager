@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -14,6 +14,17 @@ class FallbackPlaylists(BaseModel):
     high: Optional[str] = None
 
 
+class Subtitle(BaseModel):
+    """Side-loaded subtitle track. SDK clients fetch the URL and attach it
+    to the player as a text track at attach time (no `#EXT-X-MEDIA` in the
+    HLS playlist — out-of-band by design).
+    """
+
+    langCode: str
+    label: str
+    url: str
+
+
 class EpisodeInfo(BaseModel):
     episodeId: str
     playUrl: str
@@ -25,6 +36,7 @@ class EpisodeInfo(BaseModel):
     firstSegUrl: Optional[str] = None
     drm: Optional[DrmInfo] = None
     fallback: Optional[FallbackPlaylists] = None
+    subtitles: Optional[List[Subtitle]] = None
 
 
 class DramaSummary(BaseModel):

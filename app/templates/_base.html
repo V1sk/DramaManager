@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>{% block title %}HLS 管理{% endblock %}</title>
+    <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body>
+{% set nav_active = nav_active|default('') %}
+<nav class="topnav">
+    <span class="brand">HLS 管理</span>
+    <a href="/admin"           class="{{ 'active' if nav_active == 'home' }}">首页</a>
+    <a href="/admin/tags"      class="{{ 'active' if nav_active == 'tags' }}">标签</a>
+    <a href="/admin/actors"    class="{{ 'active' if nav_active == 'actors' }}">演员</a>
+    <a href="/admin/languages" class="{{ 'active' if nav_active == 'languages' }}">语言</a>
+    <span class="spacer"></span>
+    {# step 6 (business-server-sync) populates this with "需同步: N" / "已同步" link #}
+    <div id="sync-zone" class="sync-zone"></div>
+</nav>
+
+<div id="flash-zone"></div>
+
+<main>
+{% block content %}{% endblock %}
+</main>
+
+<script src="/static/admin.js"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

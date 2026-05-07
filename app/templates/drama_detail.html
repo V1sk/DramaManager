@@ -1,0 +1,496 @@
+{% extends "_base.html" %}
+{% block title %}{{ drama.translations.get(drama.default_lang, {}).get('name') or drama.slug }} · HLS 管理{% endblock %}
+
+{% block content %}
+{# Server-rendered first paint; client JS later refreshes via /admin/dramas/{slug}/full #}
+{% set default_trans = drama.translations.get(drama.default_lang, {}) %}
+{% set default_name = default_trans.get('name') or drama.slug %}
+{% set default_synopsis = default_trans.get('synopsis') or '' %}
+{% set default_poster = default_trans.get('poster') %}
+
+<nav style="margin-bottom: 16px; font-size: 13px;">
+    <a href="/admin">← 返回首页</a>
+</nav>
+
+<div class="drama-header">
+    <div class="poster-strip">
+        {% if default_poster %}
+        <img id="poster-img" src="{{ default_poster }}?t={{ drama.updated_at }}" alt="">
+        {% else %}
+        <img id="poster-img" src="" alt="" style="display: {{ 'none' if not default_poster else 'block' }};">
+        <div id="poster-placeholder" class="thumb placeholder" style="width: 200px; aspect-ratio: 2/3; height: auto;">无海报</div>
+        {% endif %}
+        <select id="poster-lang">
+            {% for lang_code, _trans in drama.translations.items() %}
+            <option value="{{ lang_code }}" {% if lang_code == drama.default_lang %}selected{% endif %}>{{ lang_code }}{% if lang_code == drama.default_lang %} ★{% endif %}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="info">
+        <h2>
+            {{ default_name }}
+            <span class="meta mono">({{ drama.slug }} · 默认 {{ drama.default_lang }})</span>
+            <span id="drama-sync-badge" class="sync-badge {{ drama.sync_status }}" title="{{ drama.sync_error or '' }}">{{ drama.sync_status }}</span>
+        </h2>
+        <div class="tags-line">
+            标签：
+            {% if drama.tags %}{% for t in drama.tags %}<span class="tag-chip">{{ t.label or t.slug }}</span>{% endfor %}{% else %}<span class="meta">（无）</span>{% endif %}
+        </div>
+        <div class="tags-line">
+            演员：
+            {% if drama.actors %}{{ drama.actors | map(attribute='name') | select | join('、') or '—' }}{% else %}<span class="meta">（无）</span>{% endif %}
+        </div>
+        <div class="synopsis">{{ default_synopsis }}</div>
+        <div class="actions">
+            <button class="btn-primary btn-sm" onclick="togglePanel('translations-panel')">编辑翻译</button>
+            <button class="btn-primary btn-sm" onclick="togglePanel('tags-panel')">编辑标签</button>
+            <button class="btn-primary btn-sm" onclick="togglePanel('actors-panel')">编辑演员</button>
+            <button class="btn-danger btn-sm" id="delete-drama-btn" {% if drama.episodes %}disabled title="先删除全部集数"{% endif %}>删除剧</button>
+            <button class="btn-success btn-sm" id="sync-drama-btn">同步整部剧</button>
+        </div>
+    </div>
+</div>
+
+<div id="translations-panel" class="panel hidden">
+    <h3>翻译编辑</h3>
+    <div id="translations-rows"></div>
+    <div class="add-row">
+        <select id="add-tr-lang"></select>
+        <input id="add-tr-name" placeholder="必填：剧名">
+        <button class="btn-success btn-sm" id="add-tr-btn">添加语言</button>
+    </div>
+    <div style="margin-top: 8px; font-size: 12px; color: #888;">每条翻译可独立保存。删除翻译会清掉该语言的剧名/简介/海报。默认语言不能整体删除（可单独清空海报）。</div>
+</div>
+
+<div id="tags-panel" class="panel hidden">
+    <h3>标签关联</h3>
+    <select id="tags-multi" multiple style="height: 100px; width: 100%;"></select>
+    <div style="margin-top: 8px;">
+        <button class="btn-success btn-sm" id="save-tags-btn">保存标签</button>
+        <span class="meta">按住 Ctrl/Cmd 多选；保存为整体替换</span>
+    </div>
+</div>
+
+<div id="actors-panel" class="panel hidden">
+    <h3>演员关联</h3>
+    <select id="actors-multi" multiple style="height: 100px; width: 100%;"></select>
+    <div style="margin-top: 8px;">
+        <button class="btn-success btn-sm" id="save-actors-btn">保存演员</button>
+        <span class="meta">按住 Ctrl/Cmd 多选；保存为整体替换</span>
+    </div>
+</div>
+
+<h2>集列表</h2>
+<div style="margin-bottom: 8px;">
+    <button class="btn-success btn-sm" id="upload-next-btn">+ 上传下一集</button>
+    <input type="file" id="upload-next-file" accept="video/*" style="display: none;">
+    <span class="meta" style="margin-left: 12px;">服务器自动分配下一个集号 (MAX+1)</span>
+</div>
+
+<table id="episodes-table">
+    <thead>
+        <tr><th>集</th><th>封面</th><th>状态</th><th>时长</th><th>更新时间</th><th>同步</th><th>操作</th></tr>
+    </thead>
+    <tbody id="episodes-body"></tbody>
+</table>
+
+<script id="initial-data" type="application/json">{{ drama|tojson }}</script>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let DRAMA = JSON.parse(document.getElementById('initial-data').textContent);
+const SLUG = DRAMA.slug;
+
+function togglePanel(id) {
+    const el = document.getElementById(id);
+    el.classList.toggle('hidden');
+}
+
+function renderEpisodes() {
+    const tbody = document.getElementById('episodes-body');
+    if (!DRAMA.episodes || DRAMA.episodes.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" class="meta">还没有上传任何集，点击上方"上传下一集"开始。</td></tr>';
+        return;
+    }
+    // Hide pending_delete rows from the table (they show on /admin/sync only).
+    const visible = DRAMA.episodes.filter(e => e.sync_status !== 'pending_delete');
+    if (visible.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" class="meta">还没有可见的集，点击上方"上传下一集"开始（pending_delete 集不显示在此）。</td></tr>';
+        return;
+    }
+    tbody.innerHTML = visible.map(e => {
+        const cover = e.cover_url
+            ? `<img class="thumb" src="${e.cover_url}?t=${e.updated_at}" alt="">`
+            : '<div class="thumb placeholder">无</div>';
+        const errBlock = e.status === 'failed' && e.error_message
+            ? `<details class="error"><summary>查看错误</summary><pre>${escapeHtml(e.error_message)}</pre></details>`
+            : '';
+        const delDisabled = e.status === 'encoding' ? 'disabled title="编码中不能删除"' : '';
+        const syncStatus = e.sync_status || 'dirty';
+        const syncErr = e.sync_error || '';
+        const syncTitle = syncErr ? ` title="${escapeHtml(syncErr)}"` : '';
+        const syncBtnDisabled = (syncStatus === 'clean') ? 'disabled' : '';
+        return `<tr data-ep="${e.ep_number}">
+            <td>${e.ep_number}</td>
+            <td>${cover}</td>
+            <td><span class="badge ${e.status}">${e.status}</span>${errBlock}</td>
+            <td>${fmtDuration(e.duration_ms)}</td>
+            <td class="meta">${fmtTime(e.updated_at)}</td>
+            <td><span class="sync-badge ${syncStatus}"${syncTitle}>${syncStatus}</span></td>
+            <td class="actions-col">
+                <a href="/admin/dramas/${encodeURIComponent(SLUG)}/episodes/${e.ep_number}" class="btn btn-sm btn-primary">详情</a>
+                <button class="btn btn-sm btn-success" data-action="sync-ep" data-ep="${e.ep_number}" ${syncBtnDisabled}>同步</button>
+                <button class="btn btn-sm btn-danger" data-action="delete-ep" data-ep="${e.ep_number}" ${delDisabled}>删除</button>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+function renderTagsPanel() {
+    const sel = document.getElementById('tags-multi');
+    return fetch('/api/tags').then(r => r.json()).then(allTags => {
+        sel.innerHTML = '';
+        const used = new Set(DRAMA.tags.map(t => t.slug));
+        for (const t of allTags) {
+            const opt = document.createElement('option');
+            opt.value = t.slug;
+            opt.textContent = `${t.label} (${t.slug})`;
+            if (used.has(t.slug)) opt.selected = true;
+            sel.appendChild(opt);
+        }
+    });
+}
+
+function renderActorsPanel() {
+    const sel = document.getElementById('actors-multi');
+    return fetch('/api/actors').then(r => r.json()).then(allActors => {
+        sel.innerHTML = '';
+        const used = new Set(DRAMA.actors.map(a => a.slug));
+        for (const a of allActors) {
+            const opt = document.createElement('option');
+            opt.value = a.slug;
+            opt.textContent = `${a.name} (${a.slug})`;
+            if (used.has(a.slug)) opt.selected = true;
+            sel.appendChild(opt);
+        }
+    });
+}
+
+function renderTranslationsPanel() {
+    const wrap = document.getElementById('translations-rows');
+    const langs = Object.keys(DRAMA.translations || {}).sort();
+    if (!langs.length) {
+        wrap.innerHTML = '<div class="meta">尚无翻译。下方添加新语言。</div>';
+    } else {
+        wrap.innerHTML = langs.map(lang => {
+            const t = DRAMA.translations[lang];
+            const isDefault = lang === DRAMA.default_lang;
+            const posterRow = t.poster
+                ? `<img class="thumb" src="${t.poster}" alt="" style="width: 60px; height: auto;">`
+                : '<span class="meta">无海报</span>';
+            return `<div class="panel" style="margin-bottom: 8px;" data-lang="${lang}">
+                <div style="font-weight: 600;">${lang}${isDefault ? ' ★' : ''}</div>
+                <div class="row">
+                    <span>名称</span>
+                    <input class="tr-name" value="${escapeHtml(t.name || '')}" placeholder="必填">
+                    <button class="btn btn-sm btn-success" data-action="save-tr">保存</button>
+                    <button class="btn btn-sm btn-danger" data-action="del-tr" ${isDefault ? 'disabled title="默认语言不可整体删除"' : ''}>删除该语言</button>
+                </div>
+                <div class="row">
+                    <span>简介</span>
+                    <textarea class="tr-syn" placeholder="可留空">${escapeHtml(t.synopsis || '')}</textarea>
+                    <span></span>
+                    <span></span>
+                </div>
+                <div class="row">
+                    <span>海报</span>
+                    ${posterRow}
+                    <input type="file" class="poster-file" accept="image/jpeg,image/png,image/webp">
+                    <button class="btn btn-sm btn-primary" data-action="upload-poster">上传</button>
+                </div>
+                ${t.poster ? `<div class="row"><span></span><span></span><span></span><button class="btn btn-sm btn-danger" data-action="del-poster">删海报</button></div>` : ''}
+            </div>`;
+        }).join('');
+    }
+    // populate add-language select with codes not yet used
+    return fetch('/api/languages').then(r => r.json()).then(allLangs => {
+        const sel = document.getElementById('add-tr-lang');
+        const used = new Set(langs);
+        sel.innerHTML = allLangs
+            .filter(l => !used.has(l.code))
+            .map(l => `<option value="${l.code}">${escapeHtml(l.display_label)} (${l.code})</option>`)
+            .join('');
+    });
+}
+
+async function refreshDrama() {
+    try {
+        const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/full`);
+        DRAMA = await res.json();
+        renderEpisodes();
+        const badge = document.getElementById('drama-sync-badge');
+        if (badge) {
+            badge.className = 'sync-badge ' + (DRAMA.sync_status || 'dirty');
+            badge.textContent = DRAMA.sync_status || 'dirty';
+            badge.title = DRAMA.sync_error || '';
+        }
+        // Other panels rebuild on toggle; tag/actor lists only when their panel is open
+    } catch (e) {
+        console.error('refresh failed', e);
+    }
+}
+
+document.getElementById('episodes-body').addEventListener('click', async (ev) => {
+    const delBtn = ev.target.closest('[data-action="delete-ep"]');
+    if (delBtn) {
+        const ep = delBtn.dataset.ep;
+        if (!confirm(`确定删除第 ${ep} 集？此操作不可恢复。`)) return;
+        delBtn.disabled = true;
+        try {
+            const res = await fetch(`/admin/episodes/${encodeURIComponent(SLUG)}/${ep}`, { method: 'DELETE' });
+            if (!res.ok) {
+                flash(`删除失败 (${res.status}): ${await res.text()}`, 'error');
+                delBtn.disabled = false;
+                return;
+            }
+            const body = await res.json().catch(() => ({}));
+            if (body.pending_sync) {
+                flash(`第 ${ep} 集已标记为待同步删除，下次同步时通知业务服务器删除。`, 'info');
+            }
+            await refreshDrama();
+        } catch (e) {
+            flash('删除出错: ' + e, 'error');
+            delBtn.disabled = false;
+        }
+        return;
+    }
+    const syncBtn = ev.target.closest('[data-action="sync-ep"]');
+    if (syncBtn) {
+        const ep = syncBtn.dataset.ep;
+        syncBtn.disabled = true; syncBtn.textContent = '入队中…';
+        try {
+            const res = await fetch(`/admin/episodes/${encodeURIComponent(SLUG)}/${ep}/sync`, { method: 'POST' });
+            const body = await res.json().catch(() => ({}));
+            if (res.status === 503) { flash('业务服务器同步未启用', 'warn'); syncBtn.disabled = false; syncBtn.textContent = '同步'; return; }
+            if (res.status === 409) { flash(body.detail || '需先同步整部剧', 'warn'); syncBtn.disabled = false; syncBtn.textContent = '同步'; return; }
+            if (!res.ok)       { flash(`同步失败 (${res.status}): ${body.detail || ''}`, 'error'); syncBtn.disabled = false; syncBtn.textContent = '同步'; return; }
+            await refreshDrama();
+        } catch (e) {
+            flash('同步出错: ' + e, 'error');
+            syncBtn.disabled = false; syncBtn.textContent = '同步';
+        }
+    }
+});
+
+document.getElementById('upload-next-btn').addEventListener('click', () => {
+    document.getElementById('upload-next-file').click();
+});
+document.getElementById('upload-next-file').addEventListener('change', async (ev) => {
+    const file = ev.target.files[0];
+    if (!file) return;
+    const btn = document.getElementById('upload-next-btn');
+    btn.disabled = true;
+    btn.textContent = '上传中…';
+    const fd = new FormData();
+    fd.append('video', file);
+    try {
+        const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/episodes`, { method: 'POST', body: fd, redirect: 'manual' });
+        if (res.type === 'opaqueredirect' || res.ok || res.status === 302) {
+            await refreshDrama();
+        } else {
+            flash(`上传失败 (${res.status}): ${await res.text()}`, 'error');
+        }
+    } catch (e) {
+        flash('上传出错: ' + e, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '+ 上传下一集';
+        ev.target.value = '';
+    }
+});
+
+// Translation panel actions
+document.getElementById('translations-panel').addEventListener('click', async (ev) => {
+    const action = ev.target.dataset.action;
+    if (!action) return;
+    const langPanel = ev.target.closest('[data-lang]');
+    const lang = langPanel?.dataset.lang;
+    if (action === 'save-tr') {
+        const name = langPanel.querySelector('.tr-name').value.trim();
+        const syn = langPanel.querySelector('.tr-syn').value.trim();
+        const body = {};
+        if (name) body.name = name;
+        if (syn) body.synopsis = syn;
+        if (!Object.keys(body).length) { flash('至少填写名称或简介', 'warn'); return; }
+        try {
+            await fetchJSON(`/admin/dramas/${encodeURIComponent(SLUG)}/translations/${encodeURIComponent(lang)}`, { method: 'PUT', body });
+            await refreshDrama();
+            await renderTranslationsPanel();
+        } catch (e) {
+            flash(`保存失败: ${e.body?.detail || e}`, 'error');
+        }
+    } else if (action === 'del-tr') {
+        if (!confirm(`删除 "${lang}" 的全部翻译（含海报文件）？`)) return;
+        try {
+            const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/translations/${encodeURIComponent(lang)}`, { method: 'DELETE' });
+            if (!res.ok) { flash(`删除失败 (${res.status})`, 'error'); return; }
+            await refreshDrama();
+            await renderTranslationsPanel();
+        } catch (e) { flash('删除出错: ' + e, 'error'); }
+    } else if (action === 'upload-poster') {
+        const f = langPanel.querySelector('.poster-file').files[0];
+        if (!f) { flash('请先选择海报文件', 'warn'); return; }
+        const fd = new FormData();
+        fd.append('file', f);
+        try {
+            const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/poster?lang=${encodeURIComponent(lang)}`, { method: 'POST', body: fd });
+            if (!res.ok) { flash(`上传失败 (${res.status}): ${await res.text()}`, 'error'); return; }
+            await refreshDrama();
+            await renderTranslationsPanel();
+            // refresh poster strip if this is the currently shown lang
+            if (lang === document.getElementById('poster-lang').value) updatePosterImg();
+        } catch (e) { flash('上传出错: ' + e, 'error'); }
+    } else if (action === 'del-poster') {
+        if (!confirm(`删除 "${lang}" 的海报？`)) return;
+        try {
+            const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/poster?lang=${encodeURIComponent(lang)}`, { method: 'DELETE' });
+            if (res.status !== 204) { flash(`删除失败 (${res.status})`, 'error'); return; }
+            await refreshDrama();
+            await renderTranslationsPanel();
+            if (lang === document.getElementById('poster-lang').value) updatePosterImg();
+        } catch (e) { flash('删除出错: ' + e, 'error'); }
+    }
+});
+
+document.getElementById('add-tr-btn').addEventListener('click', async () => {
+    const lang = document.getElementById('add-tr-lang').value;
+    const name = document.getElementById('add-tr-name').value.trim();
+    if (!lang) { flash('请选择语言', 'warn'); return; }
+    if (!name) { flash('剧名是必填项（新语言）', 'warn'); return; }
+    try {
+        await fetchJSON(`/admin/dramas/${encodeURIComponent(SLUG)}/translations/${encodeURIComponent(lang)}`, { method: 'PUT', body: { name } });
+        document.getElementById('add-tr-name').value = '';
+        await refreshDrama();
+        await renderTranslationsPanel();
+    } catch (e) {
+        flash(`添加失败: ${e.body?.detail || e}`, 'error');
+    }
+});
+
+document.getElementById('save-tags-btn').addEventListener('click', async () => {
+    const slugs = Array.from(document.getElementById('tags-multi').selectedOptions).map(o => o.value);
+    try {
+        await fetchJSON(`/admin/dramas/${encodeURIComponent(SLUG)}/tags`, { method: 'PUT', body: slugs });
+        flash('标签已保存', 'info');
+        await refreshDrama();
+        location.reload();  // simplest way to refresh the header tags chips
+    } catch (e) { flash(`保存失败: ${e.body?.detail || e}`, 'error'); }
+});
+
+document.getElementById('save-actors-btn').addEventListener('click', async () => {
+    const slugs = Array.from(document.getElementById('actors-multi').selectedOptions).map(o => o.value);
+    try {
+        await fetchJSON(`/admin/dramas/${encodeURIComponent(SLUG)}/actors`, { method: 'PUT', body: slugs });
+        flash('演员已保存', 'info');
+        await refreshDrama();
+        location.reload();
+    } catch (e) { flash(`保存失败: ${e.body?.detail || e}`, 'error'); }
+});
+
+document.getElementById('delete-drama-btn').addEventListener('click', async () => {
+    if (!confirm(`确定删除整部剧 "${SLUG}"？所有翻译、海报、关联标签/演员都会被清掉。`)) return;
+    try {
+        const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}`, { method: 'DELETE' });
+        if (!res.ok) { flash(`删除失败 (${res.status}): ${await res.text()}`, 'error'); return; }
+        const body = await res.json().catch(() => ({}));
+        if (body.pending_sync) {
+            flash('剧已标记为待同步删除；前往 /admin/sync 触发同步以彻底删除。', 'info');
+            setTimeout(() => { window.location.href = '/admin/sync'; }, 1500);
+        } else {
+            window.location.href = '/admin';
+        }
+    } catch (e) { flash('删除出错: ' + e, 'error'); }
+});
+
+document.getElementById('sync-drama-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('sync-drama-btn');
+    btn.disabled = true; btn.textContent = '入队中…';
+    try {
+        const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/sync`, { method: 'POST' });
+        const body = await res.json().catch(() => ({}));
+        if (res.status === 503) { flash('业务服务器同步未启用', 'warn'); }
+        else if (!res.ok) { flash(`同步失败 (${res.status}): ${body.detail || ''}`, 'error'); }
+        else if (body.noop) { flash('该剧已 clean 且无 dirty 子集，无需同步', 'info'); }
+        else {
+            const n = (body.child_episodes_to_sync || []).length;
+            flash(`已入队同步剧 + ${n} 集`, 'info');
+            setTimeout(refreshDrama, 800);
+        }
+    } catch (e) { flash('同步出错: ' + e, 'error'); }
+    finally {
+        btn.disabled = false; btn.textContent = '同步整部剧';
+    }
+});
+
+// poster strip language switcher
+document.getElementById('poster-lang').addEventListener('change', updatePosterImg);
+function updatePosterImg() {
+    const lang = document.getElementById('poster-lang').value;
+    const url = DRAMA.translations?.[lang]?.poster;
+    const img = document.getElementById('poster-img');
+    const ph = document.getElementById('poster-placeholder');
+    if (url) {
+        img.src = url + '?t=' + Date.now();
+        img.style.display = 'block';
+        if (ph) ph.style.display = 'none';
+    } else {
+        img.style.display = 'none';
+        if (ph) ph.style.display = 'flex';
+    }
+}
+
+// Initial render of episodes table from server-rendered data
+renderEpisodes();
+// Lazy-load tags/actors panels on first toggle (saves a fetch on page load)
+document.querySelectorAll('button[onclick*="translations-panel"]')[0]?.addEventListener('click', () => {
+    if (!document.getElementById('translations-rows').dataset.loaded) {
+        renderTranslationsPanel().then(() => {
+            document.getElementById('translations-rows').dataset.loaded = '1';
+        });
+    }
+});
+document.querySelectorAll('button[onclick*="tags-panel"]')[0]?.addEventListener('click', () => {
+    if (!document.getElementById('tags-multi').dataset.loaded) {
+        renderTagsPanel().then(() => {
+            document.getElementById('tags-multi').dataset.loaded = '1';
+        });
+    }
+});
+document.querySelectorAll('button[onclick*="actors-panel"]')[0]?.addEventListener('click', () => {
+    if (!document.getElementById('actors-multi').dataset.loaded) {
+        renderActorsPanel().then(() => {
+            document.getElementById('actors-multi').dataset.loaded = '1';
+        });
+    }
+});
+
+// Periodic refresh while any episode is in transient pipeline OR sync status
+setInterval(() => {
+    const transient = (DRAMA.episodes || []).some(e =>
+        e.status === 'pending' || e.status === 'encoding' || e.sync_status === 'syncing'
+    ) || DRAMA.sync_status === 'syncing';
+    if (transient) refreshDrama();
+}, 5000);
+
+// Show partial-failure flash from the create-drama redirect
+const flashJson = sessionStorage.getItem('drama-new-flash');
+if (flashJson) {
+    sessionStorage.removeItem('drama-new-flash');
+    try {
+        const errs = JSON.parse(flashJson);
+        for (const e of errs) flash(e, 'warn');
+    } catch (_) {}
+}
+</script>
+{% endblock %}

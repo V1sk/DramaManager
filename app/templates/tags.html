@@ -1,0 +1,193 @@
+{% extends "_base.html" %}
+{% block title %}标签库 · HLS 管理{% endblock %}
+
+{% block content %}
+<h1>标签库</h1>
+<p class="meta">标签的多语言标签（如 <code>都市</code> / <code>Urban</code>）通过 <code>translations</code> 表存储；每个标签必须有一个默认语言。</p>
+
+<h2>① 添加标签</h2>
+<form class="card" id="create-form">
+    <label for="slug">slug</label>
+    <input type="text" id="slug" name="slug" required pattern="^[a-z0-9][a-z0-9-]*$" placeholder="例如 urban / sci-fi / wuxia">
+    <div class="hint">英文/数字/连字符；后续不可改名</div>
+    <label for="default_lang">默认语言</label>
+    <select id="default_lang" name="default_lang" required></select>
+    <label for="label">默认 label</label>
+    <input type="text" id="label" name="label" required maxlength="100" placeholder="例如 都市 / Urban">
+    <div class="actions">
+        <button type="submit" id="create-btn" class="btn-success">添加标签</button>
+    </div>
+</form>
+
+<h2>② 当前标签</h2>
+<table>
+    <thead><tr><th>slug</th><th>默认 label</th><th>语言覆盖</th><th>引用剧数</th><th>操作</th></tr></thead>
+    <tbody id="tags-body"><tr><td colspan="5" class="meta">加载中…</td></tr></tbody>
+</table>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const $body = document.getElementById('tags-body');
+let LANGUAGES = [];
+
+async function loadLanguages() {
+    const sel = document.getElementById('default_lang');
+    const btn = document.getElementById('create-btn');
+    try {
+        LANGUAGES = await (await fetch('/api/languages')).json();
+    } catch (e) { LANGUAGES = []; }
+    sel.innerHTML = '';
+    if (!LANGUAGES.length) {
+        sel.innerHTML = '<option value="">— 无可用语言 —</option>';
+        sel.disabled = true; btn.disabled = true;
+    } else {
+        for (const l of LANGUAGES) {
+            const opt = document.createElement('option');
+            opt.value = l.code; opt.textContent = `${l.display_label} (${l.code})`;
+            sel.appendChild(opt);
+        }
+        sel.disabled = false; btn.disabled = false;
+    }
+}
+
+function langChips(row) {
+    return (row.available_langs || []).map(c => {
+        const cls = c === row.default_lang ? 'lang-chip default' : 'lang-chip';
+        return `<span class="${cls}">${escapeHtml(c)}</span>`;
+    }).join('');
+}
+
+function render(rows) {
+    if (!rows.length) {
+        $body.innerHTML = '<tr><td colspan="5" class="meta">暂无标签。</td></tr>';
+        return;
+    }
+    $body.innerHTML = rows.map(r => `<tr data-slug="${escapeHtml(r.slug)}">
+        <td class="mono">${escapeHtml(r.slug)}</td>
+        <td>${escapeHtml(r.default_label || '(缺失)')}</td>
+        <td>${langChips(r)}</td>
+        <td>${r.usage_count}</td>
+        <td class="actions-col">
+            <button class="btn btn-sm btn-primary" data-action="manage" data-slug="${escapeHtml(r.slug)}">管理翻译</button>
+            <button class="btn btn-sm btn-danger" data-action="delete" data-slug="${escapeHtml(r.slug)}">删除</button>
+        </td>
+    </tr>
+    <tr class="panel-row" data-slug="${escapeHtml(r.slug)}" style="display:none">
+        <td colspan="5"><div class="panel" data-slug="${escapeHtml(r.slug)}"></div></td>
+    </tr>`).join('');
+}
+
+function renderPanel(slug, row) {
+    const panel = document.querySelector(`.panel[data-slug="${slug}"]`);
+    if (!panel) return;
+    const langs = row.available_langs || [];
+    let html = '';
+    for (const code of langs) {
+        const isDefault = code === row.default_lang;
+        html += `<div class="row" data-lang="${escapeHtml(code)}">
+            <span class="mono">${escapeHtml(code)}${isDefault ? ' ★' : ''}</span>
+            <input type="text" class="lang-label" placeholder="(留空读取当前值)">
+            <button class="btn btn-sm btn-success" data-action="save-tr">保存</button>
+            <button class="btn btn-sm btn-danger" data-action="del-tr" ${isDefault ? 'disabled title="默认语言不可删"' : ''}>${isDefault ? '默认' : '删除'}</button>
+        </div>`;
+        if (!isDefault) {
+            html += `<div class="row" data-lang="${escapeHtml(code)}"><span></span><span></span><span></span><button class="btn btn-sm btn-primary" data-action="set-default" data-lang="${escapeHtml(code)}">设为默认</button></div>`;
+        }
+    }
+    const otherLangs = LANGUAGES.filter(l => !langs.includes(l.code));
+    if (otherLangs.length) {
+        const opts = otherLangs.map(l => `<option value="${escapeHtml(l.code)}">${escapeHtml(l.display_label)} (${escapeHtml(l.code)})</option>`).join('');
+        html += `<div class="add-row"><select class="add-lang">${opts}</select><input type="text" class="add-label" placeholder="新语言下的 label"><button class="btn btn-sm btn-success" data-action="add-tr">添加</button></div>`;
+    }
+    panel.innerHTML = html;
+}
+
+let CACHE = [];
+
+async function refresh() {
+    try {
+        CACHE = await (await fetch('/admin/tags.json')).json();
+        render(CACHE);
+    } catch (e) {
+        $body.innerHTML = `<tr><td colspan="5" class="meta">加载失败：${escapeHtml(e)}</td></tr>`;
+    }
+}
+
+$body.addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('[data-action]');
+    if (!btn) return;
+    const action = btn.dataset.action;
+    const slug = btn.dataset.slug || btn.closest('.panel')?.dataset.slug;
+    const lang = btn.closest('.row')?.dataset.lang || btn.dataset.lang;
+
+    if (action === 'manage') {
+        const row = $body.querySelector(`tr.panel-row[data-slug="${slug}"]`);
+        if (!row) return;
+        if (row.style.display === 'none') {
+            const cache = CACHE.find(r => r.slug === slug);
+            if (cache) renderPanel(slug, cache);
+            row.style.display = '';
+        } else {
+            row.style.display = 'none';
+        }
+    } else if (action === 'delete') {
+        if (!confirm(`确定删除标签 "${slug}"？`)) return;
+        btn.disabled = true;
+        try {
+            const res = await fetch(`/admin/tags/${encodeURIComponent(slug)}`, { method: 'DELETE' });
+            if (res.status === 204) { await refresh(); }
+            else flash(`删除失败 (${res.status}): ${await res.text()}`, 'error');
+        } catch (e) { flash('删除出错: ' + e, 'error'); }
+        finally { btn.disabled = false; }
+    } else if (action === 'save-tr') {
+        const label = btn.closest('.row').querySelector('.lang-label').value.trim();
+        if (!label) { flash('label 不能为空（不修改请关闭面板）', 'warn'); return; }
+        try {
+            await fetchJSON(`/admin/tags/${encodeURIComponent(slug)}/translations/${encodeURIComponent(lang)}`, { method: 'PUT', body: { label } });
+            await refresh();
+        } catch (e) { flash(`保存失败: ${e.body?.detail || e}`, 'error'); }
+    } else if (action === 'del-tr') {
+        if (!confirm(`删除标签 "${slug}" 在 "${lang}" 下的翻译？`)) return;
+        try {
+            const res = await fetch(`/admin/tags/${encodeURIComponent(slug)}/translations/${encodeURIComponent(lang)}`, { method: 'DELETE' });
+            if (res.status === 204) await refresh();
+            else if (res.status === 409) flash(`无法删除：${(await res.json()).detail}`, 'error');
+            else flash(`删除失败 (${res.status})`, 'error');
+        } catch (e) { flash('删除出错: ' + e, 'error'); }
+    } else if (action === 'set-default') {
+        try {
+            await fetchJSON(`/admin/tags/${encodeURIComponent(slug)}`, { method: 'PATCH', body: { default_lang: lang } });
+            await refresh();
+        } catch (e) { flash(`切换失败: ${e.body?.detail || e}`, 'error'); }
+    } else if (action === 'add-tr') {
+        const panel = btn.closest('.panel');
+        const lang2 = panel.querySelector('.add-lang').value;
+        const label = panel.querySelector('.add-label').value.trim();
+        if (!label) { flash('label 不能为空', 'warn'); return; }
+        try {
+            await fetchJSON(`/admin/tags/${encodeURIComponent(slug)}/translations/${encodeURIComponent(lang2)}`, { method: 'PUT', body: { label } });
+            await refresh();
+        } catch (e) { flash(`添加失败: ${e.body?.detail || e}`, 'error'); }
+    }
+});
+
+document.getElementById('create-form').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const form = ev.target;
+    const btn = document.getElementById('create-btn');
+    btn.disabled = true;
+    try {
+        const res = await fetch('/admin/tags', { method: 'POST', body: new FormData(form), redirect: 'manual' });
+        if (res.type === 'opaqueredirect' || res.ok || res.status === 302) {
+            form.reset(); await loadLanguages(); await refresh();
+        } else {
+            flash(`添加失败 (${res.status}): ${await res.text()}`, 'error');
+        }
+    } catch (e) { flash('添加出错: ' + e, 'error'); }
+    finally { btn.disabled = false; }
+});
+
+(async () => { await loadLanguages(); await refresh(); })();
+</script>
+{% endblock %}

@@ -9,8 +9,15 @@
 import re
 from pathlib import Path
 
+from . import oss_upload
 from .config import settings
-from .oss_upload import oss_public_base_url, ossBaseDir, upload_file
+from .oss_upload import (
+    OSS_PROD_PREFIX,
+    OSS_STAGING_PREFIX,
+    oss_prod_public_base_url,
+    oss_staging_public_base_url,
+    upload_file,
+)
 
 
 class PublishError(Exception):
@@ -87,7 +94,7 @@ def publish_ladder(slug: str, ep_dir: str, ladder: str) -> None:
     if not seg_locals:
         raise PublishError(f"no segments matched seg-{ladder}-*.m4s in {rung_dir}")
 
-    remote_dir = f"{ossBaseDir}/{slug}/{ep_dir}/{ladder}"  # 不以 / 开头
+    remote_dir = f"{OSS_STAGING_PREFIX}/{slug}/{ep_dir}/{ladder}"  # Drama/staging/...
     files_to_upload: list[Path] = [init_local, *seg_locals]
     for local in files_to_upload:
         oss_path = f"{remote_dir}/{local.name}"
@@ -109,10 +116,79 @@ def publish_ladder(slug: str, ep_dir: str, ladder: str) -> None:
         text = pl_local.read_text()
         rewritten = rewrite_playlist(
             text,
-            f"{oss_public_base_url}/{slug}/{ep_dir}/{ladder}",
+            f"{oss_staging_public_base_url}/{slug}/{ep_dir}/{ladder}",
         )
         pl_local.write_text(rewritten)
     except Exception as e:  # noqa: BLE001
         raise PublishError(
             f"m3u8 rewrite failed for {ladder}: {e}"
         ) from e
+
+
+def publish_ladder_to_prod(slug: str, ep_dir: str, ladder: str) -> str:
+    """把一档 ladder 的 staging OSS 对象服务端拷到 prod 前缀，并返回 prod-flavored m3u8 文本。
+
+    入参语义：
+      `slug` — drama 目录名；`ep_dir` 形如 `ep-3`；`ladder` 是 `540p`/`720p`/`1080p`。
+
+    幂等：重复调用会覆盖 prod 端对象、返回逐字节相等的 m3u8 文本。
+    若 staging 端没有任何对象 → raise PublishError（说明 publish_ladder 还没跑过）。
+    """
+    src_dir = f"{OSS_STAGING_PREFIX}/{slug}/{ep_dir}/{ladder}"
+    dst_dir = f"{OSS_PROD_PREFIX}/{slug}/{ep_dir}/{ladder}"
+
+    src_keys = oss_upload.list_with_prefix(src_dir + "/")
+    if not src_keys:
+        raise PublishError(
+            f"no staging objects under {src_dir}/; was publish_ladder ever called?"
+        )
+    for src_key in src_keys:
+        if not src_key.endswith((".mp4", ".m4s")):
+            continue  # 防御：只拷媒体对象，忽略 m3u8 / 其他
+        filename = src_key.rsplit("/", 1)[-1]
+        try:
+            oss_upload.copy_object(src_key, f"{dst_dir}/{filename}")
+        except Exception as e:  # noqa: BLE001
+            raise PublishError(
+                f"OSS copy_object failed for {ladder} {filename}: {e}"
+            ) from e
+
+    # 本地 staging m3u8 → 字符串替换得到 prod 版本。staging base 只会出现在
+    # init / segment 行；#EXT-X-KEY:URI="/drm/..." 是相对路径不会命中。
+    local_m3u8 = settings.out_dir / slug / ep_dir / ladder / f"media-{ladder}.m3u8"
+    if not local_m3u8.is_file():
+        raise PublishError(f"missing local playlist: {local_m3u8}")
+    try:
+        text = local_m3u8.read_text()
+    except OSError as e:
+        raise PublishError(f"failed to read local playlist {local_m3u8}: {e}") from e
+    return text.replace(
+        oss_staging_public_base_url + "/",
+        oss_prod_public_base_url + "/",
+    )
+
+
+def unpublish_ladder_from_prod(slug: str, ep_dir: str, ladder: str) -> None:
+    """删 prod 端某档 ladder 下所有对象。无对象 / 部分缺失 → no-op。"""
+    keys = oss_upload.list_with_prefix(
+        f"{OSS_PROD_PREFIX}/{slug}/{ep_dir}/{ladder}/"
+    )
+    oss_upload.batch_delete(keys)
+
+
+def unpublish_drama_from_prod(slug: str) -> None:
+    """删 prod 端整部剧的所有对象（含 poster / 全部集 / 全部 ladder）。"""
+    keys = oss_upload.list_with_prefix(f"{OSS_PROD_PREFIX}/{slug}/")
+    oss_upload.batch_delete(keys)
+
+
+def unpublish_episode_from_staging(slug: str, ep_dir: str) -> None:
+    """删 staging 端某集的所有对象（三档 ladder × init + 全部 segment）。"""
+    keys = oss_upload.list_with_prefix(f"{OSS_STAGING_PREFIX}/{slug}/{ep_dir}/")
+    oss_upload.batch_delete(keys)
+
+
+def unpublish_drama_from_staging(slug: str) -> None:
+    """删 staging 端整部剧的所有对象。drama 删除时调用。"""
+    keys = oss_upload.list_with_prefix(f"{OSS_STAGING_PREFIX}/{slug}/")
+    oss_upload.batch_delete(keys)

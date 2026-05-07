@@ -33,9 +33,12 @@ def _seed_ready_row(slug: str, ep: int) -> dict:
     # 必须在 _setup_env 之后 import，让 settings 拿到正确路径
     from app import db
     db.init_db()
+    if db.get_language("zh-rCN") is None:
+        db.create_language(code="zh-rCN", display_label="简体中文")
+    if db.get_drama(slug) is None:
+        db.create_drama(slug=slug, name="测试剧", default_lang="zh-rCN")
     db.upsert_pending(
         drama_slug=slug,
-        drama_name="测试剧",
         ep_number=ep,
         episode_id=f"{slug}-ep-{ep}",
         duration_ms=120000,
@@ -68,7 +71,7 @@ def _validator():
     return Draft202012Validator(schema, format_checker=FormatChecker())
 
 
-OSS_PUBLIC = "https://photobundle.oss-ap-southeast-1.aliyuncs.com/Drama"
+OSS_PUBLIC = "https://photobundle.oss-ap-southeast-1.aliyuncs.com/Drama/staging"
 
 
 def run_oss_enabled_case():
