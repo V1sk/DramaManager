@@ -82,26 +82,44 @@ def _abs_staging_url(relative_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def build_drama_payload(slug: str) -> dict:
+def build_drama_payload(
+    slug: str,
+    *,
+    poster_prod_urls: dict[str, str] | None = None,
+) -> dict:
     """Assemble the `POST /sync/dramas` body for this drama.
 
-    Schema is co-designed in design.md (decision: `POST /sync/dramas` payload shape).
     `client_updated_at` is the drama row's `updated_at` at build time — the
     business server uses it for ordering / idempotency.
+
+    `poster_prod_urls` is `{lang_code: prod_oss_url}` (assets-to-oss). When OSS
+    sync is in effect, `handle_drama_sync` calls `publish_poster_to_prod` for
+    each lang first and passes the result here; the payload's
+    `translations[lang].poster_url` field is the prod OSS URL. Languages
+    without a prod URL (e.g. no poster file uploaded) keep `poster_url=null`.
+    OSS-disabled deploys pass `None`, in which case we fall back to shipping
+    the relative `/videos/...` path stored on the translation row (legacy
+    "URL pull" semantics that the business server is expected to honor).
     """
     drama = db.get_drama_with_sync(slug)
     if drama is None:
         raise RuntimeError(f"build_drama_payload: drama '{slug}' not found")
 
-    # Per-language: name / synopsis / poster. poster is stored as a relative
-    # `/videos/.../poster/<lang>.<ext>` path; ship it as-is — the business
-    # server is expected to pull it from this server's host.
+    poster_prod_urls = poster_prod_urls or {}
+
+    # Per-language: name / synopsis / poster_url.
+    # poster_url is the prod OSS URL when assets-to-oss is in effect; otherwise
+    # falls back to the relative `/videos/...` path stored locally.
     translations: dict[str, dict] = {}
     for lang_code, fields in db.list_drama_translations(slug).items():
+        if lang_code in poster_prod_urls:
+            poster_url = poster_prod_urls[lang_code]
+        else:
+            poster_url = fields.get("poster")  # null or relative /videos/... path
         translations[lang_code] = {
             "name": fields.get("name"),
             "synopsis": fields.get("synopsis"),
-            "poster_url": fields.get("poster"),
+            "poster_url": poster_url,
         }
 
     # Tags (with all their translation rows)
@@ -159,9 +177,22 @@ def build_drama_payload(slug: str) -> dict:
     }
 
 
-def build_episode_payload(slug: str, ep_number: int, playlists: dict[str, str]) -> dict:
+def build_episode_payload(
+    slug: str,
+    ep_number: int,
+    playlists: dict[str, str],
+    *,
+    cover_prod_url: str | None = None,
+    subtitles_prod: list[dict] | None = None,
+) -> dict:
     """Assemble the `POST /sync/episodes` body. `playlists` is
     `{ladder: prod_m3u8_text}` produced by `publish.publish_ladder_to_prod`.
+
+    `cover_prod_url` and `subtitles_prod` (assets-to-oss): when OSS sync is in
+    effect, `handle_episode_sync` calls `publish_cover_to_prod` /
+    `publish_subtitle_to_prod` first and passes the resulting absolute prod
+    URLs here. Falls back to the local `/videos/...` paths when None
+    (OSS-disabled deploys; legacy URL-pull semantics).
     """
     row = db.get_by_slug_ep(slug, ep_number)
     if row is None:
@@ -174,15 +205,20 @@ def build_episode_payload(slug: str, ep_number: int, playlists: dict[str, str]) 
             f"only 'ready' rows can be synced"
         )
 
-    sub_rows = db.list_subtitles_for_slug_ep(slug, ep_number)
-    subtitles_payload = [
-        {
-            "lang_code": s["lang_code"],
-            "label": s["label"],
-            "url": s["file_url"],
-        }
-        for s in sub_rows
-    ]
+    if subtitles_prod is not None:
+        subtitles_payload = subtitles_prod
+    else:
+        sub_rows = db.list_subtitles_for_slug_ep(slug, ep_number)
+        subtitles_payload = [
+            {
+                "lang_code": s["lang_code"],
+                "label": s["label"],
+                "url": s["file_url"],
+            }
+            for s in sub_rows
+        ]
+
+    cover_url = cover_prod_url if cover_prod_url is not None else row["cover_url"]
 
     return {
         "drama_slug": slug,
@@ -198,7 +234,7 @@ def build_episode_payload(slug: str, ep_number: int, playlists: dict[str, str]) 
             "iv_hex": row["iv_hex"],
         },
         "playlists": playlists,
-        "cover_url": row["cover_url"],
+        "cover_url": cover_url,
         "subtitles": subtitles_payload,
     }
 
@@ -276,21 +312,21 @@ async def _execute_episode_delete_sync(slug: str, ep_number: int) -> None:
 
     if settings.oss_enabled:
         ep_dir = f"ep-{ep_number}"
-        for ladder in ("540p", "720p", "1080p"):
-            try:
-                await asyncio.to_thread(
-                    publish.unpublish_ladder_from_prod, slug, ep_dir, ladder,
-                )
-            except Exception as e:  # noqa: BLE001
-                log.warning(
-                    "unpublish_ladder_from_prod failed slug=%s ep=%s ladder=%s: %s",
-                    slug, ep_number, ladder, e,
-                )
-                db.set_episode_sync_status(
-                    slug, ep_number, "sync_failed",
-                    error=f"business DELETE ok but prod OSS cleanup failed: {e}",
-                )
-                return
+        # assets-to-oss: single prefix sweep covers all ladders + cover + subtitles.
+        try:
+            await asyncio.to_thread(
+                publish.unpublish_episode_from_prod, slug, ep_dir,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "unpublish_episode_from_prod failed slug=%s ep=%s: %s",
+                slug, ep_number, e,
+            )
+            db.set_episode_sync_status(
+                slug, ep_number, "sync_failed",
+                error=f"business DELETE ok but prod OSS cleanup failed: {e}",
+            )
+            return
 
     try:
         db.physical_delete_episode(slug, ep_number)
@@ -321,10 +357,39 @@ async def handle_drama_sync(slug: str) -> None:
 
     db.set_drama_sync_status(slug, "syncing")
     try:
-        payload = build_drama_payload(slug)
+        # assets-to-oss: copy each per-language poster staging→prod first; the
+        # returned absolute prod URLs go into the payload. PublishError here
+        # (e.g. staging object missing because never uploaded) → sync_failed
+        # without calling the business server.
+        poster_prod_urls: dict[str, str] = {}
+        if settings.oss_enabled:
+            translations_view = db.list_drama_translations(slug)
+            for lang_code, fields in translations_view.items():
+                rel_url = fields.get("poster")
+                if not rel_url:
+                    continue
+                # rel_url is like "/videos/{slug}/poster/{lang}.{ext}";
+                # extract the extension off the tail.
+                tail = rel_url.rsplit("/", 1)[-1]   # "{lang}.{ext}"
+                if "." not in tail:
+                    log.warning(
+                        "skipping malformed poster rel_url for sync: %s", rel_url,
+                    )
+                    continue
+                ext = tail.rsplit(".", 1)[-1]
+                prod_url = await asyncio.to_thread(
+                    publish.publish_poster_to_prod, slug, lang_code, ext,
+                )
+                poster_prod_urls[lang_code] = prod_url
+
+        payload = build_drama_payload(slug, poster_prod_urls=poster_prod_urls)
         await sync_client.call_business("POST", "/sync/dramas", json=payload)
         db.set_drama_sync_status(slug, "clean", last_synced_at=_now_iso())
         log.info("drama sync ok slug=%s", slug)
+    except publish.PublishError as e:
+        log.warning("drama sync poster publish failed slug=%s: %s", slug, e)
+        db.set_drama_sync_status(slug, "sync_failed", error=f"publish_poster_to_prod: {e}")
+        return
     except SyncError as e:
         log.warning("drama sync failed slug=%s: %s", slug, e)
         db.set_drama_sync_status(slug, "sync_failed", error=str(e))
@@ -386,13 +451,33 @@ async def handle_episode_sync(slug: str, ep_number: int) -> None:
     try:
         ep_dir = f"ep-{ep_number}"
         playlists: dict[str, str] = {}
+        cover_prod_url: str | None = None
+        subtitles_prod: list[dict] | None = None
         if settings.oss_enabled:
+            # Ladders first.
             for ladder in ("540p", "720p", "1080p"):
                 playlists[ladder] = await asyncio.to_thread(
                     publish.publish_ladder_to_prod, slug, ep_dir, ladder,
                 )
+            # assets-to-oss: cover + subtitles staging→prod.
+            cover_prod_url = await asyncio.to_thread(
+                publish.publish_cover_to_prod, slug, ep_dir,
+            )
+            sub_rows = db.list_subtitles_for_slug_ep(slug, ep_number)
+            subtitles_prod = []
+            for s in sub_rows:
+                prod_url = await asyncio.to_thread(
+                    publish.publish_subtitle_to_prod, slug, ep_dir, s["lang_code"],
+                )
+                subtitles_prod.append({
+                    "lang_code": s["lang_code"],
+                    "label": s["label"],
+                    "url": prod_url,
+                })
         else:
             # OSS disabled: the local m3u8 is the source of truth; ship it as-is.
+            # Cover + subtitle URLs fall back to relative `/videos/...` paths
+            # via build_episode_payload's defaults.
             from pathlib import Path
             for ladder in ("540p", "720p", "1080p"):
                 pl = (
@@ -403,7 +488,12 @@ async def handle_episode_sync(slug: str, ep_number: int) -> None:
                     raise publish.PublishError(f"missing local playlist: {pl}")
                 playlists[ladder] = pl.read_text()
 
-        payload = build_episode_payload(slug, ep_number, playlists=playlists)
+        payload = build_episode_payload(
+            slug, ep_number,
+            playlists=playlists,
+            cover_prod_url=cover_prod_url,
+            subtitles_prod=subtitles_prod,
+        )
         await sync_client.call_business("POST", "/sync/episodes", json=payload)
         db.set_episode_sync_status(
             slug, ep_number, "clean", last_synced_at=_now_iso(),

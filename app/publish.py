@@ -1,7 +1,17 @@
-"""OSS 发布层：把本地切片传到 OSS，并把 m3u8 里的 init / segment 引用改写成绝对 URL。
+"""OSS 发布层：把本地资产（视频切片、海报、封面、字幕）传到 OSS staging 前缀，
+并在 sync 时通过 OSS server-side copy 拷到 prod 前缀。
 
-- `rewrite_playlist` 是纯函数，可独立单测。
-- `publish_ladder` 是 worker 在 pipeline 三个 stage 跑完后的后处理钩子。
+四类资产对称处理（assets-to-oss 落地后）：
+
+| 资产 | upload_*_to_staging | publish_*_to_prod | unpublish 单条 (staging) | unpublish 单条 (prod) |
+|---|---|---|---|---|
+| ladder（init+seg+m3u8 改写） | publish_ladder | publish_ladder_to_prod | —— (不暴露单条删) | unpublish_ladder_from_prod |
+| poster | upload_poster_to_staging | publish_poster_to_prod | unpublish_poster_from_staging | unpublish_poster_from_prod |
+| cover | upload_cover_to_staging | publish_cover_to_prod | —— | —— |
+| subtitle | upload_subtitle_to_staging | publish_subtitle_to_prod | unpublish_subtitle_from_staging | unpublish_subtitle_from_prod |
+
+整体清理（剧 / 集前缀级）由 `unpublish_drama_from_*` / `unpublish_episode_from_*` 包揽，
+新增资产前缀天然落在它们的 list-by-prefix 范围内，无需特殊处理。
 
 只在 `settings.oss_enabled` 为真时被调用；调用方决定何时触发。
 """
@@ -191,4 +201,176 @@ def unpublish_episode_from_staging(slug: str, ep_dir: str) -> None:
 def unpublish_drama_from_staging(slug: str) -> None:
     """删 staging 端整部剧的所有对象。drama 删除时调用。"""
     keys = oss_upload.list_with_prefix(f"{OSS_STAGING_PREFIX}/{slug}/")
+    oss_upload.batch_delete(keys)
+
+
+def unpublish_episode_from_prod(slug: str, ep_dir: str) -> None:
+    """删 prod 端某集的所有对象 —— 单次 prefix sweep 覆盖三档 ladder + cover + 字幕。
+
+    取代之前 sync delete 路径对 `unpublish_ladder_from_prod` 的三次循环调用。
+    """
+    keys = oss_upload.list_with_prefix(f"{OSS_PROD_PREFIX}/{slug}/{ep_dir}/")
+    oss_upload.batch_delete(keys)
+
+
+# ---------------------------------------------------------------------------
+# Per-asset staging upload helpers
+#
+# 这三个 helper 都是同步阻塞（oss2 SDK 是同步的），调用方 `await asyncio.to_thread(...)`。
+# 调用方 MUST 在 `settings.oss_enabled` 为真时才调用；为假时调用是程序员错误，raise RuntimeError。
+# ---------------------------------------------------------------------------
+
+
+def _ensure_oss_enabled(caller: str) -> None:
+    if not settings.oss_enabled:
+        raise RuntimeError(
+            f"{caller} called while OSS is disabled; "
+            f"caller must gate on settings.oss_enabled"
+        )
+
+
+def _put_object(oss_path: str, local_path: Path, label: str) -> None:
+    """`upload_file` wrapper，把 result=False 也翻成 PublishError。"""
+    try:
+        res = upload_file(oss_path, str(local_path))
+    except Exception as e:  # noqa: BLE001
+        raise PublishError(f"OSS upload raised for {label}: {e}") from e
+    if not res.get("result"):
+        raise PublishError(f"OSS upload failed for {label}: {res}")
+
+
+def upload_poster_to_staging(slug: str, lang: str, local_path: Path) -> str:
+    """上传 poster 到 `Drama/staging/{slug}/poster/{lang}.{ext}`。
+
+    `ext` 由 `local_path.suffix` 决定，需带 `.`（例如 `.jpg` / `.png` / `.webp`）。
+    返回 staging 公网 URL。OSS 失败 → PublishError。
+
+    调用方负责：
+      - 在调本函数前已经写好 `local_path`。
+      - 在调本函数前清理过同 (slug, lang) 旧扩展名的 staging 对象（用 `unpublish_poster_from_staging`），
+        否则同一语言可能在 staging 残留两个扩展名的对象。
+    """
+    _ensure_oss_enabled("upload_poster_to_staging")
+    ext = local_path.suffix.lstrip(".")
+    if not ext:
+        raise PublishError(f"poster local_path has no extension: {local_path}")
+    oss_path = f"{OSS_STAGING_PREFIX}/{slug}/poster/{lang}.{ext}"
+    _put_object(oss_path, local_path, f"poster {slug}/{lang}.{ext}")
+    return f"{oss_staging_public_base_url}/{slug}/poster/{lang}.{ext}"
+
+
+def upload_cover_to_staging(slug: str, ep_dir: str, local_path: Path) -> str:
+    """上传 cover 到 `Drama/staging/{slug}/{ep_dir}/cover.jpg`。固定文件名。"""
+    _ensure_oss_enabled("upload_cover_to_staging")
+    oss_path = f"{OSS_STAGING_PREFIX}/{slug}/{ep_dir}/cover.jpg"
+    _put_object(oss_path, local_path, f"cover {slug}/{ep_dir}")
+    return f"{oss_staging_public_base_url}/{slug}/{ep_dir}/cover.jpg"
+
+
+def upload_subtitle_to_staging(
+    slug: str, ep_dir: str, lang: str, local_path: Path
+) -> str:
+    """上传 vtt 到 `Drama/staging/{slug}/{ep_dir}/subtitles/{lang}.vtt`。"""
+    _ensure_oss_enabled("upload_subtitle_to_staging")
+    oss_path = f"{OSS_STAGING_PREFIX}/{slug}/{ep_dir}/subtitles/{lang}.vtt"
+    _put_object(oss_path, local_path, f"subtitle {slug}/{ep_dir}/{lang}")
+    return f"{oss_staging_public_base_url}/{slug}/{ep_dir}/subtitles/{lang}.vtt"
+
+
+# ---------------------------------------------------------------------------
+# Per-asset prod publish helpers (server-side copy staging → prod)
+# ---------------------------------------------------------------------------
+
+
+def _copy_one(src_key: str, dst_key: str, label: str) -> None:
+    try:
+        oss_upload.copy_object(src_key, dst_key)
+    except Exception as e:  # noqa: BLE001
+        raise PublishError(f"OSS copy_object failed for {label}: {e}") from e
+
+
+def publish_poster_to_prod(slug: str, lang: str, ext: str) -> str:
+    """staging→prod 服务端拷贝 poster。返回 prod 公网 URL。
+
+    `ext` 不带 `.`（与 `upload_poster_to_staging` 返回的扩展名一致）。
+    Staging 对象不存在 → PublishError。
+    """
+    src_key = f"{OSS_STAGING_PREFIX}/{slug}/poster/{lang}.{ext}"
+    dst_key = f"{OSS_PROD_PREFIX}/{slug}/poster/{lang}.{ext}"
+    # Pre-flight check: staging object must exist
+    if not oss_upload.list_with_prefix(src_key):
+        raise PublishError(
+            f"no staging object at {src_key}; "
+            f"upload_poster_to_staging must run first"
+        )
+    _copy_one(src_key, dst_key, f"poster {slug}/{lang}.{ext}")
+    return f"{oss_prod_public_base_url}/{slug}/poster/{lang}.{ext}"
+
+
+def publish_cover_to_prod(slug: str, ep_dir: str) -> str:
+    """staging→prod 服务端拷贝 cover.jpg。"""
+    src_key = f"{OSS_STAGING_PREFIX}/{slug}/{ep_dir}/cover.jpg"
+    dst_key = f"{OSS_PROD_PREFIX}/{slug}/{ep_dir}/cover.jpg"
+    if not oss_upload.list_with_prefix(src_key):
+        raise PublishError(
+            f"no staging object at {src_key}; "
+            f"upload_cover_to_staging must run first"
+        )
+    _copy_one(src_key, dst_key, f"cover {slug}/{ep_dir}")
+    return f"{oss_prod_public_base_url}/{slug}/{ep_dir}/cover.jpg"
+
+
+def publish_subtitle_to_prod(slug: str, ep_dir: str, lang: str) -> str:
+    """staging→prod 服务端拷贝 subtitle vtt。"""
+    src_key = f"{OSS_STAGING_PREFIX}/{slug}/{ep_dir}/subtitles/{lang}.vtt"
+    dst_key = f"{OSS_PROD_PREFIX}/{slug}/{ep_dir}/subtitles/{lang}.vtt"
+    if not oss_upload.list_with_prefix(src_key):
+        raise PublishError(
+            f"no staging object at {src_key}; "
+            f"upload_subtitle_to_staging must run first"
+        )
+    _copy_one(src_key, dst_key, f"subtitle {slug}/{ep_dir}/{lang}")
+    return f"{oss_prod_public_base_url}/{slug}/{ep_dir}/subtitles/{lang}.vtt"
+
+
+# ---------------------------------------------------------------------------
+# Per-asset partial unpublish helpers
+#
+# 整剧 / 整集 / 整 ladder 删除继续走 `unpublish_drama_from_*` / `unpublish_episode_from_*` /
+# `unpublish_ladder_from_prod`（按前缀 list+batch_delete），那条路径自动覆盖新增的
+# poster / cover / subtitle 对象，不需要单独的 helper。这里的 helper 只服务于
+# "替换一个海报 / 删一条字幕" 这类**单对象**清理场景。
+# ---------------------------------------------------------------------------
+
+
+def unpublish_poster_from_staging(slug: str, lang: str) -> None:
+    """删 staging 端 `Drama/staging/{slug}/poster/{lang}.*`（任意扩展名）。
+
+    用于 poster 替换前清掉旧扩展、或单语言海报删除时。Idempotent。
+    """
+    keys = oss_upload.list_with_prefix(
+        f"{OSS_STAGING_PREFIX}/{slug}/poster/{lang}."
+    )
+    oss_upload.batch_delete(keys)
+
+
+def unpublish_poster_from_prod(slug: str, lang: str) -> None:
+    """删 prod 端 `Drama/prod/{slug}/poster/{lang}.*`。Idempotent。"""
+    keys = oss_upload.list_with_prefix(
+        f"{OSS_PROD_PREFIX}/{slug}/poster/{lang}."
+    )
+    oss_upload.batch_delete(keys)
+
+
+def unpublish_subtitle_from_staging(slug: str, ep_dir: str, lang: str) -> None:
+    """删 staging 端单条字幕。Idempotent。"""
+    key = f"{OSS_STAGING_PREFIX}/{slug}/{ep_dir}/subtitles/{lang}.vtt"
+    keys = oss_upload.list_with_prefix(key)
+    oss_upload.batch_delete(keys)
+
+
+def unpublish_subtitle_from_prod(slug: str, ep_dir: str, lang: str) -> None:
+    """删 prod 端单条字幕。Idempotent。"""
+    key = f"{OSS_PROD_PREFIX}/{slug}/{ep_dir}/subtitles/{lang}.vtt"
+    keys = oss_upload.list_with_prefix(key)
     oss_upload.batch_delete(keys)

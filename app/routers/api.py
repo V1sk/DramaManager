@@ -1,3 +1,4 @@
+import asyncio
 import shutil
 
 from fastapi import APIRouter, File, HTTPException, Path, UploadFile
@@ -115,13 +116,60 @@ async def replace_cover(
     if not cover.content_type or not cover.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="cover must be an image/* upload")
 
-    cover_path = settings.out_dir / drama_slug / f"ep-{ep_number}" / "cover.jpg"
+    ep_dir = f"ep-{ep_number}"
+    cover_path = settings.out_dir / drama_slug / ep_dir / "cover.jpg"
     cover_path.parent.mkdir(parents=True, exist_ok=True)
+    # Snapshot prior cover so we can restore on OSS failure (assets-to-oss).
+    backup_path = cover_path.with_suffix(".jpg.bak")
+    backup_made = False
+    if cover_path.exists():
+        try:
+            shutil.copy2(cover_path, backup_path)
+            backup_made = True
+        except OSError:
+            # Snapshot failure isn't fatal; proceed without rollback safety net.
+            backup_made = False
     try:
         with cover_path.open("wb") as out_f:
             shutil.copyfileobj(cover.file, out_f, length=1024 * 1024)
     finally:
         await cover.close()
+
+    if settings.oss_enabled:
+        from .. import publish
+        try:
+            await asyncio.to_thread(
+                publish.upload_cover_to_staging, drama_slug, ep_dir, cover_path,
+            )
+        except publish.PublishError as e:
+            # Restore prior cover so the local + DB state stays consistent.
+            if backup_made:
+                try:
+                    shutil.move(backup_path, cover_path)
+                except OSError:
+                    cover_path.unlink(missing_ok=True)
+            else:
+                cover_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"failed to mirror cover to OSS staging: {e}",
+            )
+        except Exception as e:  # noqa: BLE001
+            if backup_made:
+                try:
+                    shutil.move(backup_path, cover_path)
+                except OSError:
+                    cover_path.unlink(missing_ok=True)
+            else:
+                cover_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"unexpected OSS error mirroring cover: {e}",
+            )
+
+    # Success path: drop the backup if we made one.
+    if backup_made:
+        backup_path.unlink(missing_ok=True)
 
     db.bump_updated_at(drama_slug, ep_number)
     db.mark_episode_dirty(drama_slug, ep_number)

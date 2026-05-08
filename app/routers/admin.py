@@ -271,6 +271,30 @@ def _process_episode_upload(
         tmp_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=f"cover extraction failed: {e}")
 
+    # Mirror cover to OSS staging (assets-to-oss). Failure unwinds the just-
+    # extracted cover and the temp upload before raising 500 so we don't
+    # leave a half-published asset.
+    if settings.oss_enabled:
+        from .. import publish
+        try:
+            publish.upload_cover_to_staging(drama_slug, ep_dir_name, cover_path)
+        except publish.PublishError as e:
+            log.error("OSS staging upload failed for cover %s/%s: %s", drama_slug, ep_dir_name, e)
+            cover_path.unlink(missing_ok=True)
+            tmp_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"failed to mirror cover to OSS staging: {e}",
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("OSS unexpected error for cover %s/%s", drama_slug, ep_dir_name)
+            cover_path.unlink(missing_ok=True)
+            tmp_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"unexpected OSS error mirroring cover: {e}",
+            )
+
     cover_url = f"/videos/{drama_slug}/{ep_dir_name}/cover.jpg"
 
     db.upsert_pending(
@@ -349,6 +373,22 @@ async def admin_upload_next_episode(
         except FfmpegError as e:
             tmp_path.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail=f"cover extraction failed: {e}")
+
+        if settings.oss_enabled:
+            from .. import publish
+            try:
+                publish.upload_cover_to_staging(drama_slug, ep_dir_name, cover_path)
+            except Exception as e:  # noqa: BLE001 — PublishError or unexpected
+                log.error(
+                    "OSS staging upload failed for cover %s/%s: %s",
+                    drama_slug, ep_dir_name, e,
+                )
+                cover_path.unlink(missing_ok=True)
+                tmp_path.unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"failed to mirror cover to OSS staging: {e}",
+                )
 
         cover_url = f"/videos/{drama_slug}/{ep_dir_name}/cover.jpg"
         try:
@@ -707,6 +747,32 @@ async def admin_upload_drama_poster(
     finally:
         await file.close()
 
+    # Mirror to OSS staging if enabled. Order: clear stale OSS object for any
+    # prior extension under this (slug, lang) → upload new bytes. On OSS
+    # failure unlink the local file we just wrote and respond 500 so the DB
+    # row is not left pointing at a half-published asset.
+    if settings.oss_enabled:
+        from .. import publish
+        try:
+            await asyncio.to_thread(publish.unpublish_poster_from_staging, drama_slug, lang)
+            await asyncio.to_thread(
+                publish.upload_poster_to_staging, drama_slug, lang, target_path,
+            )
+        except publish.PublishError as e:
+            log.error("OSS staging upload failed for poster %s/%s: %s", drama_slug, lang, e)
+            target_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"failed to mirror poster to OSS staging: {e}",
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("OSS unexpected error for poster %s/%s", drama_slug, lang)
+            target_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"unexpected OSS error mirroring poster: {e}",
+            )
+
     url = _poster_url(drama_slug, lang, new_ext)
     db.upsert_drama_poster(drama_slug, lang, url)
     db.mark_drama_dirty(drama_slug)
@@ -728,6 +794,12 @@ async def admin_delete_drama_poster(
         )
     db.delete_drama_poster(drama_slug, lang)
     _remove_existing_poster_files(drama_slug, lang)
+    if settings.oss_enabled:
+        from .. import publish
+        try:
+            await asyncio.to_thread(publish.unpublish_poster_from_staging, drama_slug, lang)
+        except Exception as e:  # noqa: BLE001 — best-effort, don't fail the API
+            log.warning("OSS staging cleanup failed for poster %s/%s: %s", drama_slug, lang, e)
     db.mark_drama_dirty(drama_slug)
     log.info("deleted drama poster slug=%s lang=%s", drama_slug, lang)
     return Response(status_code=204)
@@ -809,6 +881,37 @@ async def admin_upload_subtitle(
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"failed to write subtitle file: {e}")
 
+    # Mirror to OSS staging. Failure unwinds the local write so DB doesn't get
+    # a row pointing at half-published content.
+    if settings.oss_enabled:
+        from .. import publish
+        ep_dir = f"ep-{ep_number}"
+        try:
+            await asyncio.to_thread(
+                publish.upload_subtitle_to_staging,
+                drama_slug, ep_dir, lang, target_path,
+            )
+        except publish.PublishError as e:
+            log.error(
+                "OSS staging upload failed for subtitle %s/%s/%s: %s",
+                drama_slug, ep_dir, lang, e,
+            )
+            target_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"failed to mirror subtitle to OSS staging: {e}",
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception(
+                "OSS unexpected error for subtitle %s/%s/%s",
+                drama_slug, ep_dir, lang,
+            )
+            target_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"unexpected OSS error mirroring subtitle: {e}",
+            )
+
     episode_id = ep_row["episode_id"]
     file_url = _subtitle_url(drama_slug, ep_number, lang)
     upserted = db.upsert_subtitle(episode_id, lang, file_url)
@@ -874,6 +977,20 @@ async def admin_delete_subtitle(
     except OSError as e:
         log.warning("failed to remove subtitle file %s: %s", target_path, e)
         warnings.append(str(target_path))
+
+    if settings.oss_enabled:
+        from .. import publish
+        ep_dir = f"ep-{ep_number}"
+        try:
+            await asyncio.to_thread(
+                publish.unpublish_subtitle_from_staging, drama_slug, ep_dir, lang,
+            )
+        except Exception as e:  # noqa: BLE001 — best-effort
+            log.warning(
+                "OSS staging cleanup failed for subtitle %s/%s/%s: %s",
+                drama_slug, ep_dir, lang, e,
+            )
+            warnings.append(f"oss-staging:{drama_slug}/{ep_dir}/subtitles/{lang}.vtt")
 
     db.mark_episode_dirty(drama_slug, ep_number)
     log.info("deleted subtitle slug=%s ep=%s lang=%s warnings=%d",
