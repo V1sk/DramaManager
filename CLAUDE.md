@@ -1,0 +1,307 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Purpose
+
+Internal HLS management server for the short-drama `media3-shortdrama` Android SDK. It wraps the existing shell pipeline (`pipeline.sh` + stage scripts) behind a FastAPI service: operators upload a source MP4 via the `/admin` web page, the server runs the 3-rung CMAF ladder (540p / 720p / 1080p) + AES-128-CBC encryption, and exposes SDK-ready `EpisodeInfo` JSON plus static hosting of the playlists/segments/covers. `episode-info-schema.json` is the authoritative schema for the SDK contract.
+
+## Management server
+
+Run:
+
+```bash
+# one-time
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
+
+# start
+./venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+URL 归属分两类（见下文 "OSS 双 host 拓扑"）：
+
+- **业务 host 相对路径** (`/videos/...`, `/drm/...`): `playUrl`, `coverUrl`, `fallback.low`, `fallback.high`, `drm.keyUri`, `DramaSummary.posterUrl`. m3u8 里的 `#EXT-X-KEY:URI` 也是这种相对路径。播放器按 m3u8 自身 host 解析 → 业务 host。
+- **OSS 绝对 URL or 业务 host 相对路径**（取决于 `OSS_ENABLED`）: `initUrl`, `firstSegUrl`. OSS 启用时是 `https://photobundle.oss-ap-southeast-1.aliyuncs.com/Drama/...`；未启用时退化为 `/videos/...`。
+
+`PUBLIC_BASE_URL` 已废弃；客户端从自己发起请求的 host 拼相对路径即可。
+
+Environment variables:
+
+| var | required | default | purpose |
+|---|---|---|---|
+| `OUT_DIR` | no | `./out` | Pipeline artifact root (`<OUT_DIR>/<drama_slug>/...`). |
+| `DB_PATH` | no | `./hls.db` | SQLite file. |
+| `UPLOAD_TMP_DIR` | no | `./tmp` | Staging dir for uploaded sources; files are deleted after the worker finishes the job. |
+| `OSS_ENABLED` | no | `false` | 设 `true` / `1` / `yes` 启用 OSS 上传：worker 把每档 init.mp4 + 加密 .m4s 推到 **OSS staging 前缀** (`Drama/staging/...`)，并把本地 m3u8 里 init / segment 引用改写成绝对 staging URL。`#EXT-X-KEY:URI` 不动。OSS 凭证 / endpoint / bucket / 前缀硬编码在 `app/oss_upload.py`，不走 env。Prod 前缀 (`Drama/prod/...`) 只在执行业务服务器同步时由 `publish_ladder_to_prod` server-side copy 进去（详见 "业务服务器同步"）。 |
+| `DEFAULT_LADDER` | no | `720p` | 控制 `EpisodeInfo.playUrl` / `initUrl` / `firstSegUrl` 默认指向哪个 ladder rung。可选 `540p` / `720p` / `1080p`。**在 API 读取时动态生效**——改 env 重启 uvicorn 就能切换，不需要重新编码（pipeline 始终生产三档完整切片）。`fallback.low` / `fallback.high` 永远是 540p / 1080p 两端，不受影响。非法值在启动时 fail-fast。 |
+| `BUSINESS_SYNC_BASE_URL` | no | _unset_ | 业务服务器同步 base URL（`https://...`，无尾部 `/`）。**未设时同步功能整体禁用**：`POST /admin/dramas/{slug}/sync` 等返回 503，导航栏 `sync-zone` 不显示。设了就必须同时设 `BUSINESS_SYNC_API_KEY`。 |
+| `BUSINESS_SYNC_API_KEY` | required iff base URL set | _unset_ | 业务服务器握手用的共享密钥，作为 `X-API-Key` 头随每个 `/sync/*` 请求发送。`BUSINESS_SYNC_BASE_URL` 设而本变量未设 → 启动期 fail-fast。 |
+| `BUSINESS_SYNC_TIMEOUT` | no | `30` | 单次 `/sync/*` HTTP 请求的超时（秒）。整数；非正值 → 启动期 fail-fast。 |
+| `PIPELINE_CONCURRENCY` | no | `2` | 并发跑的 pipeline job 数（encode + encrypt + OSS publish）。每个 job 是独立 `pipeline.sh` 子进程；ffmpeg 本身已多线程，调高会过度订阅 CPU，有空闲核才往上加。同一集的多个 job 仍由 `queue.py` 的 per-episode 锁串行化，绝不并行写同一个 `ep-{n}/` 目录。整数 `>= 1`；非法值 → 启动期 fail-fast。 |
+
+Drama / language lifecycle (introduced by `drama-as-entity` + `i18n-foundation`):
+
+```
+POST /admin/languages  →  language row (e.g. zh-rCN) exists, is_active=1
+       ↓
+POST /admin/dramas     →  drama row exists; FK on default_lang → languages.code
+       ↓
+POST /admin/upload     →  episode pipeline → status=ready
+
+DELETE /admin/episodes/{slug}/{ep}  →  episode row + ep dir + keys/* removed; drama row stays
+DELETE /admin/dramas/{slug}         →  only allowed when 0 episodes; drama row + OUT_DIR/{slug}/ removed
+DELETE /admin/languages/{code}      →  only allowed when no drama or translation references the code (FK + pre-check guards both ways)
+```
+
+Tables: `languages` (code PK + display_label + is_active flag), `dramas` (slug PK + name + default_lang FK to languages), `translations` (entity_type, entity_id, lang_code FK to languages, field, value — the generic store for tag / actor / drama / subtitle translations once steps 3a–3d land), `episodes` (FK to dramas; same DRM / playlist columns as before).
+
+`is_active=0` keeps a language hidden from new drama creation and from `/api/languages` (the SDK list) while preserving any rows that already reference it. The first thing operators must do on a fresh deploy is seed at least one language via `/admin/languages`.
+
+`init_db()` runs a one-shot self-test on startup: it tries an INSERT into `translations` with a non-existent `lang_code`; the FK MUST raise `IntegrityError`. If it doesn't, startup fails fast — the whole i18n / drama integrity story collapses without enforced FKs.
+
+URL map:
+
+| route | purpose |
+|---|---|
+| `GET /` | 302 → `/admin` |
+| `GET /admin` | management HTML: drama-create form (with default_lang dropdown sourced from `/api/languages`) + episode-upload form + episode list (5 s auto-refresh) |
+| `GET /admin/languages` | HTML: language registry (create form + table; toggle / delete per row) |
+| `GET /admin/languages.json` | JSON list of all languages (active + inactive); fields `code, display_label, is_active, created_at, updated_at` |
+| `POST /admin/languages` | form: `code`, `display_label`. 302 / 409 (code taken) / 400 (validation). `is_active=1` on insert. |
+| `PATCH /admin/languages/{code}` | JSON body with optional `display_label` and/or `is_active`. `code` itself is immutable. 200 / 400 / 404. |
+| `DELETE /admin/languages/{code}` | 204 / 404 / 409 with `{"error": ..., "dramas": n, "translations": m}` if referenced. |
+| `GET /admin/dramas/new` | HTML: drama-create form (slug + default_lang + name + synopsis + poster + tags multi-select + actors multi-select). Browser orchestrates 5 endpoints in sequence. |
+| `GET /admin/dramas/{slug}` | HTML: drama detail page (translations editor, tags / actors editors, episodes table with auto-increment upload, embedded poster strip). |
+| `GET /admin/dramas/{slug}/full` | JSON: aggregate read — drama row + per-language translations + tags + actors + episodes. Used by server render and client refresh. |
+| `GET /admin/dramas/{slug}/episodes/{ep}` | HTML: episode detail page with embedded hls.js player, subtitle list, cover / video re-upload, delete. |
+| `POST /admin/dramas` | multipart: `drama_slug`, `drama_name`, `default_lang`. `default_lang` MUST exist in `languages` AND be `is_active=1`. 302 / 400 (incl. inactive lang) / 409. |
+| `GET /admin/dramas` | JSON list of all dramas (`created_at DESC`); fields `slug, name, default_lang, ep_count, created_at, updated_at` |
+| `DELETE /admin/dramas/{slug}` | Removes drama row + translations + `OUT_DIR/{slug}/`; 409 if any episodes attached; 404 if unknown |
+| `POST /admin/dramas/{slug}/episodes` | multipart `video`. Auto-increment `ep_number = MAX+1`. UNIQUE-collision retry up to 3×; persistent collision → 503. 404 if drama missing. |
+| `POST /admin/dramas/{slug}/episodes/{ep}` | multipart `video`. Re-encode existing episode in place. 404 if episode missing. 409 if `status=encoding`. |
+| `POST /admin/dramas/{slug}/episodes/batch` | multipart `videos` (多文件). 每个文件名须以 `EP<n>` 开头（大小写不敏感）→ 集号。已存在的集走重传语义覆盖；`status=encoding` 的集跳过。返回逐文件结果 `{ok_count, error_count, results[]}`，部分失败不致命。**路由声明在 `episodes/{ep}` 之前**，否则 `batch` 字面段会被 `{ep}` 的 `^[0-9]+$` 捕获并 422。 |
+| `POST /admin/dramas/{slug}/subtitles/batch` | multipart `files` (多文件). 文件名须形如 `EP<n>-<lang>-说明.vtt\|.srt`（EP 大小写不敏感）；`<lang>` 按最长匹配解析自启用语言注册表（兼容 `zh-rCN` 这类带连字符的 code）。`.srt` 自动转 WebVTT。已存在的 (集, 语言) 字幕覆盖。返回逐文件结果，部分失败不致命。 |
+| `GET /admin/episodes` | JSON list of all episode rows (`created_at DESC`); each row carries `drama_name` via JOIN |
+| `GET /api/languages` | SDK: array of `{code, display_label}` for `is_active=1` rows; ordered by `code ASC`; empty registry → `[]` |
+| `GET /api/episodes/{slug}/{ep}` | SDK endpoint; strict `EpisodeInfo` JSON; 404 unless `status=ready` |
+| `GET /api/dramas` | SDK drama catalog; `DramaSummary[]` ordered by `lastUpdatedAt DESC`; empty → `[]`; only dramas with ≥1 `ready` episode; `dramaName` sourced from `dramas.name` |
+| `GET /api/dramas/{slug}/episodes` | SDK per-drama episode list; full `EpisodeInfo[]` (with `drm` embedded) ordered by `ep_number ASC`; empty → `[]`; 422 on malformed slug |
+| `POST /api/episodes/{slug}/{ep}/cover` | multipart `cover`; overwrites `cover.jpg`；同时翻该集 `sync_status='dirty'` |
+| `POST /admin/dramas/{slug}/sync` | 业务同步：剧入队（含其下全部 dirty / pending_delete 集）。503 当 `BUSINESS_SYNC_BASE_URL` 未设；404 / 200 (no-op) / 202 |
+| `POST /admin/episodes/{slug}/{ep}/sync` | 业务同步：单集入队。503 / 404 / 200 (no-op) / 409 (剧从未同步) / 202 |
+| `GET /admin/sync` | HTML 总览页：列出全部非 clean 的剧 + 集 |
+| `GET /admin/sync/summary` | JSON `{enabled, non_clean_count}`：导航栏 5s 轮询用 |
+| `GET /drm/{slug}/{episode_id}/key` | 16 raw bytes, `application/octet-stream` (same URL embedded in the m3u8) |
+| `GET /videos/{slug}/{episode_id}/**` | static mount over `OUT_DIR`; `/videos/{slug}/keys/**` is explicitly denied by middleware |
+
+Upload → pipeline lifecycle (all synchronous work happens in the request handler so the admin list has data to render immediately):
+
+1. Validate path (`drama_slug ~ ^[a-z0-9][a-z0-9-]*$`; for re-upload, `ep` numeric). Drama must already exist (404 otherwise). For auto-increment (`POST /admin/dramas/{slug}/episodes`), the server computes `ep_number = MAX(ep_number)+1`. For re-upload (`POST /admin/dramas/{slug}/episodes/{ep}`), the episode must exist and not be in `status=encoding` (409 otherwise).
+2. Stream upload to `UPLOAD_TMP_DIR/upload-<uuid>.mp4`.
+3. `ffprobe` → `duration_ms` + `width` + `height`（codec dimension，与 SDK `Format.width/height` 同口径）。
+4. `ffmpeg -ss 0 -vframes 1 -vf scale=-2:720` → `OUT_DIR/{slug}/ep-{n}/cover.jpg`.
+5. Upsert `episodes` row: `status=pending`, `episode_id="{slug}-ep-{n}"`, cover URL set.
+6. Enqueue job on the global `asyncio.Queue` and 302 back to `/admin`.
+7. A pool of `PIPELINE_CONCURRENCY` worker coroutines (default 2) pulls from the queue; jobs for different episodes run in parallel, jobs for the same `episode_id` are serialized by a per-episode `asyncio.Lock` in `queue.py` (they share `ep-{n}/` + `keys/` and would clobber each other). Each worker flips `status=encoding`, runs `pipeline.sh <tmp> {OUT_DIR}/{slug} ep-{n} /drm/{slug}/ep-{n}/key` (the 4th arg is the host-relative key URI that ends up verbatim in `#EXT-X-KEY:URI`), reads `{OUT_DIR}/{slug}/keys/ep-{n}.key.b64` + `.iv`, sets `status=ready` with all DRM / play URL fields. On non-zero exit: `status=failed` with the last 4 KiB of stderr in `error_message` (artifacts under `OUT_DIR` are NOT auto-cleaned — kept for post-mortem). Temp upload file is always removed.
+8. On process restart any row left in `status=encoding` is flipped to `failed` with `error_message="orphaned by restart"`.
+
+Schema changes are destructive across the `drama-as-entity` deploy: delete `hls.db` before redeploy. There is no production data to preserve. See `openspec/specs/drama-entity/` (after archival) or `openspec/changes/drama-as-entity/` (in flight) for the spec.
+
+`pipeline.sh` and the three stage scripts are invoked unchanged — the service only orchestrates them.
+
+## Direct pipeline commands (fallback / debugging)
+
+```bash
+./pipeline.sh <source.mp4> <output_dir> <episode_id> <key_uri>
+# stages individually:
+./generate-drm-key.sh <episode_id> <output_dir>/keys
+./encode-clear.sh     <source> <rung_dir> <ladder> <height> <fps> <bitrate_kbps>
+./encrypt-segments.sh <rung_dir> <ladder> <episode_id> <key_dir> <key_uri>
+```
+
+Sanity-decrypt a segment (same hint `pipeline.sh` prints at the end):
+
+```bash
+openssl enc -d -aes-128-cbc \
+  -K "$(xxd -p -c 32 out/<slug>/keys/ep-1.key)" \
+  -iv "$(cat out/<slug>/keys/ep-1.iv)" \
+  -in out/<slug>/ep-1/720p/seg-720p-0.m4s | ffprobe -i -
+```
+
+System prerequisites: `ffmpeg`, `ffprobe`, `openssl`, `xxd`, `awk`, `python3` (3.10+). No automated test suite — verify by uploading through `/admin` and playing the resulting `playUrl` in a hls.js page, VLC, or the Android SDK.
+
+**Deployment posture**: no auth on any endpoint (admin, upload, cover replacement, DRM key, static files). Must stay behind VPN / internal network.
+
+## Pipeline architecture
+
+Three stages, chained by `pipeline.sh`, one ladder rung at a time. Keep them separate — do not fold them back into a single `ffmpeg` invocation.
+
+- **Stage 0 — `generate-drm-key.sh`**: per-episode DRM material. Writes three sibling files with a fixed naming contract used by every downstream consumer:
+  - `<ep>.key` — raw 16 bytes, server-held only.
+  - `<ep>.iv` — 32 hex chars, written verbatim into `#EXT-X-KEY:IV`.
+  - `<ep>.key.b64` — base64 of the key, shipped as `EpisodeInfo.drm.keyBase64`.
+- **Stage 1 — `encode-clear.sh`**: FFmpeg encodes to **clear** CMAF (`init-<ladder>.mp4` + `seg-<ladder>-*.m4s` + `media-<ladder>.m3u8`). Fixed 2s GOP / 2s segments / constant FPS across rungs, `-hls_flags independent_segments+program_date_time`, `-hls_playlist_type vod`. **FFmpeg's `-hls_key_info_file` path is intentionally disabled here** because of fMP4+AES bugs — do not re-enable it; do encryption in stage 2 instead. The script resolves `SOURCE` to an absolute path before `cd`-ing into the output dir; preserve that when editing.
+- **Stage 2 — `encrypt-segments.sh`**: AES-128-CBC + PKCS7 (`openssl enc` default — do **not** pass `-nopad`) in place over every `seg-<ladder>-*.m4s`, then `awk`-injects a single `#EXT-X-KEY:METHOD=AES-128,URI="…",IV=0x…` line **after** `#EXT-X-MAP:` and **before** the first `#EXTINF:`. Placement matters: `init.mp4` must stay outside the key's scope, which is what ExoPlayer's `Aes128DataSource` expects. `init.mp4` is never encrypted.
+
+Ladder rung metadata (`NAME HEIGHT FPS BV_kbps`) lives in the `LADDERS` array in `pipeline.sh` — edit it there, not inside the stage scripts.
+
+## OSS 双 host 拓扑（含 staging / prod 双前缀）
+
+启用 `OSS_ENABLED=true` 后，资源被分到两个 host；OSS 内部进一步分成 **staging** 和 **prod** 两个并列前缀（同一个 bucket，凭证共享）：
+
+| 资源 | 哪台 host | m3u8 / API 里写什么 |
+|---|---|---|
+| `media-{rung}.m3u8` | 业务 host（这台 HLS 服务器） | API `playUrl` / `fallback.*` 写相对路径 |
+| `#EXT-X-KEY:URI` | 业务 host（同 m3u8） | 相对路径 `/drm/...`，与 `EpisodeInfo.drm.keyUri` verbatim 一致 |
+| `init-{rung}.mp4` | **OSS staging 前缀**（这台服务器写）／ **OSS prod 前缀**（业务服务器读） | 本地 m3u8 写绝对 staging URL；业务服务器收到的 m3u8 写绝对 prod URL（同步时 `publish_ladder_to_prod` 字符串替换得到） |
+| `seg-{rung}-N.m4s` | **OSS staging 前缀** ／ **OSS prod 前缀** | 同上 |
+| `poster/{lang}.{ext}` | **OSS staging 前缀** ／ **OSS prod 前缀** | sync 时 `publish_poster_to_prod` server-side copy；payload `translations[lang].poster_url` 是 prod 绝对 URL |
+| `cover.jpg` | **OSS staging 前缀** ／ **OSS prod 前缀** | sync 时 `publish_cover_to_prod` server-side copy；payload `cover_url` 是 prod 绝对 URL |
+| `subtitles/{lang}.vtt` | **OSS staging 前缀** ／ **OSS prod 前缀** | sync 时 `publish_subtitle_to_prod` server-side copy；payload `subtitles[].url` 是 prod 绝对 URL |
+| `*.key` / `*.iv` / `*.key.b64` | 业务 host（密钥不上 OSS） | 三件套不暴露 URL；`drm.keyBase64` 走 sync payload 内联 |
+
+OSS 桶布局：
+
+```
+photobundle/
+  Drama/staging/{slug}/poster/{lang}.{ext}              ← 海报
+  Drama/staging/{slug}/{ep_dir}/cover.jpg               ← 集封面
+  Drama/staging/{slug}/{ep_dir}/subtitles/{lang}.vtt    ← 字幕
+  Drama/staging/{slug}/{ep_dir}/{ladder}/init-{ladder}.mp4 + seg-*.m4s   ← 切片
+  Drama/prod/...                                        ← 镜像同结构
+```
+
+`publish_ladder` / `upload_poster_to_staging` / `upload_cover_to_staging` / `upload_subtitle_to_staging`（admin 路由 + worker 在编码 / 上传成功后调用）只写 staging。`publish_*_to_prod` 系列（sync worker 调用）通过 OSS server-side copy 把对应资产从 staging 拷到 prod。`publish_ladder_to_prod` 额外返回 prod-flavored m3u8 文本（字符串替换 `Drama/staging/` → `Drama/prod/`），其他三类只返回 prod 绝对 URL。删除时对称：staging 由 `DELETE /admin/...` 同步清；prod 由 sync worker 在删除同步成功后通过前缀级 `unpublish_episode_from_prod` / `unpublish_drama_from_prod` 单次扫除。
+
+启用后**这台服务器**本地 m3u8 形态（业务服务器侧的 m3u8 把 staging 替成 prod）：
+
+```m3u8
+#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:2
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-MAP:URI="https://photobundle.oss-ap-southeast-1.aliyuncs.com/Drama/staging/zhetian/ep-1/720p/init-720p.mp4"
+#EXT-X-KEY:METHOD=AES-128,URI="/drm/zhetian/ep-1/key",IV=0x...
+#EXTINF:2.000000,
+https://photobundle.oss-ap-southeast-1.aliyuncs.com/Drama/staging/zhetian/ep-1/720p/seg-720p-0.m4s
+#EXTINF:2.000000,
+https://photobundle.oss-ap-southeast-1.aliyuncs.com/Drama/staging/zhetian/ep-1/720p/seg-720p-1.m4s
+#EXT-X-ENDLIST
+```
+
+注意事项：
+
+- **OSS 桶 CORS** 必须允许 GET 来自业务 host 的 Origin，否则 hls.js / 浏览器播放会被 CORS 拒（ExoPlayer / iOS 原生 HLS 不走 CORS，不受影响）。两个前缀共用一套 CORS。
+- **凭证当前硬编码**在 `app/oss_upload.py`（`accessKeyId` / `accessKeySecret` / `endpoint` / bucket `photobundle`，前缀常量 `OSS_STAGING_PREFIX = 'Drama/staging'` / `OSS_PROD_PREFIX = 'Drama/prod'`）。多环境部署 / 凭证轮换需另开 follow-up。
+- **本地切片不会被自动删**：上传到 OSS 成功后 `OUT_DIR/{slug}/ep-{n}/` 仍保留。`DELETE /admin/episodes/{slug}/{ep}` 现在会同步清 staging OSS 对象（warnings 收集失败项）；prod OSS 对象由后续 sync 触发的 `unpublish_*_from_prod` 清掉。
+
+### Manual sync — staging→prod 拷贝原语（`app/publish.py`）
+
+供 sync worker 消费（不要在 router 直接调）：
+
+**Prod publish（staging→prod server-side copy）**：
+- `publish_ladder_to_prod(slug, ep_dir, ladder) -> str`：返回 prod-flavored m3u8 文本。
+- `publish_poster_to_prod(slug, lang, ext) -> str`：返回 prod URL。
+- `publish_cover_to_prod(slug, ep_dir) -> str`：返回 prod URL。
+- `publish_subtitle_to_prod(slug, ep_dir, lang) -> str`：返回 prod URL。
+
+**Prod unpublish（前缀清理）**：
+- `unpublish_episode_from_prod(slug, ep_dir)`：单次扫除该集 prod 端**全部对象**（cover + 字幕 + 三档 ladder）。episode delete-sync 用。
+- `unpublish_drama_from_prod(slug)`：扫除整部剧 prod 端全部对象。drama delete-sync 用。
+- `unpublish_ladder_from_prod` / `unpublish_poster_from_prod` / `unpublish_subtitle_from_prod`：单档 / 单海报 / 单字幕级别 prod 清理（备用，sync worker 当前不直接用，但 OpenSpec 接口里保留）。
+
+**Staging upload（admin / api routers 在写盘后调用）**：
+- `upload_poster_to_staging(slug, lang, local_path) -> str`：返回 staging URL。
+- `upload_cover_to_staging(slug, ep_dir, local_path) -> str`：返回 staging URL。
+- `upload_subtitle_to_staging(slug, ep_dir, lang, local_path) -> str`：返回 staging URL。
+- `publish_ladder` 是切片+m3u8 改写的复合操作（worker 调用，OpenSpec 里仍称 publish 而非 upload）。
+
+**Staging unpublish**：
+- `unpublish_episode_from_staging` / `unpublish_drama_from_staging`：DELETE 路由直接调（前缀级，覆盖所有资产类型）。
+- `unpublish_poster_from_staging` / `unpublish_subtitle_from_staging`：单海报 / 单字幕级别清理（替换前 / 删除时用）。
+
+### Migration（从单 host / 旧扁平前缀升级）
+
+如果在启用 staging/prod 拆分之前已经在 OSS 上有 `Drama/{slug}/...` 旧前缀对象：
+
+```bash
+OSS_ENABLED=true ./venv/bin/python scripts/migrate_to_oss.py
+```
+
+脚本扫所有 `status=ready` 行 → 重传切片到 staging 前缀 → 改写本地 m3u8。**旧前缀对象不删**，仅打日志列举，操作员在控制台手动清理。幂等，可重复跑。
+
+## 业务服务器同步
+
+这台 HLS 服务器是 **staging editor**：所有上传 / 翻译 / 标签编辑都先落在这里，操作员预览满意后**手动点击同步**才会推到业务服务器（prod）。同步过程是单 worker FIFO 队列 (`app/sync.py`)。
+
+### 状态机
+
+每个 drama 行和每个 episode 行各自独立带 `sync_status` 列：
+
+```
+dirty   ─→ syncing ─→ clean
+              │
+              └─→ sync_failed
+pending_delete ─→ syncing ─→ (row 物理删除 + prod OSS 清理)
+                      │
+                      └─→ sync_failed (intent 仍是 pending_delete)
+```
+
+- 新建 drama / 上传集 → `dirty`。
+- 编辑 drama 翻译 / 海报 / 标签 / 演员 → 该 drama 行 `dirty`（不影响其下集）。
+- 上传字幕 / 替换封面 / 重传视频 → 该集行 `dirty`（不影响 drama 行）。
+- Library 级联：tag PATCH / translation upsert/delete → 引用该 tag 的全部 drama 翻 dirty；actor 同；语言 `display_label` 改 → 该语言下有字幕的全部 drama 翻 dirty（`is_active` 切换不级联）。
+- 进程崩溃后启动期 reap：`sync_status='syncing'` 的行被翻成 `sync_failed` + 错误 `"orphaned by restart"`。
+
+### 双阶段删除
+
+`DELETE /admin/episodes/{slug}/{ep}` 和 `DELETE /admin/dramas/{slug}` 现在按 `last_synced_at` 分支：
+
+- **从未同步过**（`last_synced_at IS NULL`）→ 物理删行 + 本地清 + staging OSS 清。
+- **同步过**（`last_synced_at` 非空）→ 行**保留**，`sync_status='pending_delete'`；本地清 + staging OSS 清照旧。下一次 sync 触发对业务服务器的 `DELETE /sync/episodes/{slug}/{ep}` (或 drama 变体)，业务服务器返回 2xx 后才物理删行 + 清 prod OSS。
+
+`pending_delete` 行在剧详情页隐藏，但出现在 `/admin/sync` 总览页，让操作员知道还有挂起的同步。
+
+### 操作员 UX
+
+| 入口 | 行为 |
+|---|---|
+| 导航栏 `<div id="sync-zone">` | 5s 轮询 `GET /admin/sync/summary`，显示"需同步: N"链接到 `/admin/sync`。同步禁用时不显示。 |
+| 剧详情页"[同步整部剧]" | 入队 drama 同步 + 该剧下全部 dirty/pending_delete 集；剧 `last_synced_at` 更新后，子集逐个跑。 |
+| 集详情页"[同步本集]" | 入队该集同步。前置：剧必须至少同步过一次（否则 409）。 |
+| 首页卡片角标 | "非 clean: N" 角标（drama dirty + 子集 non-clean 计数）。 |
+| `/admin/sync` 总览 | 列出全部非 clean 的剧 + 集；"[同步全部]" 按钮按行入队全部同步。 |
+
+失败行显示红色 `sync_failed` 徽章（鼠标 hover 看错误详情）；点"同步本集"重试。
+
+### 业务服务器线协议（`/sync/*`）
+
+所有请求带 `X-API-Key: <BUSINESS_SYNC_API_KEY>`。共 4 个端点（业务服务器侧实现）：
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| POST | `/sync/dramas` | upsert drama + translations + tags + actors + languages 数组（业务服务器再异步从 staging 拉海报字节）。 |
+| DELETE | `/sync/dramas/{slug}` | 删一部剧的全部数据。 |
+| POST | `/sync/episodes` | upsert 一集；body 含三档 ladder 的 prod-flavored m3u8 文本、DRM key/iv、cover URL、subtitle URL 列表。 |
+| DELETE | `/sync/episodes/{slug}/{ep}` | 删一集。 |
+
+详细 payload schema 见 `openspec/changes/business-server-sync/design.md` 的"Decision: POST /sync/dramas payload shape"小节。
+
+### 部署须知
+
+- 这台 HLS 服务器需要能 HTTP 访问业务服务器（同 VPN / 同内网）。
+- 业务服务器 + HLS 服务器**共用同一个 OSS bucket**：staging 前缀只这台写、业务服务器只读 prod 前缀。同步即"server-side copy + 通知"。
+- 整个 sync 链路**没有自动重试**：失败 → 红色徽章 + 错误文本，操作员点"重试"再触发一次。
+
+## Cross-system contracts to preserve
+
+- **`#EXT-X-KEY:URI` ↔ `EpisodeInfo.drm.keyUri` must match verbatim** (query string, fragment, everything). The SDK uses it as the `DrmKeyStore` lookup key. If one changes, the other must change in lockstep. （OSS 启用时这条契约不变 —— 两边仍是业务 host 的相对路径 `/drm/{slug}/ep-{n}/key`。）
+- **`#EXT-X-MAP:URI` 与 segment 行**与任何 API 字段都无 verbatim 比对关系：OSS 启用时它们是绝对 OSS URL，仅供播放器消费；`EpisodeInfo.initUrl` / `firstSegUrl` 是 helper 重新拼出来的（用同一份 OSS 公网前缀 + 文件名约定），不强求字节级等于 m3u8 里的串。
+- **Playlist ordering**: `#EXT-X-MAP` (init) → `#EXT-X-KEY` → first `#EXTINF`. Reordering breaks ExoPlayer decryption. `encrypt-segments.sh`'s awk program enforces this; keep it.
+- **`episode-info-schema.json`** is the source of truth for the SDK contract. Only `episodeId`, `playUrl`, `durationMs` are required in Phase 1; `initUrl` / `firstSegUrl` / `fallback` are reserved for Phase 2 (ConnectionWarmer, RebufferWatchdog) and may be null. `drm.keyBase64` decoded length must be exactly 16 bytes; `drm.ivHex` is optional and falls back to `#EXT-X-KEY:IV`. `width` / `height` 是源视频 codec dimension（与 SDK `Format.width/height` 同口径），新上传写入；老 ready 行（升级前已存在）可能为 `null`，SDK 拿到 null 时退化到首帧解码后再读宽高。
+- **No master playlist / no ABR.** The SDK is served a single-rung media playlist chosen server-side; do not introduce `#EXT-X-STREAM-INF` logic or a master manifest.
+
+## Spec-driven workflow
+
+`openspec/` uses the OpenSpec workflow (config at `openspec/config.yaml`, plus the `openspec-*` / `opsx:*` skills). `encode-clear.sh` references `openspec/changes/short-drama-fast-startup/specs/shortdrama-server/spec.md` as the authoritative rationale for disabling FFmpeg's native HLS-AES path; that spec file isn't currently in the tree (only `openspec/changes/archive/` exists). When making behavior-level changes to the pipeline, prefer routing through the OpenSpec propose/apply flow rather than editing scripts directly.
