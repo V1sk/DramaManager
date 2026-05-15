@@ -24,7 +24,7 @@
 </div>
 
 <div class="episode-meta">
-    <div class="item"><strong>状态：</strong><span class="badge {{ episode.status }}">{{ episode.status }}</span></div>
+    <div class="item"><strong>状态：</strong><span id="ep-status-badge" class="badge {{ episode.status }}">{{ episode.status }}</span><span id="ep-progress-text" class="progress-text">{% if episode.status in ['encoding', 'pending'] and episode.progress %}{{ episode.progress }}{% endif %}</span></div>
     <div class="item"><strong>时长：</strong><span id="duration">{{ episode.duration_ms or '—' }}</span></div>
     <div class="item"><strong>分辨率：</strong>{% if episode.width and episode.height %}{{ episode.width }}×{{ episode.height }}{% else %}—{% endif %}</div>
     <div class="item"><strong>源文件：</strong>{{ episode.source_filename or '—' }}</div>
@@ -34,6 +34,13 @@
 
 {% if episode.status == 'failed' and episode.error_message %}
 <details class="error" style="margin-bottom: 16px;"><summary>查看错误</summary><pre>{{ episode.error_message }}</pre></details>
+{% endif %}
+
+{% if episode.status == 'failed' %}
+<div style="margin-bottom: 16px;">
+    <button class="btn btn-sm btn-primary" id="retry-ep-btn"{% if not episode.source_path %} disabled title="源文件已不存在，请使用下方'重传视频'"{% endif %}>重试本集</button>
+    <span class="meta" style="margin-left: 8px;">复用上次上传的源文件重新跑 pipeline，无需再次上传。</span>
+</div>
 {% endif %}
 
 <h2>封面</h2>
@@ -156,7 +163,20 @@ function startStatusPolling() {
             const res = await fetch('/admin/episodes');
             const rows = await res.json();
             const row = rows.find(r => r.drama_slug === SLUG && r.ep_number === EP);
-            if (row && row.status !== 'pending' && row.status !== 'encoding') {
+            if (!row) return;
+            // Live-update the progress text without reloading so the operator
+            // sees "编码 720p" → "上传 OSS · 540p" tick through.
+            const progEl = document.getElementById('ep-progress-text');
+            if (progEl) {
+                progEl.textContent = (row.status === 'encoding' || row.status === 'pending')
+                    ? (row.progress || '') : '';
+            }
+            const badge = document.getElementById('ep-status-badge');
+            if (badge && badge.textContent !== row.status) {
+                badge.textContent = row.status;
+                badge.className = 'badge ' + row.status;
+            }
+            if (row.status !== 'pending' && row.status !== 'encoding') {
                 clearInterval(id);
                 location.reload();
             }
@@ -165,6 +185,26 @@ function startStatusPolling() {
         }
     }, 2000);
 }
+
+// Retry button (only present when status=failed)
+(function () {
+    const btn = document.getElementById('retry-ep-btn');
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+        btn.disabled = true; btn.textContent = '入队中…';
+        try {
+            const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/episodes/${EP}/retry`, { method: 'POST' });
+            const body = await res.json().catch(() => ({}));
+            if (res.status === 409) { flash(body.detail || '无法重试', 'warn'); btn.disabled = false; btn.textContent = '重试本集'; return; }
+            if (!res.ok) { flash(`重试失败 (${res.status}): ${body.detail || ''}`, 'error'); btn.disabled = false; btn.textContent = '重试本集'; return; }
+            flash('已重新入队，开始编码…', 'info');
+            startStatusPolling();
+        } catch (e) {
+            flash('重试出错: ' + e, 'error');
+            btn.disabled = false; btn.textContent = '重试本集';
+        }
+    });
+})();
 
 // Subtitles
 let SUBS = DATA.subtitles || [];

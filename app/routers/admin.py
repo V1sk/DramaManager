@@ -124,6 +124,8 @@ async def admin_episodes() -> JSONResponse:
             "play_url": r["play_url"],
             "cover_url": r["cover_url"],
             "error_message": r["error_message"],
+            "progress": r["progress"],
+            "can_retry": r["source_path"] is not None,
             "created_at": r["created_at"],
             "updated_at": r["updated_at"],
         }
@@ -297,7 +299,7 @@ def _process_episode_upload(
 
     cover_url = f"/videos/{drama_slug}/{ep_dir_name}/cover.jpg"
 
-    db.upsert_pending(
+    old_source = db.upsert_pending(
         drama_slug=drama_slug,
         ep_number=ep_number,
         episode_id=episode_id,
@@ -306,7 +308,16 @@ def _process_episode_upload(
         source_filename=video.filename or "",
         width=width,
         height=height,
+        source_path=str(tmp_path),
     )
+    # Re-upload over a previously-failed episode leaves the prior tmp file
+    # orphaned in UPLOAD_TMP_DIR (we keep failed-episode sources around to
+    # power the "重试" button). Sweep it now.
+    if old_source:
+        try:
+            Path(old_source).unlink(missing_ok=True)
+        except OSError as e:
+            log.warning("failed to remove orphaned source %s: %s", old_source, e)
     return tmp_path
 
 
@@ -401,6 +412,7 @@ async def admin_upload_next_episode(
                 source_filename=video.filename or "",
                 width=width,
                 height=height,
+                source_path=str(tmp_path),
             )
         except sqlite3.IntegrityError as e:
             tmp_path.unlink(missing_ok=True)
@@ -564,6 +576,49 @@ async def admin_reupload_episode(
     )
 
 
+@router.post("/admin/dramas/{drama_slug}/episodes/{ep}/retry")
+async def admin_retry_episode(
+    drama_slug: str = PathParam(..., pattern=r"^[a-z0-9][a-z0-9-]*$"),
+    ep: str = PathParam(..., pattern=r"^[0-9]+$"),
+) -> JSONResponse:
+    """One-click retry for a `failed` episode. Re-enqueues the previously
+    uploaded source (kept on disk by the worker on failure) without requiring
+    the operator to re-pick the file. 409 if the episode is not `failed` or
+    the retained source has gone missing.
+    """
+    ep_number = int(ep)
+    if ep_number < 1:
+        raise HTTPException(status_code=422, detail="ep must be >= 1")
+    row = db.get_by_slug_ep(drama_slug, ep_number)
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"episode '{drama_slug}/{ep_number}' not found",
+        )
+    if row["status"] != "failed":
+        raise HTTPException(
+            status_code=409,
+            detail=f"只能重试 failed 状态的集，当前状态: {row['status']}",
+        )
+    source_path = row["source_path"]
+    if not source_path or not Path(source_path).is_file():
+        raise HTTPException(
+            status_code=409,
+            detail="源文件已不存在，请重新上传视频",
+        )
+
+    episode_id = row["episode_id"]
+    db.set_status(episode_id, "pending")
+    await enqueue(Job(
+        episode_id=episode_id,
+        drama_slug=drama_slug,
+        ep_number=ep_number,
+        tmp_path=Path(source_path),
+    ))
+    log.info("enqueued retry slug=%s ep=%s", drama_slug, episode_id)
+    return JSONResponse({"ok": True})
+
+
 @router.delete("/admin/episodes/{drama_slug}/{ep}")
 async def admin_delete_episode(
     drama_slug: str = PathParam(..., pattern=r"^[a-z0-9][a-z0-9-]*$"),
@@ -602,6 +657,16 @@ async def admin_delete_episode(
         except OSError as e:
             log.warning("failed to remove key file %s: %s", key_file, e)
             warnings.append(str(key_file))
+
+    # If the row was failed with a retained source (for retry), drop the tmp
+    # upload file too so a deleted episode never leaves disk leakage behind.
+    source_path = row.get("source_path")
+    if source_path:
+        try:
+            Path(source_path).unlink(missing_ok=True)
+        except OSError as e:
+            log.warning("failed to remove retained source %s: %s", source_path, e)
+            warnings.append(source_path)
 
     # Drama directory cleanup is no longer triggered here. Drama row outlives
     # its last episode; cleanup of OUT_DIR/{slug}/ happens only when the drama

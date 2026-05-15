@@ -130,20 +130,27 @@ function renderEpisodes() {
         const errBlock = e.status === 'failed' && e.error_message
             ? `<details class="error"><summary>查看错误</summary><pre>${escapeHtml(e.error_message)}</pre></details>`
             : '';
+        const progBlock = (e.status === 'encoding' || e.status === 'pending') && e.progress
+            ? `<div class="progress-text">${escapeHtml(e.progress)}</div>`
+            : '';
         const delDisabled = e.status === 'encoding' ? 'disabled title="编码中不能删除"' : '';
         const syncStatus = e.sync_status || 'dirty';
         const syncErr = e.sync_error || '';
         const syncTitle = syncErr ? ` title="${escapeHtml(syncErr)}"` : '';
         const syncBtnDisabled = (syncStatus === 'clean') ? 'disabled' : '';
+        const retryBtn = e.status === 'failed'
+            ? `<button class="btn btn-sm btn-primary" data-action="retry-ep" data-ep="${e.ep_number}"${e.can_retry ? '' : ' disabled title="源文件已不存在，请重传"'}>重试</button>`
+            : '';
         return `<tr data-ep="${e.ep_number}">
             <td>EP${e.ep_number}</td>
             <td>${cover}</td>
-            <td><span class="badge ${e.status}">${e.status}</span>${errBlock}</td>
+            <td><span class="badge ${e.status}">${e.status}</span>${progBlock}${errBlock}</td>
             <td>${fmtDuration(e.duration_ms)}</td>
             <td class="meta">${fmtTime(e.updated_at)}</td>
             <td><span class="sync-badge ${syncStatus}"${syncTitle}>${syncStatus}</span></td>
             <td class="actions-col">
                 <a href="/admin/dramas/${encodeURIComponent(SLUG)}/episodes/${e.ep_number}" class="btn btn-sm btn-primary">详情</a>
+                ${retryBtn}
                 <button class="btn btn-sm btn-success" data-action="sync-ep" data-ep="${e.ep_number}" ${syncBtnDisabled}>同步</button>
                 <button class="btn btn-sm btn-danger" data-action="delete-ep" data-ep="${e.ep_number}" ${delDisabled}>删除</button>
             </td>
@@ -266,6 +273,31 @@ document.getElementById('episodes-body').addEventListener('click', async (ev) =>
         } catch (e) {
             flash('删除出错: ' + e, 'error');
             delBtn.disabled = false;
+        }
+        return;
+    }
+    const retryBtn = ev.target.closest('[data-action="retry-ep"]');
+    if (retryBtn) {
+        const ep = retryBtn.dataset.ep;
+        retryBtn.disabled = true; retryBtn.textContent = '入队中…';
+        try {
+            const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/episodes/${ep}/retry`, { method: 'POST' });
+            const body = await res.json().catch(() => ({}));
+            if (res.status === 409) {
+                flash(body.detail || '无法重试', 'warn');
+                retryBtn.disabled = false; retryBtn.textContent = '重试';
+                return;
+            }
+            if (!res.ok) {
+                flash(`重试失败 (${res.status}): ${body.detail || ''}`, 'error');
+                retryBtn.disabled = false; retryBtn.textContent = '重试';
+                return;
+            }
+            flash(`第 ${ep} 集已重新入队`, 'info');
+            await refreshDrama();
+        } catch (e) {
+            flash('重试出错: ' + e, 'error');
+            retryBtn.disabled = false; retryBtn.textContent = '重试';
         }
         return;
     }

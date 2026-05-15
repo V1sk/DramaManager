@@ -99,6 +99,14 @@ CREATE TABLE IF NOT EXISTS episodes (
   height           INTEGER,
   source_filename  TEXT,
   error_message    TEXT,
+  -- upload-progress-retry: `progress` is a free-text sub-status shown in the
+  -- admin UI while `status='encoding'` (e.g. "编码 720p" / "上传 OSS · 540p");
+  -- cleared on every non-encoding transition. `source_path` retains the temp
+  -- upload file for `status='failed'` rows so a one-click retry can re-enqueue
+  -- without a re-upload; it is cleared (and the file deleted) once the episode
+  -- reaches `ready`.
+  progress         TEXT,
+  source_path      TEXT,
   -- business-server-sync (step 6): episode-level sync state machine. Mirrors
   -- the dramas columns above. Independent from the drama row's sync_status.
   sync_status      TEXT    NOT NULL DEFAULT 'dirty',
@@ -253,12 +261,36 @@ def _connect(db_path: Path = None) -> sqlite3.Connection:
 def init_db() -> None:
     with _connect() as conn:
         conn.executescript(_SCHEMA)
+        _migrate_add_columns(conn)
     # FK enforcement self-test: the i18n-foundation spec requires verifying
     # that the translations.lang_code FK isn't silently dropped. We attempt
     # to insert a translation referencing a non-existent language; SQLite
     # MUST raise IntegrityError. Run inside a savepoint so we don't leave
     # state behind.
     _verify_fk_enforcement()
+
+
+def _migrate_add_columns(conn: sqlite3.Connection) -> None:
+    """Idempotent column additions for an already-deployed `hls.db`.
+
+    `CREATE TABLE IF NOT EXISTS` leaves an existing table untouched, so columns
+    introduced after the first deploy must be ALTER-ed in. SQLite has no
+    `ADD COLUMN IF NOT EXISTS`; we list the table's current columns and only
+    add the missing ones. Safe to run on every startup.
+    """
+    wanted = {
+        "episodes": [
+            ("progress", "TEXT"),
+            ("source_path", "TEXT"),
+        ],
+    }
+    for table, cols in wanted.items():
+        existing = {
+            r["name"] for r in conn.execute(f"PRAGMA table_info({table})")
+        }
+        for name, decl in cols:
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
 def _verify_fk_enforcement() -> None:
@@ -880,7 +912,8 @@ def get_drama_full(slug: str) -> dict | None:
       - actors: [{slug, name}, ...]    (name localized per actor.default_lang)
       - episodes: [{ep_number, episode_id, status, duration_ms, width, height,
                     cover_url, play_url, source_filename, error_message,
-                    subtitle_count, updated_at}, ...] ordered by ep_number ASC
+                    progress, can_retry, subtitle_count, updated_at}, ...]
+                    ordered by ep_number ASC
 
     Returns None if the drama is unknown.
     """
@@ -905,6 +938,8 @@ def get_drama_full(slug: str) -> dict | None:
         e.play_url,
         e.source_filename,
         e.error_message,
+        e.progress,
+        (e.source_path IS NOT NULL) AS can_retry,
         e.sync_status,
         e.sync_error,
         e.last_synced_at,
@@ -931,10 +966,16 @@ def upsert_pending(
     source_filename: str,
     width: int | None = None,
     height: int | None = None,
-) -> None:
+    source_path: str | None = None,
+) -> str | None:
     """Insert a new pending row, or overwrite an existing (drama_slug, ep_number) row
     in place. On overwrite, created_at is preserved, error_message is cleared, DRM
     fields are cleared, and updated_at is refreshed.
+
+    `source_path` is the temp upload file the pipeline will consume; it is kept
+    on the row so a failed episode can be retried without a re-upload. On
+    overwrite the *previous* `source_path` is returned (when it differs) so the
+    caller can delete the now-orphaned file from a prior failed attempt.
 
     The drama row keyed by `drama_slug` MUST already exist (FK enforces this);
     the upload handler is responsible for the precondition check.
@@ -942,7 +983,8 @@ def upsert_pending(
     now = _now_iso()
     with _connect() as conn:
         existing = conn.execute(
-            "SELECT id, created_at FROM episodes WHERE drama_slug=? AND ep_number=?",
+            "SELECT id, created_at, source_path FROM episodes "
+            "WHERE drama_slug=? AND ep_number=?",
             (drama_slug, ep_number),
         ).fetchone()
         if existing is None:
@@ -951,16 +993,17 @@ def upsert_pending(
                 INSERT INTO episodes (
                   drama_slug, ep_number, episode_id, status,
                   duration_ms, cover_url, width, height, source_filename,
-                  sync_status,
+                  source_path, progress, sync_status,
                   created_at, updated_at
-                ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, 'dirty', ?, ?)
+                ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, NULL, 'dirty', ?, ?)
                 """,
                 (
                     drama_slug, ep_number, episode_id,
                     duration_ms, cover_url, width, height, source_filename,
-                    now, now,
+                    source_path, now, now,
                 ),
             )
+            return None
         else:
             # Re-upload: keep last_synced_at intact (the row's prior sync history
             # remains meaningful — operators may want "last synced 2 days ago,
@@ -976,6 +1019,8 @@ def upsert_pending(
                   width = ?,
                   height = ?,
                   source_filename = ?,
+                  source_path = ?,
+                  progress = NULL,
                   play_url = NULL,
                   key_uri = NULL,
                   key_b64 = NULL,
@@ -988,10 +1033,14 @@ def upsert_pending(
                 """,
                 (
                     episode_id, duration_ms, cover_url,
-                    width, height, source_filename,
+                    width, height, source_filename, source_path,
                     now, existing["id"],
                 ),
             )
+        old_source = existing["source_path"]
+        if old_source and old_source != source_path:
+            return old_source
+        return None
 
 
 def set_status(
@@ -1011,6 +1060,10 @@ def set_status(
         fields.append("error_message = ?"); params.append(error_message)
     else:
         fields.append("error_message = NULL")
+    # `progress` is only meaningful mid-encode; every other transition clears it
+    # so a stale "编码 720p" never lingers on a ready/failed/pending row.
+    if status != "encoding":
+        fields.append("progress = NULL")
     if play_url is not None:
         fields.append("play_url = ?"); params.append(play_url)
     if key_uri is not None:
@@ -1024,6 +1077,34 @@ def set_status(
         conn.execute(
             f"UPDATE episodes SET {', '.join(fields)} WHERE episode_id = ?",
             params,
+        )
+
+
+def set_episode_progress(episode_id: str, progress: str | None) -> None:
+    """Update the free-text `progress` sub-status of an encoding episode.
+
+    Called repeatedly by the pipeline worker as it moves through encode /
+    encrypt / OSS-upload stages. `updated_at` is bumped so the admin UI's
+    poll-driven refresh keeps surfacing the latest stage.
+    """
+    now = _now_iso()
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE episodes SET progress=?, updated_at=? WHERE episode_id=?",
+            (progress, now, episode_id),
+        )
+
+
+def clear_episode_source_path(episode_id: str) -> None:
+    """Drop the retained temp-upload pointer once an episode reaches `ready`.
+
+    The worker deletes the file itself; this just clears the DB column so the
+    admin UI stops offering a one-click retry for a now-succeeded episode.
+    """
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE episodes SET source_path=NULL WHERE episode_id=?",
+            (episode_id,),
         )
 
 
@@ -1758,7 +1839,7 @@ def reap_orphaned_encoding() -> int:
     now = _now_iso()
     with _connect() as conn:
         cur = conn.execute(
-            "UPDATE episodes SET status='failed', error_message='orphaned by restart', updated_at=? WHERE status='encoding'",
+            "UPDATE episodes SET status='failed', error_message='orphaned by restart', progress=NULL, updated_at=? WHERE status='encoding'",
             (now,),
         )
         return cur.rowcount or 0

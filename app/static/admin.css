@@ -115,6 +115,9 @@ table th { background: var(--bg-alt); font-weight: 600; color: #555; }
 .badge.active   { background: var(--ready-bg); color: var(--ready-fg); }
 .badge.inactive { background: var(--bg-strip); color: #555; }
 
+/* Sub-status text shown next to the encoding badge while pipeline runs. */
+.progress-text { font-size: 11px; color: var(--fg-meta, #888); margin-left: 6px; }
+
 /* sync badges */
 .sync-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
 .sync-badge.clean   { background: var(--ready-bg); color: var(--ready-fg); }
