@@ -1092,3 +1092,164 @@ async def admin_delete_subtitle(
     log.info("deleted subtitle slug=%s ep=%s lang=%s warnings=%d",
              drama_slug, ep_number, lang, len(warnings))
     return JSONResponse({"ok": True, "warnings": warnings})
+
+
+_SUBTITLE_BATCH_RE = re.compile(r"^EP(\d+)-(.+)$", re.IGNORECASE)
+
+
+def _subtitle_to_vtt_bytes(filename: str, body: bytes) -> bytes:
+    """Normalize an uploaded .vtt or .srt subtitle to WebVTT bytes. SRT is
+    converted in place (comma→period in timecodes + WEBVTT header) since
+    everything downstream — local path, OSS, DB — assumes `.vtt`. Raises
+    ValueError with a human-readable message on bad extension / content."""
+    ext = Path(filename).suffix.lower()
+    if body.startswith(_UTF8_BOM):
+        body = body[len(_UTF8_BOM):]
+    if ext == ".vtt":
+        if not body.startswith(_VTT_MAGIC):
+            raise ValueError("扩展名是 .vtt 但内容不以 WEBVTT 开头")
+        return body
+    if ext == ".srt":
+        text = body.decode("utf-8", errors="replace")
+        if "-->" not in text:
+            raise ValueError("扩展名是 .srt 但内容不含时间轴 '-->'")
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text = re.sub(r"(\d{2}:\d{2}:\d{2}),(\d{3})", r"\1.\2", text)
+        return ("WEBVTT\n\n" + text.lstrip()).encode("utf-8")
+    raise ValueError(f"不支持的字幕扩展名 {ext!r}；仅支持 .vtt / .srt")
+
+
+@router.post("/admin/dramas/{drama_slug}/subtitles/batch")
+async def admin_batch_upload_subtitles(
+    drama_slug: str = PathParam(..., pattern=r"^[a-z0-9][a-z0-9-]*$"),
+    files: list[UploadFile] = File(...),
+) -> JSONResponse:
+    """Batch-upload subtitles. Each filename must be `EP<n>-<lang>-...vtt|srt`
+    (EP prefix case-insensitive); `<lang>` is resolved against the active
+    language registry by longest match, so hyphenated codes like `zh-rCN`
+    work even though the filename also uses `-` as separator. SRT files are
+    converted to WebVTT. Existing (episode, lang) subtitles are overwritten.
+    Returns a per-file result list — partial failure is normal.
+    """
+    if db.get_drama(drama_slug) is None:
+        for f in files:
+            await f.close()
+        raise HTTPException(status_code=404, detail=f"drama '{drama_slug}' not found")
+
+    active_langs = [r["code"] for r in db.list_languages(active_only=True)]
+    results: list[dict] = []
+    seen: dict[tuple[int, str], str] = {}  # (ep, lang) -> filename, dedupe within the batch
+
+    for file in files:
+        filename = file.filename or ""
+        m = _SUBTITLE_BATCH_RE.match(Path(filename).stem.strip())
+        if not m:
+            await file.close()
+            results.append({
+                "filename": filename, "ep_number": None, "lang_code": None,
+                "ok": False, "detail": "文件名须形如 EP<集号>-<语言>-说明.vtt/srt",
+            })
+            continue
+        ep_number = int(m.group(1))
+        if ep_number < 1:
+            await file.close()
+            results.append({
+                "filename": filename, "ep_number": ep_number, "lang_code": None,
+                "ok": False, "detail": "集号必须 >= 1",
+            })
+            continue
+        remainder = m.group(2)
+        # Resolve language: longest active code that `remainder` equals or
+        # starts with (followed by '-'). Longest-match disambiguates hyphenated
+        # codes (e.g. `zh-rCN-foo` → `zh-rCN`, not a bare `zh`).
+        lang: str | None = None
+        for code in active_langs:
+            if remainder == code or remainder.startswith(code + "-"):
+                if lang is None or len(code) > len(lang):
+                    lang = code
+        if lang is None:
+            await file.close()
+            results.append({
+                "filename": filename, "ep_number": ep_number, "lang_code": None,
+                "ok": False, "detail": "文件名中的语言段未匹配到任何已启用语言",
+            })
+            continue
+        key = (ep_number, lang)
+        if key in seen:
+            await file.close()
+            results.append({
+                "filename": filename, "ep_number": ep_number, "lang_code": lang,
+                "ok": False, "detail": f"与本批次文件 '{seen[key]}' 的集号+语言重复",
+            })
+            continue
+        seen[key] = filename
+
+        ep_row = db.get_by_slug_ep(drama_slug, ep_number)
+        if ep_row is None:
+            await file.close()
+            results.append({
+                "filename": filename, "ep_number": ep_number, "lang_code": lang,
+                "ok": False, "detail": f"该剧下不存在第 {ep_number} 集",
+            })
+            continue
+
+        try:
+            body = await file.read()
+        finally:
+            await file.close()
+        try:
+            vtt_bytes = _subtitle_to_vtt_bytes(filename, body)
+        except ValueError as e:
+            results.append({
+                "filename": filename, "ep_number": ep_number, "lang_code": lang,
+                "ok": False, "detail": str(e),
+            })
+            continue
+
+        target_path = _subtitle_path(drama_slug, ep_number, lang)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            target_path.write_bytes(vtt_bytes)
+        except OSError as e:
+            results.append({
+                "filename": filename, "ep_number": ep_number, "lang_code": lang,
+                "ok": False, "detail": f"写入字幕文件失败: {e}",
+            })
+            continue
+
+        if settings.oss_enabled:
+            from .. import publish
+            ep_dir = f"ep-{ep_number}"
+            try:
+                await asyncio.to_thread(
+                    publish.upload_subtitle_to_staging,
+                    drama_slug, ep_dir, lang, target_path,
+                )
+            except Exception as e:  # noqa: BLE001 — PublishError or unexpected
+                log.exception(
+                    "OSS staging upload failed for subtitle %s/%s/%s",
+                    drama_slug, ep_dir, lang,
+                )
+                target_path.unlink(missing_ok=True)
+                results.append({
+                    "filename": filename, "ep_number": ep_number, "lang_code": lang,
+                    "ok": False, "detail": f"OSS staging 上传失败: {e}",
+                })
+                continue
+
+        file_url = _subtitle_url(drama_slug, ep_number, lang)
+        db.upsert_subtitle(ep_row["episode_id"], lang, file_url)
+        db.mark_episode_dirty(drama_slug, ep_number)
+        log.info("batch subtitle slug=%s ep=%s lang=%s bytes=%d file=%s",
+                 drama_slug, ep_number, lang, len(vtt_bytes), filename)
+        results.append({
+            "filename": filename, "ep_number": ep_number, "lang_code": lang,
+            "ok": True, "detail": "已上传",
+        })
+
+    ok_count = sum(1 for r in results if r["ok"])
+    return JSONResponse({
+        "ok_count": ok_count,
+        "error_count": len(results) - ok_count,
+        "results": results,
+    })

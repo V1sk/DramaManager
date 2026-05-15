@@ -86,7 +86,9 @@
     <input type="file" id="upload-next-file" accept="video/*" style="display: none;">
     <button class="btn-success btn-sm" id="batch-upload-btn">+ 批量上传</button>
     <input type="file" id="batch-upload-file" accept="video/*" multiple style="display: none;">
-    <span class="meta" style="margin-left: 12px;">单集：服务器自动分配下一个集号 (MAX+1)；批量：文件名须以 EP&lt;数字&gt; 开头（如 EP1.mp4），按文件名分配集号</span>
+    <button class="btn-success btn-sm" id="batch-subtitle-btn">+ 批量上传字幕</button>
+    <input type="file" id="batch-subtitle-file" accept=".vtt,.srt" multiple style="display: none;">
+    <div class="meta" style="margin-top: 6px;">单集：服务器自动分配下一个集号 (MAX+1)；批量集：文件名须以 EP&lt;数字&gt; 开头（如 EP1.mp4）；批量字幕：文件名须形如 EP&lt;集号&gt;-&lt;语言&gt;-说明.vtt/srt（如 EP1-en-x.srt）</div>
 </div>
 
 <table id="episodes-table">
@@ -340,6 +342,38 @@ document.getElementById('batch-upload-file').addEventListener('change', async (e
     } finally {
         btn.disabled = false;
         btn.textContent = '+ 批量上传';
+        ev.target.value = '';
+    }
+});
+
+document.getElementById('batch-subtitle-btn').addEventListener('click', () => {
+    document.getElementById('batch-subtitle-file').click();
+});
+document.getElementById('batch-subtitle-file').addEventListener('change', async (ev) => {
+    const files = Array.from(ev.target.files);
+    if (!files.length) return;
+    const btn = document.getElementById('batch-subtitle-btn');
+    btn.disabled = true;
+    btn.textContent = `上传中… (${files.length} 个文件)`;
+    const fd = new FormData();
+    for (const f of files) fd.append('files', f);
+    try {
+        const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/subtitles/batch`, { method: 'POST', body: fd });
+        if (!res.ok) {
+            flash(`批量上传字幕失败 (${res.status}): ${await res.text()}`, 'error');
+        } else {
+            const body = await res.json();
+            flash(`批量字幕上传完成：成功 ${body.ok_count} 个，失败 ${body.error_count} 个`, body.error_count ? 'warn' : 'info');
+            for (const r of (body.results || []).filter(r => !r.ok)) {
+                flash(`✗ ${r.filename || '(无文件名)'}: ${r.detail}`, 'error');
+            }
+            await refreshDrama();
+        }
+    } catch (e) {
+        flash('批量上传字幕出错: ' + e, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '+ 批量上传字幕';
         ev.target.value = '';
     }
 });
