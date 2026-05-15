@@ -46,10 +46,15 @@ async def startup() -> None:
             "sync_client.startup() called without BUSINESS_SYNC_BASE_URL / "
             "BUSINESS_SYNC_API_KEY in settings"
         )
+    # trust_env=False: ignore HTTP_PROXY / HTTPS_PROXY / ALL_PROXY in the
+    # operator's shell. Sync targets a peer business server on the same
+    # internal network; routing through a developer's SOCKS / HTTP proxy
+    # is wrong and also pulls in a socksio dependency we don't ship.
     _client = httpx.AsyncClient(
         base_url=settings.business_sync_base_url,
         timeout=settings.business_sync_timeout,
         headers={"X-API-Key": settings.business_sync_api_key},
+        trust_env=False,
     )
     log.info(
         "sync_client up: base=%s timeout=%ds",

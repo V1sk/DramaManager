@@ -50,8 +50,8 @@ def load_settings() -> Settings:
             f"DEFAULT_LADDER must be one of {ALLOWED_LADDERS}, got {default_ladder!r}"
         )
 
-    sync_base = (os.environ.get("BUSINESS_SYNC_BASE_URL", "") or "").strip() or None
-    sync_key = (os.environ.get("BUSINESS_SYNC_API_KEY", "") or "").strip() or None
+    sync_base = (os.environ.get("BUSINESS_SYNC_BASE_URL", "http://127.0.0.1:9000") or "").strip() or None
+    sync_key = (os.environ.get("BUSINESS_SYNC_API_KEY", "demo-secret-key") or "").strip() or None
     if sync_base is not None and sync_base.endswith("/"):
         # Strip trailing slash so url joins are predictable; httpx.AsyncClient
         # handles base_url with or without trailing slash, but downstream
