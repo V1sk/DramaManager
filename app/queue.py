@@ -33,6 +33,24 @@ async def enqueue(job: Job) -> None:
     await get_queue().put(job)
 
 
+# Per-episode locks: with PIPELINE_CONCURRENCY > 1 several workers run jobs in
+# parallel, but two jobs for the SAME episode_id must never run together — they
+# write the same `ep-{n}/` output dir and `keys/` files and would clobber each
+# other. Different episodes get different locks and run concurrently. Entries
+# are intentionally never removed: one tiny Lock per unique episode_id, bounded
+# by catalog size, and cleanup would race with a freshly-enqueued same-episode
+# job grabbing a stale lock object.
+_episode_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_episode_lock(episode_id: str) -> asyncio.Lock:
+    lock = _episode_locks.get(episode_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _episode_locks[episode_id] = lock
+    return lock
+
+
 def _cleanup_tmp(tmp_path: Path) -> None:
     try:
         tmp_path.unlink(missing_ok=True)
@@ -121,12 +139,15 @@ async def _handle_job(job: Job) -> None:
         )
 
 
-async def worker_loop() -> None:
+async def worker_loop(worker_id: int = 0) -> None:
     q = get_queue()
+    log.info("pipeline worker %d started", worker_id)
     while True:
         job = await q.get()
         try:
-            await _handle_job(job)
+            # Serialize same-episode jobs; different episodes run in parallel.
+            async with _get_episode_lock(job.episode_id):
+                await _handle_job(job)
         except Exception:  # noqa: BLE001 — keep the worker alive across job-level bugs
             log.exception("unhandled worker error on ep=%s", job.episode_id)
             try:

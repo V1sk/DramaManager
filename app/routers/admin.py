@@ -422,6 +422,102 @@ async def admin_upload_next_episode(
     )
 
 
+_EP_PREFIX_RE = re.compile(r"^EP(\d+)", re.IGNORECASE)
+
+
+@router.post("/admin/dramas/{drama_slug}/episodes/batch")
+async def admin_batch_upload_episodes(
+    drama_slug: str = PathParam(..., pattern=r"^[a-z0-9][a-z0-9-]*$"),
+    videos: list[UploadFile] = File(...),
+) -> JSONResponse:
+    """Batch-upload episodes. Each file's `ep_number` is derived from its
+    filename `EP<n>` prefix (case-insensitive). Existing episodes are
+    overwritten (re-upload semantics); episodes currently encoding are
+    skipped. Returns a per-file result list — partial failure is normal.
+
+    NOTE: declared before the `episodes/{ep}` route — FastAPI matches in
+    order, and the literal `batch` segment would otherwise be captured by
+    `{ep}` and 422 on the `^[0-9]+$` pattern.
+    """
+    if db.get_drama(drama_slug) is None:
+        for v in videos:
+            await v.close()
+        raise HTTPException(
+            status_code=404,
+            detail=f"drama '{drama_slug}' not found; create it via POST /admin/dramas first",
+        )
+
+    results: list[dict] = []
+    seen_eps: dict[int, str] = {}  # ep_number -> filename, dedupe within the batch
+
+    for video in videos:
+        filename = video.filename or ""
+        m = _EP_PREFIX_RE.match(filename.strip())
+        if not m:
+            await video.close()
+            results.append({
+                "filename": filename, "ep_number": None, "ok": False,
+                "detail": "文件名未以 EP<数字> 开头",
+            })
+            continue
+        ep_number = int(m.group(1))
+        if ep_number < 1:
+            await video.close()
+            results.append({
+                "filename": filename, "ep_number": ep_number, "ok": False,
+                "detail": "集号必须 >= 1",
+            })
+            continue
+        if ep_number in seen_eps:
+            await video.close()
+            results.append({
+                "filename": filename, "ep_number": ep_number, "ok": False,
+                "detail": f"集号与本批次文件 '{seen_eps[ep_number]}' 重复",
+            })
+            continue
+        seen_eps[ep_number] = filename
+
+        row = db.get_by_slug_ep(drama_slug, ep_number)
+        if row is not None and row["status"] == "encoding":
+            await video.close()
+            results.append({
+                "filename": filename, "ep_number": ep_number, "ok": False,
+                "detail": "该集正在编码中，跳过",
+            })
+            continue
+
+        try:
+            tmp_path = _process_episode_upload(drama_slug, ep_number, video)
+        except HTTPException as e:
+            await video.close()
+            results.append({
+                "filename": filename, "ep_number": ep_number, "ok": False,
+                "detail": str(e.detail),
+            })
+            continue
+        await video.close()
+
+        episode_id = f"{drama_slug}-ep-{ep_number}"
+        await enqueue(Job(
+            episode_id=episode_id,
+            drama_slug=drama_slug,
+            ep_number=ep_number,
+            tmp_path=tmp_path,
+        ))
+        log.info("enqueued batch slug=%s ep=%s file=%s", drama_slug, episode_id, filename)
+        results.append({
+            "filename": filename, "ep_number": ep_number, "ok": True,
+            "detail": "已入队",
+        })
+
+    ok_count = sum(1 for r in results if r["ok"])
+    return JSONResponse({
+        "ok_count": ok_count,
+        "error_count": len(results) - ok_count,
+        "results": results,
+    })
+
+
 @router.post("/admin/dramas/{drama_slug}/episodes/{ep}")
 async def admin_reupload_episode(
     drama_slug: str = PathParam(..., pattern=r"^[a-z0-9][a-z0-9-]*$"),

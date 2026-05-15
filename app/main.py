@@ -31,7 +31,11 @@ async def lifespan(app: FastAPI):
             "startup: flipped %d orphaned syncing row(s) to sync_failed", sync_reaped,
         )
 
-    worker_task = asyncio.create_task(worker_loop(), name="pipeline-worker")
+    worker_tasks = [
+        asyncio.create_task(worker_loop(i), name=f"pipeline-worker-{i}")
+        for i in range(settings.pipeline_concurrency)
+    ]
+    log.info("lifespan up: %d pipeline worker(s)", settings.pipeline_concurrency)
     sync_task = None
     if settings.business_sync_base_url:
         from . import sync as sync_module, sync_client
@@ -61,11 +65,13 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        worker_task.cancel()
-        try:
-            await worker_task
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001
-            pass
+        for t in worker_tasks:
+            t.cancel()
+        for t in worker_tasks:
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         if sync_task is not None:
             sync_task.cancel()
             try:

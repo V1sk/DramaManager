@@ -27,6 +27,12 @@ class Settings:
     business_sync_base_url: str | None
     business_sync_api_key: str | None
     business_sync_timeout: int
+    # How many pipeline jobs (encode + encrypt + OSS publish) run concurrently.
+    # Each job is its own `pipeline.sh` subprocess; ffmpeg is already
+    # multi-threaded so this oversubscribes CPU — 2 is a sane default, raise
+    # only if the box has spare cores. Same-episode jobs are still serialized
+    # by a per-episode lock in queue.py.
+    pipeline_concurrency: int
 
 
 def _parse_bool_env(name: str) -> bool:
@@ -74,6 +80,18 @@ def load_settings() -> Settings:
             f"BUSINESS_SYNC_TIMEOUT must be positive, got {sync_timeout}"
         )
 
+    concurrency_raw = os.environ.get("PIPELINE_CONCURRENCY", "2").strip()
+    try:
+        pipeline_concurrency = int(concurrency_raw) if concurrency_raw else 2
+    except ValueError as e:
+        raise RuntimeError(
+            f"PIPELINE_CONCURRENCY must be an integer, got {concurrency_raw!r}"
+        ) from e
+    if pipeline_concurrency < 1:
+        raise RuntimeError(
+            f"PIPELINE_CONCURRENCY must be >= 1, got {pipeline_concurrency}"
+        )
+
     return Settings(
         out_dir=out_dir,
         db_path=db_path,
@@ -84,6 +102,7 @@ def load_settings() -> Settings:
         business_sync_base_url=sync_base,
         business_sync_api_key=sync_key,
         business_sync_timeout=sync_timeout,
+        pipeline_concurrency=pipeline_concurrency,
     )
 
 
