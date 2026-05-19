@@ -120,7 +120,7 @@ async def _handle_job(job: Job) -> bool:
 
     # OSS 启用时：把每档 ladder 的 init + 全部 segment 上传到 OSS，并改写 m3u8。
     # 任一档失败 → episode 置 failed，不进入 ready。本地产物保留供事后排查。
-    if settings.oss_enabled:
+    if settings.storage_enabled:
         for ladder_name in ("540p", "720p", "1080p"):
             db.set_episode_progress(ep_id, f"上传 OSS · {ladder_name}")
             try:
