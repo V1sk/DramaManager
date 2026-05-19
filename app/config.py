@@ -93,7 +93,7 @@ def load_settings() -> Settings:
     # a back-compat alias so existing deployments don't need to change env.
     # Precedence: explicit STORAGE_PROVIDER wins; if unset, fall back to
     # interpreting OSS_ENABLED.
-    storage_raw = os.environ.get("STORAGE_PROVIDER", "").strip().lower()
+    storage_raw = os.environ.get("STORAGE_PROVIDER", "tos").strip().lower()
     legacy_oss_enabled = _parse_bool_env("OSS_ENABLED")
     if not storage_raw:
         storage_provider = "oss" if legacy_oss_enabled else "none"
