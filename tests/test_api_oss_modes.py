@@ -1,11 +1,17 @@
-"""TestClient verification for spec scenarios on _row_to_episode_info dual-mode + schema validation.
+"""TestClient verification for `_row_to_episode_info` URL shape + schema validation.
+
+The HLS server is for local審片 preview only, so all SDK URLs are now
+**always** business-host-relative regardless of `STORAGE_PROVIDER`. The
+production CDN base lives on the business server (`MEDIA_BASE_URL`) and is
+applied at serve-time.
 
 Covers:
-  - OSS_ENABLED=true → initUrl / firstSegUrl 是绝对 OSS URL；其它字段相对路径。
-  - OSS_ENABLED=true 列表与单集逐字节一致。
-  - OSS 未启用 → initUrl / firstSegUrl 相对路径；行为同今日。
-  - OSS 未启用 列表与单集逐字节一致。
-  - 两种模式都通过 episode-info-schema.json 严格校验（uri-reference）。
+  - initUrl / firstSegUrl / playUrl / fallback / coverUrl / drm.keyUri 都是相对路径
+  - 单集端点和列表端点 payload 逐字节一致
+  - schema 严格校验通过（episode-info-schema.json, uri-reference）
+
+Filename kept as-is (`test_api_oss_modes.py`) for git-blame continuity, but
+content no longer reflects "modes" — there's only one mode now.
 """
 
 import json
@@ -18,14 +24,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 
-def _setup_env(tmp: Path, oss_enabled: bool) -> None:
+def _setup_env(tmp: Path) -> None:
     os.environ["OUT_DIR"] = str(tmp / "out")
     os.environ["DB_PATH"] = str(tmp / "hls.db")
     os.environ["UPLOAD_TMP_DIR"] = str(tmp / "tmp")
-    if oss_enabled:
-        os.environ["OSS_ENABLED"] = "true"
-    else:
-        os.environ.pop("OSS_ENABLED", None)
+    # Storage mode no longer affects API URL shape — explicitly drop both knobs
+    # so we exercise the "no provider" default branch without leftover env
+    # bleeding in from the shell that invoked pytest.
+    os.environ.pop("OSS_ENABLED", None)
+    os.environ.pop("STORAGE_PROVIDER", None)
 
 
 def _seed_ready_row(slug: str, ep: int) -> dict:
@@ -71,76 +78,41 @@ def _validator():
     return Draft202012Validator(schema, format_checker=FormatChecker())
 
 
-OSS_PUBLIC = "https://photobundle.oss-ap-southeast-1.aliyuncs.com/Drama/staging"
-
-
-def run_oss_enabled_case():
+def run_relative_url_case():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
-        _setup_env(tmp, oss_enabled=True)
-        # 重新 import 让 settings 看到 OSS_ENABLED=true
+        _setup_env(tmp)
         for mod in [m for m in list(sys.modules) if m.startswith("app")]:
             del sys.modules[mod]
         _seed_ready_row("ly", 3)
         client = _client()
 
-        # 单集
         r = client.get("/api/episodes/ly/3")
         assert r.status_code == 200, r.text
         single = r.json()
-        assert single["initUrl"] == f"{OSS_PUBLIC}/ly/ep-3/720p/init-720p.mp4"
-        assert single["firstSegUrl"] == f"{OSS_PUBLIC}/ly/ep-3/720p/seg-720p-0.m4s"
+
+        # All URL-ish fields are business-host relative (start with '/', no scheme)
+        assert single["initUrl"] == "/videos/ly/ep-3/720p/init-720p.mp4"
+        assert single["firstSegUrl"] == "/videos/ly/ep-3/720p/seg-720p-0.m4s"
         assert single["playUrl"] == "/videos/ly/ep-3/720p/media-720p.m3u8"
         assert single["fallback"]["low"] == "/videos/ly/ep-3/540p/media-540p.m3u8"
         assert single["fallback"]["high"] == "/videos/ly/ep-3/1080p/media-1080p.m3u8"
         assert single["coverUrl"] == "/videos/ly/ep-3/cover.jpg"
         assert single["drm"]["keyUri"] == "/drm/ly/ep-3/key"
+        for k in ("playUrl", "coverUrl", "initUrl", "firstSegUrl"):
+            assert "://" not in single[k], f"{k} must not be absolute: {single[k]}"
 
-        # 列表 vs 单集逐字段相等
+        # Single-episode and list endpoints must agree byte-for-byte.
         r2 = client.get("/api/dramas/ly/episodes")
         assert r2.status_code == 200, r2.text
         listed = r2.json()
         assert len(listed) == 1
         assert listed[0] == single
 
-        # schema 严格校验
         _validator().validate(single)
-        print("OK oss_enabled: single + list equivalence + schema validate")
-
-
-def run_oss_disabled_case():
-    with tempfile.TemporaryDirectory() as td:
-        tmp = Path(td)
-        _setup_env(tmp, oss_enabled=False)
-        for mod in [m for m in list(sys.modules) if m.startswith("app")]:
-            del sys.modules[mod]
-        _seed_ready_row("ly", 3)
-        client = _client()
-
-        r = client.get("/api/episodes/ly/3")
-        assert r.status_code == 200, r.text
-        single = r.json()
-        assert single["initUrl"] == "/videos/ly/ep-3/720p/init-720p.mp4"
-        assert single["firstSegUrl"] == "/videos/ly/ep-3/720p/seg-720p-0.m4s"
-        # 所有 URL 都是相对路径
-        for k in ("playUrl", "coverUrl", "initUrl", "firstSegUrl"):
-            assert single[k].startswith("/"), single[k]
-            assert "://" not in single[k]
-        assert single["fallback"]["low"].startswith("/")
-        assert single["fallback"]["high"].startswith("/")
-        assert "://" not in single["fallback"]["low"]
-        assert "://" not in single["fallback"]["high"]
-        assert single["drm"]["keyUri"].startswith("/")
-
-        r2 = client.get("/api/dramas/ly/episodes")
-        listed = r2.json()
-        assert listed[0] == single
-
-        _validator().validate(single)
-        print("OK oss_disabled: single + list equivalence + schema validate")
+        print("OK: all URLs relative + single/list equivalence + schema validate")
 
 
 if __name__ == "__main__":
-    run_oss_enabled_case()
-    run_oss_disabled_case()
+    run_relative_url_case()
     print("\nall cases passed")

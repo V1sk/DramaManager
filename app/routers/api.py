@@ -4,7 +4,7 @@ import shutil
 from fastapi import APIRouter, File, HTTPException, Path, UploadFile
 from fastapi.responses import JSONResponse
 
-from .. import db, storage
+from .. import db
 from ..config import settings
 from ..models import DramaSummary, DrmInfo, EpisodeInfo, FallbackPlaylists, Subtitle
 
@@ -18,9 +18,10 @@ def _row_to_episode_info(row: dict) -> EpisodeInfo:
     """把 DB row 映射为对外的 EpisodeInfo 对象。单集端点和按剧集数列表端点共用此函数，
     保证 SDK 侧看到的同一集 payload 永远一致。
 
-    URL 双形态（与 OSS 模式联动）：
-      - playUrl / fallback / coverUrl / drm.keyUri：永远走业务 host 相对路径。
-      - initUrl / firstSegUrl：OSS 启用 → 绝对 OSS URL；OSS 未启用 → 业务 host 相对路径。
+    所有 URL（playUrl / initUrl / firstSegUrl / fallback / coverUrl / drm.keyUri）
+    都是业务 host 相对路径 —— HLS 服务器是本地审片用，预览页通过 `/videos/`
+    静态挂载直接读 OUT_DIR 下的本地切片，零 CORS、零 TOS 公网出站。
+    生产端（业务服务器）从 sync payload 拿到 path-only 形态后自行拼 `MEDIA_BASE_URL`。
 
     Default-ladder 选择：playUrl / initUrl / firstSegUrl 由 `settings.default_ladder`
     决定（540p / 720p / 1080p），方便调试切换。fallback.low / fallback.high 永远是
@@ -30,14 +31,8 @@ def _row_to_episode_info(row: dict) -> EpisodeInfo:
     ep_id = row["episode_id"]                 # SDK 契约字段："{slug}-ep-{n}"
     ep_dir = f"ep-{row['ep_number']}"         # 磁盘目录 / URL 段（必须对齐 admin.py + /drm router）
     base = f"/videos/{slug}/{ep_dir}"
-    if settings.storage_enabled:
-        media_base = f"{storage.provider.staging_base_url}/{slug}/{ep_dir}"
-    else:
-        media_base = base
+    media_base = base
 
-    # playUrl is already derived from settings.default_ladder by db._apply_default_ladder
-    # (so /admin/* and /api/* agree on the rung). initUrl / firstSegUrl get the same
-    # ladder + the OSS-absolute base in OSS mode.
     ladder = settings.default_ladder
 
     drm = None

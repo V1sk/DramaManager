@@ -19,10 +19,11 @@ python3 -m venv venv
 ./venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-URL 归属分两类（见下文 "桶存储双 host 拓扑"）：
+URL 归属（HLS 自家 SDK 端点，本地审片预览用）：
 
-- **业务 host 相对路径** (`/videos/...`, `/drm/...`): `playUrl`, `coverUrl`, `fallback.low`, `fallback.high`, `drm.keyUri`, `DramaSummary.posterUrl`. m3u8 里的 `#EXT-X-KEY:URI` 也是这种相对路径。播放器按 m3u8 自身 host 解析 → 业务 host。
-- **桶绝对 URL or 业务 host 相对路径**（取决于 `STORAGE_PROVIDER`）: `initUrl`, `firstSegUrl`. 启用 OSS 时形如 `https://photobundle.oss-ap-southeast-1.aliyuncs.com/Drama/...`；启用 TOS 时形如 `https://coocent-drama.tos-ap-southeast-1.volces.com/Drama/...`；`STORAGE_PROVIDER=none` 时退化为 `/videos/...`。
+- **永远是业务 host 相对路径** (`/videos/...`, `/drm/...`): `playUrl` / `initUrl` / `firstSegUrl` / `coverUrl` / `fallback.low` / `fallback.high` / `drm.keyUri` / `DramaSummary.posterUrl` 全部如此。m3u8 里的 `#EXT-X-MAP:URI` 与 segment 行也是相对文件名（`init-720p.mp4` / `seg-720p-0.m4s`），播放器按 m3u8 自身 host 通过 `/videos/` 静态挂载读本地切片。
+- **不绕桶**：HLS 服务器只负责本地审片，预览不需要 CDN，所以不管 `STORAGE_PROVIDER` 选 `oss` / `tos` / `none`，对外 API 形态都一致。桶上传只为给业务服务器同步资产用，预览页直接读 `OUT_DIR` 下的本地文件，零 CORS、零公网出站。
+- **生产侧的 CDN-友好 URL**：业务服务器收到 sync payload 后拿到的是 path-only 形态（`Drama/prod/...`），它持有自己的 `MEDIA_BASE_URL`（默认 TOS 直链，可换 CDN 域名）给客户端拼前缀。详见 `docs/business-server-sync-api.md`。
 
 `PUBLIC_BASE_URL` 已废弃；客户端从自己发起请求的 host 拼相对路径即可。
 
@@ -155,7 +156,7 @@ Ladder rung metadata (`NAME HEIGHT FPS BV_kbps`) lives in the `LADDERS` array in
 |---|---|---|
 | `media-{rung}.m3u8` | 业务 host（这台 HLS 服务器） | API `playUrl` / `fallback.*` 写相对路径 |
 | `#EXT-X-KEY:URI` | 业务 host（同 m3u8） | 相对路径 `/drm/...`，与 `EpisodeInfo.drm.keyUri` verbatim 一致 |
-| `init-{rung}.mp4` | **桶 staging 前缀**（这台服务器写）／ **桶 prod 前缀**（业务服务器读） | 本地 m3u8 写绝对 staging URL；业务服务器收到的 m3u8 写绝对 prod URL（同步时 `publish_ladder_to_prod` 字符串替换得到） |
+| `init-{rung}.mp4` | **桶 staging 前缀**（这台服务器写）／ **桶 prod 前缀**（业务服务器读） | 本地 m3u8 写**相对文件名** `init-720p.mp4`（HLS 预览页通过 `/videos/` 读本地切片，绕桶）；sync 给业务服务器的 m3u8 里 `#EXT-X-MAP:URI` + segment 行是 **prod 对象 key**（`Drama/prod/...`，无 host），业务端按自己 `MEDIA_BASE_URL` 拼前缀 |
 | `seg-{rung}-N.m4s` | **桶 staging 前缀** ／ **桶 prod 前缀** | 同上 |
 | `poster/{lang}.{ext}` | **桶 staging 前缀** ／ **桶 prod 前缀** | sync 时 `publish_poster_to_prod` server-side copy；payload `translations[lang].poster_url` 是 prod 绝对 URL |
 | `cover.jpg` | **桶 staging 前缀** ／ **桶 prod 前缀** | sync 时 `publish_cover_to_prod` server-side copy；payload `cover_url` 是 prod 绝对 URL |
@@ -175,21 +176,37 @@ Ladder rung metadata (`NAME HEIGHT FPS BV_kbps`) lives in the `LADDERS` array in
 
 OSS 时 `<bucket>` = `photobundle`（`oss-ap-southeast-1.aliyuncs.com`）；TOS 时 `<bucket>` = `coocent-drama`（`tos-ap-southeast-1.volces.com`）。两个厂商在 `app/publish.py` 看来等价，靠 `app/storage/` 抽象切换。
 
-`publish_ladder` / `upload_poster_to_staging` / `upload_cover_to_staging` / `upload_subtitle_to_staging`（admin 路由 + worker 在编码 / 上传成功后调用）只写 staging。`publish_*_to_prod` 系列（sync worker 调用）通过桶的 server-side copy 把对应资产从 staging 拷到 prod。`publish_ladder_to_prod` 额外返回 prod-flavored m3u8 文本（字符串替换 `Drama/staging/` → `Drama/prod/`），其他三类只返回 prod 绝对 URL。删除时对称：staging 由 `DELETE /admin/...` 同步清；prod 由 sync worker 在删除同步成功后通过前缀级 `unpublish_episode_from_prod` / `unpublish_drama_from_prod` 单次扫除。
+`publish_ladder` / `upload_poster_to_staging` / `upload_cover_to_staging` / `upload_subtitle_to_staging`（admin 路由 + worker 在编码 / 上传成功后调用）只写 staging。**`publish_ladder` 不改写本地 m3u8** —— 本地 m3u8 保持 encode-clear.sh 产出的相对文件名形态，HLS 预览页直接走 `/videos/` 静态挂载读本地切片。`publish_*_to_prod` 系列（sync worker 调用）通过桶的 server-side copy 把对应资产从 staging 拷到 prod；**返回的是 prod 对象 key**（例如 `Drama/prod/{slug}/poster/{lang}.{ext}`），不是绝对 URL —— 业务端持有自己的 `MEDIA_BASE_URL`（TOS 直链或 CDN 域名）拼出最终 URL，CDN 友好。`publish_ladder_to_prod` 额外返回 prod-flavored m3u8 文本：用 `rewrite_playlist` 给本地相对 m3u8 的每个 init / segment 行前缀拼 `{prod_prefix}/{slug}/{ep_dir}/{ladder}`，输出 path-only 形态。`#EXT-X-KEY:URI="/drm/..."` 是相对路径不被命中、原样保留。删除时对称：staging 由 `DELETE /admin/...` 同步清；prod 由 sync worker 在删除同步成功后通过前缀级 `unpublish_episode_from_prod` / `unpublish_drama_from_prod` 单次扫除。
 
-启用后**这台服务器**本地 m3u8 形态（业务服务器侧的 m3u8 把 staging 替成 prod）：
+**本地 m3u8 形态**（HLS 预览播放器消费的版本，相对文件名，走 `/videos/` 读 OUT_DIR）：
 
 ```m3u8
 #EXTM3U
 #EXT-X-VERSION:7
 #EXT-X-TARGETDURATION:2
 #EXT-X-PLAYLIST-TYPE:VOD
-#EXT-X-MAP:URI="https://photobundle.oss-ap-southeast-1.aliyuncs.com/Drama/staging/zhetian/ep-1/720p/init-720p.mp4"
+#EXT-X-MAP:URI="init-720p.mp4"
 #EXT-X-KEY:METHOD=AES-128,URI="/drm/zhetian/ep-1/key",IV=0x...
 #EXTINF:2.000000,
-https://photobundle.oss-ap-southeast-1.aliyuncs.com/Drama/staging/zhetian/ep-1/720p/seg-720p-0.m4s
+seg-720p-0.m4s
 #EXTINF:2.000000,
-https://photobundle.oss-ap-southeast-1.aliyuncs.com/Drama/staging/zhetian/ep-1/720p/seg-720p-1.m4s
+seg-720p-1.m4s
+#EXT-X-ENDLIST
+```
+
+**sync 推给业务服务器的同一档 m3u8**（path-only，业务端拼 `MEDIA_BASE_URL` 后才返客户端）：
+
+```m3u8
+#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:2
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-MAP:URI="Drama/prod/zhetian/ep-1/720p/init-720p.mp4"
+#EXT-X-KEY:METHOD=AES-128,URI="/drm/zhetian/ep-1/key",IV=0x...
+#EXTINF:2.000000,
+Drama/prod/zhetian/ep-1/720p/seg-720p-0.m4s
+#EXTINF:2.000000,
+Drama/prod/zhetian/ep-1/720p/seg-720p-1.m4s
 #EXT-X-ENDLIST
 ```
 

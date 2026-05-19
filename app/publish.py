@@ -97,10 +97,16 @@ def rewrite_playlist(text: str, base_url: str) -> str:
 
 
 def publish_ladder(slug: str, ep_dir: str, ladder: str) -> None:
-    """把一档 ladder 目录下的 init.mp4 + 全部 .m4s 上传到 bucket，并把同档 m3u8 改写成绝对 URL。
+    """把一档 ladder 目录下的 init.mp4 + 全部 .m4s 上传到 bucket。
 
-    任一上传失败 / 改写失败 → raise PublishError，由 worker 把 episode 置为 failed。
+    任一上传失败 → raise PublishError，由 worker 把 episode 置为 failed。
     本地产物**保留不删**，便于排错和 follow-up "republish" 操作。
+
+    **不改写本地 m3u8** —— 本地 m3u8 保持 encode-clear.sh 产出的相对路径
+    (`init-720p.mp4` / `seg-720p-0.m4s`)，让 HLS 自家预览页直接走 `/videos/`
+    挂载读本地文件，零 CORS、零 TOS 公网出站。
+    给业务服务器的 prod m3u8 由 `publish_ladder_to_prod` 在 sync 时基于
+    相对路径动态拼出 path-only 形态。
     """
     prov = _provider()
     rung_dir: Path = settings.out_dir / slug / ep_dir / ladder
@@ -131,27 +137,19 @@ def publish_ladder(slug: str, ep_dir: str, ladder: str) -> None:
                 f"storage upload failed for {ladder} {local.name}: {res}"
             )
 
-    pl_local = rung_dir / f"media-{ladder}.m3u8"
-    if not pl_local.is_file():
-        raise PublishError(f"missing playlist: {pl_local}")
-    try:
-        text = pl_local.read_text()
-        rewritten = rewrite_playlist(
-            text,
-            f"{prov.staging_base_url}/{slug}/{ep_dir}/{ladder}",
-        )
-        pl_local.write_text(rewritten)
-    except Exception as e:  # noqa: BLE001
-        raise PublishError(
-            f"m3u8 rewrite failed for {ladder}: {e}"
-        ) from e
-
 
 def publish_ladder_to_prod(slug: str, ep_dir: str, ladder: str) -> str:
-    """把一档 ladder 的 staging bucket 对象服务端拷到 prod 前缀，并返回 prod-flavored m3u8 文本。
+    """把一档 ladder 的 staging bucket 对象服务端拷到 prod 前缀，并返回 prod-flavored m3u8 文本（path-only）。
 
     入参语义：
       `slug` — drama 目录名；`ep_dir` 形如 `ep-3`；`ladder` 是 `540p`/`720p`/`1080p`。
+
+    返回的 m3u8 里 `#EXT-X-MAP:URI` 和 segment 行是**对象 key**（不含 host），形如
+    `Drama/prod/ly/ep-3/720p/seg-720p-0.m4s`。业务端按自己的 `MEDIA_BASE_URL`
+    拼前缀后再返给客户端，方便挂 CDN。`#EXT-X-KEY:URI="/drm/..."` 不动。
+
+    本地 m3u8 是相对路径形态（HLS 自家预览用），`rewrite_playlist` 给每个相对
+    `init-{ladder}.mp4` / `seg-{ladder}-N.m4s` 前缀拼 prod 路径，输出 path-only m3u8。
 
     幂等：重复调用会覆盖 prod 端对象、返回逐字节相等的 m3u8 文本。
     若 staging 端没有任何对象 → raise PublishError（说明 publish_ladder 还没跑过）。
@@ -176,8 +174,6 @@ def publish_ladder_to_prod(slug: str, ep_dir: str, ladder: str) -> str:
                 f"storage copy_object failed for {ladder} {filename}: {e}"
             ) from e
 
-    # 本地 staging m3u8 → 字符串替换得到 prod 版本。staging base 只会出现在
-    # init / segment 行；#EXT-X-KEY:URI="/drm/..." 是相对路径不会命中。
     local_m3u8 = settings.out_dir / slug / ep_dir / ladder / f"media-{ladder}.m3u8"
     if not local_m3u8.is_file():
         raise PublishError(f"missing local playlist: {local_m3u8}")
@@ -185,10 +181,7 @@ def publish_ladder_to_prod(slug: str, ep_dir: str, ladder: str) -> str:
         text = local_m3u8.read_text()
     except OSError as e:
         raise PublishError(f"failed to read local playlist {local_m3u8}: {e}") from e
-    return text.replace(
-        prov.staging_base_url + "/",
-        prov.prod_base_url + "/",
-    )
+    return rewrite_playlist(text, f"{prov.prod_prefix}/{slug}/{ep_dir}/{ladder}")
 
 
 def unpublish_ladder_from_prod(slug: str, ep_dir: str, ladder: str) -> None:
@@ -311,10 +304,10 @@ def _copy_one(src_key: str, dst_key: str, label: str) -> None:
 
 
 def publish_poster_to_prod(slug: str, lang: str, ext: str) -> str:
-    """staging→prod 服务端拷贝 poster。返回 prod 公网 URL。
+    """staging→prod 服务端拷贝 poster。返回 prod **对象 key**（不含 host）。
 
     `ext` 不带 `.`（与 `upload_poster_to_staging` 返回的扩展名一致）。
-    Staging 对象不存在 → PublishError。
+    业务端按自己的 `MEDIA_BASE_URL` 拼前缀。Staging 对象不存在 → PublishError。
     """
     prov = _provider()
     src_key = f"{prov.staging_prefix}/{slug}/poster/{lang}.{ext}"
@@ -326,11 +319,11 @@ def publish_poster_to_prod(slug: str, lang: str, ext: str) -> str:
             f"upload_poster_to_staging must run first"
         )
     _copy_one(src_key, dst_key, f"poster {slug}/{lang}.{ext}")
-    return f"{prov.prod_base_url}/{slug}/poster/{lang}.{ext}"
+    return dst_key
 
 
 def publish_cover_to_prod(slug: str, ep_dir: str) -> str:
-    """staging→prod 服务端拷贝 cover.jpg。"""
+    """staging→prod 服务端拷贝 cover.jpg。返回 prod **对象 key**。"""
     prov = _provider()
     src_key = f"{prov.staging_prefix}/{slug}/{ep_dir}/cover.jpg"
     dst_key = f"{prov.prod_prefix}/{slug}/{ep_dir}/cover.jpg"
@@ -340,11 +333,11 @@ def publish_cover_to_prod(slug: str, ep_dir: str) -> str:
             f"upload_cover_to_staging must run first"
         )
     _copy_one(src_key, dst_key, f"cover {slug}/{ep_dir}")
-    return f"{prov.prod_base_url}/{slug}/{ep_dir}/cover.jpg"
+    return dst_key
 
 
 def publish_subtitle_to_prod(slug: str, ep_dir: str, lang: str) -> str:
-    """staging→prod 服务端拷贝 subtitle vtt。"""
+    """staging→prod 服务端拷贝 subtitle vtt。返回 prod **对象 key**。"""
     prov = _provider()
     src_key = f"{prov.staging_prefix}/{slug}/{ep_dir}/subtitles/{lang}.vtt"
     dst_key = f"{prov.prod_prefix}/{slug}/{ep_dir}/subtitles/{lang}.vtt"
@@ -354,7 +347,7 @@ def publish_subtitle_to_prod(slug: str, ep_dir: str, lang: str) -> str:
             f"upload_subtitle_to_staging must run first"
         )
     _copy_one(src_key, dst_key, f"subtitle {slug}/{ep_dir}/{lang}")
-    return f"{prov.prod_base_url}/{slug}/{ep_dir}/subtitles/{lang}.vtt"
+    return dst_key
 
 
 # ---------------------------------------------------------------------------
