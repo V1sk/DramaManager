@@ -6,6 +6,9 @@ from pathlib import Path
 # Ladder rungs the pipeline always produces. Keep in sync with `LADDERS` in pipeline.sh.
 ALLOWED_LADDERS = ("540p", "720p", "1080p")
 
+# Object-storage backends `STORAGE_PROVIDER` may select.
+ALLOWED_STORAGE_PROVIDERS = ("none", "oss", "tos")
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -13,7 +16,13 @@ class Settings:
     db_path: Path
     upload_tmp_dir: Path
     pipeline_script: Path
-    oss_enabled: bool
+    # True iff a cloud bucket provider is selected (i.e. storage_provider != "none").
+    # Renamed from `oss_enabled` once Volcengine TOS landed alongside Aliyun OSS;
+    # the conceptual flag is "do we upload to a bucket" rather than "which vendor".
+    storage_enabled: bool
+    # Which bucket provider to use. `"oss"` = Aliyun OSS; `"tos"` = Volcengine TOS;
+    # `"none"` = bucket disabled, everything stays on local disk.
+    storage_provider: str
     # Which ladder rung the SDK / preview player should consume by default.
     # Affects EpisodeInfo.playUrl / initUrl / firstSegUrl at read time. Flipping
     # this env var takes effect on the next API read — no re-encoding needed.
@@ -80,6 +89,23 @@ def load_settings() -> Settings:
             f"BUSINESS_SYNC_TIMEOUT must be positive, got {sync_timeout}"
         )
 
+    # STORAGE_PROVIDER selects the bucket backend. OSS_ENABLED=true is kept as
+    # a back-compat alias so existing deployments don't need to change env.
+    # Precedence: explicit STORAGE_PROVIDER wins; if unset, fall back to
+    # interpreting OSS_ENABLED.
+    storage_raw = os.environ.get("STORAGE_PROVIDER", "").strip().lower()
+    legacy_oss_enabled = _parse_bool_env("OSS_ENABLED")
+    if not storage_raw:
+        storage_provider = "oss" if legacy_oss_enabled else "none"
+    else:
+        storage_provider = storage_raw
+    if storage_provider not in ALLOWED_STORAGE_PROVIDERS:
+        raise RuntimeError(
+            f"STORAGE_PROVIDER must be one of {ALLOWED_STORAGE_PROVIDERS}, "
+            f"got {storage_provider!r}"
+        )
+    storage_enabled = storage_provider != "none"
+
     concurrency_raw = os.environ.get("PIPELINE_CONCURRENCY", "2").strip()
     try:
         pipeline_concurrency = int(concurrency_raw) if concurrency_raw else 2
@@ -97,7 +123,8 @@ def load_settings() -> Settings:
         db_path=db_path,
         upload_tmp_dir=tmp_dir,
         pipeline_script=(repo_root / "pipeline.sh").resolve(),
-        oss_enabled=_parse_bool_env("OSS_ENABLED"),
+        storage_enabled=storage_enabled,
+        storage_provider=storage_provider,
         default_ladder=default_ladder,
         business_sync_base_url=sync_base,
         business_sync_api_key=sync_key,

@@ -111,7 +111,7 @@ def _backfill_subtitles() -> tuple[int, int, int]:
 
 
 def main() -> int:
-    if not settings.oss_enabled:
+    if not settings.storage_enabled:
         print(
             "[backfill] OSS_ENABLED 未启用，无需回填；脚本退出。",
             file=sys.stderr,

@@ -18,7 +18,7 @@ from ..ffmpeg_utils import (
     probe_duration_ms,
     probe_video_dimensions,
 )
-from ..queue import Job, enqueue
+from ..work_queue import Job, enqueue
 
 router = APIRouter()
 log = logging.getLogger("hls.admin")
@@ -213,7 +213,7 @@ async def admin_delete_drama(
             log.warning("failed to remove drama dir %s: %s", drama_dir, e)
             warnings.append(str(drama_dir))
 
-    if settings.oss_enabled:
+    if settings.storage_enabled:
         from .. import publish
         try:
             await asyncio.to_thread(publish.unpublish_drama_from_staging, drama_slug)
@@ -284,7 +284,7 @@ def _process_episode_upload(
     # Mirror cover to OSS staging (assets-to-oss). Failure unwinds the just-
     # extracted cover and the temp upload before raising 500 so we don't
     # leave a half-published asset.
-    if settings.oss_enabled:
+    if settings.storage_enabled:
         from .. import publish
         try:
             publish.upload_cover_to_staging(drama_slug, ep_dir_name, cover_path)
@@ -393,7 +393,7 @@ async def admin_upload_next_episode(
             tmp_path.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail=f"cover extraction failed: {e}")
 
-        if settings.oss_enabled:
+        if settings.storage_enabled:
             from .. import publish
             try:
                 publish.upload_cover_to_staging(drama_slug, ep_dir_name, cover_path)
@@ -680,7 +680,7 @@ async def admin_delete_episode(
     # its last episode; cleanup of OUT_DIR/{slug}/ happens only when the drama
     # itself is deleted via DELETE /admin/dramas/{slug}.
 
-    if settings.oss_enabled:
+    if settings.storage_enabled:
         from .. import publish
         try:
             await asyncio.to_thread(
@@ -961,7 +961,7 @@ async def admin_upload_drama_poster(
     # prior extension under this (slug, lang) → upload new bytes. On OSS
     # failure unlink the local file we just wrote and respond 500 so the DB
     # row is not left pointing at a half-published asset.
-    if settings.oss_enabled:
+    if settings.storage_enabled:
         from .. import publish
         try:
             await asyncio.to_thread(publish.unpublish_poster_from_staging, drama_slug, lang)
@@ -1004,7 +1004,7 @@ async def admin_delete_drama_poster(
         )
     db.delete_drama_poster(drama_slug, lang)
     _remove_existing_poster_files(drama_slug, lang)
-    if settings.oss_enabled:
+    if settings.storage_enabled:
         from .. import publish
         try:
             await asyncio.to_thread(publish.unpublish_poster_from_staging, drama_slug, lang)
@@ -1093,7 +1093,7 @@ async def admin_upload_subtitle(
 
     # Mirror to OSS staging. Failure unwinds the local write so DB doesn't get
     # a row pointing at half-published content.
-    if settings.oss_enabled:
+    if settings.storage_enabled:
         from .. import publish
         ep_dir = f"ep-{ep_number}"
         try:
@@ -1188,7 +1188,7 @@ async def admin_delete_subtitle(
         log.warning("failed to remove subtitle file %s: %s", target_path, e)
         warnings.append(str(target_path))
 
-    if settings.oss_enabled:
+    if settings.storage_enabled:
         from .. import publish
         ep_dir = f"ep-{ep_number}"
         try:
@@ -1331,7 +1331,7 @@ async def admin_batch_upload_subtitles(
             })
             continue
 
-        if settings.oss_enabled:
+        if settings.storage_enabled:
             from .. import publish
             ep_dir = f"ep-{ep_number}"
             try:

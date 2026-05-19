@@ -19,10 +19,10 @@ python3 -m venv venv
 ./venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-URL 归属分两类（见下文 "OSS 双 host 拓扑"）：
+URL 归属分两类（见下文 "桶存储双 host 拓扑"）：
 
 - **业务 host 相对路径** (`/videos/...`, `/drm/...`): `playUrl`, `coverUrl`, `fallback.low`, `fallback.high`, `drm.keyUri`, `DramaSummary.posterUrl`. m3u8 里的 `#EXT-X-KEY:URI` 也是这种相对路径。播放器按 m3u8 自身 host 解析 → 业务 host。
-- **OSS 绝对 URL or 业务 host 相对路径**（取决于 `OSS_ENABLED`）: `initUrl`, `firstSegUrl`. OSS 启用时是 `https://photobundle.oss-ap-southeast-1.aliyuncs.com/Drama/...`；未启用时退化为 `/videos/...`。
+- **桶绝对 URL or 业务 host 相对路径**（取决于 `STORAGE_PROVIDER`）: `initUrl`, `firstSegUrl`. 启用 OSS 时形如 `https://photobundle.oss-ap-southeast-1.aliyuncs.com/Drama/...`；启用 TOS 时形如 `https://coocent-drama.tos-ap-southeast-1.volces.com/Drama/...`；`STORAGE_PROVIDER=none` 时退化为 `/videos/...`。
 
 `PUBLIC_BASE_URL` 已废弃；客户端从自己发起请求的 host 拼相对路径即可。
 
@@ -33,12 +33,13 @@ Environment variables:
 | `OUT_DIR` | no | `./out` | Pipeline artifact root (`<OUT_DIR>/<drama_slug>/...`). |
 | `DB_PATH` | no | `./hls.db` | SQLite file. |
 | `UPLOAD_TMP_DIR` | no | `./tmp` | Staging dir for uploaded sources; files are deleted after the worker finishes the job. |
-| `OSS_ENABLED` | no | `false` | 设 `true` / `1` / `yes` 启用 OSS 上传：worker 把每档 init.mp4 + 加密 .m4s 推到 **OSS staging 前缀** (`Drama/staging/...`)，并把本地 m3u8 里 init / segment 引用改写成绝对 staging URL。`#EXT-X-KEY:URI` 不动。OSS 凭证 / endpoint / bucket / 前缀硬编码在 `app/oss_upload.py`，不走 env。Prod 前缀 (`Drama/prod/...`) 只在执行业务服务器同步时由 `publish_ladder_to_prod` server-side copy 进去（详见 "业务服务器同步"）。 |
+| `STORAGE_PROVIDER` | no | `none` | 选 bucket 厂商：`none` / `oss` (Aliyun OSS) / `tos` (Volcengine TOS)。设为 `oss` 或 `tos` 时启用上传：worker 把每档 init.mp4 + 加密 .m4s 推到所选桶的 **staging 前缀** (`Drama/staging/...`)，并把本地 m3u8 里 init / segment 引用改写成绝对 staging URL。`#EXT-X-KEY:URI` 不动。凭证 / endpoint / bucket / 前缀硬编码在 `app/storage/oss_provider.py` 或 `app/storage/tos_provider.py`，不走 env。Prod 前缀 (`Drama/prod/...`) 只在执行业务服务器同步时由 `publish_ladder_to_prod` server-side copy 进去（详见 "业务服务器同步"）。非法值 → 启动期 fail-fast。 |
+| `OSS_ENABLED` | no | `false` | **Deprecated alias** — `OSS_ENABLED=true` 等价于 `STORAGE_PROVIDER=oss`。仅在 `STORAGE_PROVIDER` 未设时生效；新部署请直接用 `STORAGE_PROVIDER`。 |
 | `DEFAULT_LADDER` | no | `720p` | 控制 `EpisodeInfo.playUrl` / `initUrl` / `firstSegUrl` 默认指向哪个 ladder rung。可选 `540p` / `720p` / `1080p`。**在 API 读取时动态生效**——改 env 重启 uvicorn 就能切换，不需要重新编码（pipeline 始终生产三档完整切片）。`fallback.low` / `fallback.high` 永远是 540p / 1080p 两端，不受影响。非法值在启动时 fail-fast。 |
 | `BUSINESS_SYNC_BASE_URL` | no | _unset_ | 业务服务器同步 base URL（`https://...`，无尾部 `/`）。**未设时同步功能整体禁用**：`POST /admin/dramas/{slug}/sync` 等返回 503，导航栏 `sync-zone` 不显示。设了就必须同时设 `BUSINESS_SYNC_API_KEY`。 |
 | `BUSINESS_SYNC_API_KEY` | required iff base URL set | _unset_ | 业务服务器握手用的共享密钥，作为 `X-API-Key` 头随每个 `/sync/*` 请求发送。`BUSINESS_SYNC_BASE_URL` 设而本变量未设 → 启动期 fail-fast。 |
 | `BUSINESS_SYNC_TIMEOUT` | no | `30` | 单次 `/sync/*` HTTP 请求的超时（秒）。整数；非正值 → 启动期 fail-fast。 |
-| `PIPELINE_CONCURRENCY` | no | `2` | 并发跑的 pipeline job 数（encode + encrypt + OSS publish）。每个 job 是独立 `pipeline.sh` 子进程；ffmpeg 本身已多线程，调高会过度订阅 CPU，有空闲核才往上加。同一集的多个 job 仍由 `queue.py` 的 per-episode 锁串行化，绝不并行写同一个 `ep-{n}/` 目录。整数 `>= 1`；非法值 → 启动期 fail-fast。 |
+| `PIPELINE_CONCURRENCY` | no | `2` | 并发跑的 pipeline job 数（encode + encrypt + bucket publish）。每个 job 是独立 `pipeline.sh` 子进程；ffmpeg 本身已多线程，调高会过度订阅 CPU，有空闲核才往上加。同一集的多个 job 仍由 `work_queue.py` 的 per-episode 锁串行化，绝不并行写同一个 `ep-{n}/` 目录。整数 `>= 1`；非法值 → 启动期 fail-fast。 |
 
 Drama / language lifecycle (introduced by `drama-as-entity` + `i18n-foundation`):
 
@@ -146,25 +147,25 @@ Three stages, chained by `pipeline.sh`, one ladder rung at a time. Keep them sep
 
 Ladder rung metadata (`NAME HEIGHT FPS BV_kbps`) lives in the `LADDERS` array in `pipeline.sh` — edit it there, not inside the stage scripts.
 
-## OSS 双 host 拓扑（含 staging / prod 双前缀）
+## 桶存储双 host 拓扑（含 staging / prod 双前缀）
 
-启用 `OSS_ENABLED=true` 后，资源被分到两个 host；OSS 内部进一步分成 **staging** 和 **prod** 两个并列前缀（同一个 bucket，凭证共享）：
+设 `STORAGE_PROVIDER=oss` 或 `tos` 后，资源被分到两个 host；所选桶内部进一步分成 **staging** 和 **prod** 两个并列前缀（同一个 bucket，凭证共享）：
 
 | 资源 | 哪台 host | m3u8 / API 里写什么 |
 |---|---|---|
 | `media-{rung}.m3u8` | 业务 host（这台 HLS 服务器） | API `playUrl` / `fallback.*` 写相对路径 |
 | `#EXT-X-KEY:URI` | 业务 host（同 m3u8） | 相对路径 `/drm/...`，与 `EpisodeInfo.drm.keyUri` verbatim 一致 |
-| `init-{rung}.mp4` | **OSS staging 前缀**（这台服务器写）／ **OSS prod 前缀**（业务服务器读） | 本地 m3u8 写绝对 staging URL；业务服务器收到的 m3u8 写绝对 prod URL（同步时 `publish_ladder_to_prod` 字符串替换得到） |
-| `seg-{rung}-N.m4s` | **OSS staging 前缀** ／ **OSS prod 前缀** | 同上 |
-| `poster/{lang}.{ext}` | **OSS staging 前缀** ／ **OSS prod 前缀** | sync 时 `publish_poster_to_prod` server-side copy；payload `translations[lang].poster_url` 是 prod 绝对 URL |
-| `cover.jpg` | **OSS staging 前缀** ／ **OSS prod 前缀** | sync 时 `publish_cover_to_prod` server-side copy；payload `cover_url` 是 prod 绝对 URL |
-| `subtitles/{lang}.vtt` | **OSS staging 前缀** ／ **OSS prod 前缀** | sync 时 `publish_subtitle_to_prod` server-side copy；payload `subtitles[].url` 是 prod 绝对 URL |
-| `*.key` / `*.iv` / `*.key.b64` | 业务 host（密钥不上 OSS） | 三件套不暴露 URL；`drm.keyBase64` 走 sync payload 内联 |
+| `init-{rung}.mp4` | **桶 staging 前缀**（这台服务器写）／ **桶 prod 前缀**（业务服务器读） | 本地 m3u8 写绝对 staging URL；业务服务器收到的 m3u8 写绝对 prod URL（同步时 `publish_ladder_to_prod` 字符串替换得到） |
+| `seg-{rung}-N.m4s` | **桶 staging 前缀** ／ **桶 prod 前缀** | 同上 |
+| `poster/{lang}.{ext}` | **桶 staging 前缀** ／ **桶 prod 前缀** | sync 时 `publish_poster_to_prod` server-side copy；payload `translations[lang].poster_url` 是 prod 绝对 URL |
+| `cover.jpg` | **桶 staging 前缀** ／ **桶 prod 前缀** | sync 时 `publish_cover_to_prod` server-side copy；payload `cover_url` 是 prod 绝对 URL |
+| `subtitles/{lang}.vtt` | **桶 staging 前缀** ／ **桶 prod 前缀** | sync 时 `publish_subtitle_to_prod` server-side copy；payload `subtitles[].url` 是 prod 绝对 URL |
+| `*.key` / `*.iv` / `*.key.b64` | 业务 host（密钥不上桶） | 三件套不暴露 URL；`drm.keyBase64` 走 sync payload 内联 |
 
-OSS 桶布局：
+桶布局（不分厂商，layout 一致）：
 
 ```
-photobundle/
+<bucket>/
   Drama/staging/{slug}/poster/{lang}.{ext}              ← 海报
   Drama/staging/{slug}/{ep_dir}/cover.jpg               ← 集封面
   Drama/staging/{slug}/{ep_dir}/subtitles/{lang}.vtt    ← 字幕
@@ -172,7 +173,9 @@ photobundle/
   Drama/prod/...                                        ← 镜像同结构
 ```
 
-`publish_ladder` / `upload_poster_to_staging` / `upload_cover_to_staging` / `upload_subtitle_to_staging`（admin 路由 + worker 在编码 / 上传成功后调用）只写 staging。`publish_*_to_prod` 系列（sync worker 调用）通过 OSS server-side copy 把对应资产从 staging 拷到 prod。`publish_ladder_to_prod` 额外返回 prod-flavored m3u8 文本（字符串替换 `Drama/staging/` → `Drama/prod/`），其他三类只返回 prod 绝对 URL。删除时对称：staging 由 `DELETE /admin/...` 同步清；prod 由 sync worker 在删除同步成功后通过前缀级 `unpublish_episode_from_prod` / `unpublish_drama_from_prod` 单次扫除。
+OSS 时 `<bucket>` = `photobundle`（`oss-ap-southeast-1.aliyuncs.com`）；TOS 时 `<bucket>` = `coocent-drama`（`tos-ap-southeast-1.volces.com`）。两个厂商在 `app/publish.py` 看来等价，靠 `app/storage/` 抽象切换。
+
+`publish_ladder` / `upload_poster_to_staging` / `upload_cover_to_staging` / `upload_subtitle_to_staging`（admin 路由 + worker 在编码 / 上传成功后调用）只写 staging。`publish_*_to_prod` 系列（sync worker 调用）通过桶的 server-side copy 把对应资产从 staging 拷到 prod。`publish_ladder_to_prod` 额外返回 prod-flavored m3u8 文本（字符串替换 `Drama/staging/` → `Drama/prod/`），其他三类只返回 prod 绝对 URL。删除时对称：staging 由 `DELETE /admin/...` 同步清；prod 由 sync worker 在删除同步成功后通过前缀级 `unpublish_episode_from_prod` / `unpublish_drama_from_prod` 单次扫除。
 
 启用后**这台服务器**本地 m3u8 形态（业务服务器侧的 m3u8 把 staging 替成 prod）：
 
@@ -192,9 +195,10 @@ https://photobundle.oss-ap-southeast-1.aliyuncs.com/Drama/staging/zhetian/ep-1/7
 
 注意事项：
 
-- **OSS 桶 CORS** 必须允许 GET 来自业务 host 的 Origin，否则 hls.js / 浏览器播放会被 CORS 拒（ExoPlayer / iOS 原生 HLS 不走 CORS，不受影响）。两个前缀共用一套 CORS。
-- **凭证当前硬编码**在 `app/oss_upload.py`（`accessKeyId` / `accessKeySecret` / `endpoint` / bucket `photobundle`，前缀常量 `OSS_STAGING_PREFIX = 'Drama/staging'` / `OSS_PROD_PREFIX = 'Drama/prod'`）。多环境部署 / 凭证轮换需另开 follow-up。
-- **本地切片不会被自动删**：上传到 OSS 成功后 `OUT_DIR/{slug}/ep-{n}/` 仍保留。`DELETE /admin/episodes/{slug}/{ep}` 现在会同步清 staging OSS 对象（warnings 收集失败项）；prod OSS 对象由后续 sync 触发的 `unpublish_*_from_prod` 清掉。
+- **桶 CORS** 必须允许 GET 来自业务 host 的 Origin，否则 hls.js / 浏览器播放会被 CORS 拒（ExoPlayer / iOS 原生 HLS 不走 CORS，不受影响）。两个前缀共用一套 CORS；切到 TOS 时记得在 TOS 控制台也配同样规则。
+- **凭证当前硬编码**在 `app/storage/oss_provider.py`（OSS：`accessKeyId` / `accessKeySecret` / `endpoint` / bucket `photobundle`）和 `app/storage/tos_provider.py`（TOS：`ak` / `sk` / `endpoint` / bucket `coocent-drama`）。前缀常量 (`Drama/staging` / `Drama/prod`) 在两个 provider 里独立写，两边保持一致。多环境部署 / 凭证轮换需另开 follow-up。
+- **本地切片不会被自动删**：上传到桶成功后 `OUT_DIR/{slug}/ep-{n}/` 仍保留。`DELETE /admin/episodes/{slug}/{ep}` 现在会同步清 staging 桶对象（warnings 收集失败项）；prod 桶对象由后续 sync 触发的 `unpublish_*_from_prod` 清掉。
+- **切换 provider 时桶内已有的对象不会自动迁移**。从 OSS 切到 TOS（或反向）要先手工把旧桶里 `Drama/staging` + `Drama/prod` 全量复制到新桶，或者跑 `scripts/migrate_to_oss.py` 重新发布（脚本现在跟随 `STORAGE_PROVIDER` 走，会向当前选中的桶写）。
 
 ### Manual sync — staging→prod 拷贝原语（`app/publish.py`）
 
@@ -223,13 +227,13 @@ https://photobundle.oss-ap-southeast-1.aliyuncs.com/Drama/staging/zhetian/ep-1/7
 
 ### Migration（从单 host / 旧扁平前缀升级）
 
-如果在启用 staging/prod 拆分之前已经在 OSS 上有 `Drama/{slug}/...` 旧前缀对象：
+如果在启用 staging/prod 拆分之前已经在桶上有 `Drama/{slug}/...` 旧前缀对象：
 
 ```bash
-OSS_ENABLED=true ./venv/bin/python scripts/migrate_to_oss.py
+STORAGE_PROVIDER=oss ./venv/bin/python scripts/migrate_to_oss.py   # 或 STORAGE_PROVIDER=tos
 ```
 
-脚本扫所有 `status=ready` 行 → 重传切片到 staging 前缀 → 改写本地 m3u8。**旧前缀对象不删**，仅打日志列举，操作员在控制台手动清理。幂等，可重复跑。
+脚本扫所有 `status=ready` 行 → 重传切片到当前选中桶的 staging 前缀 → 改写本地 m3u8。**旧前缀对象不删**，仅打日志列举，操作员在控制台手动清理。幂等，可重复跑。文件名带 `_to_oss` 是历史遗留，OSS / TOS 都能用。
 
 ## 业务服务器同步
 

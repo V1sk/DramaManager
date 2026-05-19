@@ -19,20 +19,30 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from app import db, oss_upload  # noqa: E402
+from app import db, storage  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.publish import PublishError, publish_ladder  # noqa: E402
 
 
 def _list_legacy_keys(slug: str, ep_dir: str) -> list[str]:
-    """列出 `Drama/{slug}/{ep_dir}/...` 旧扁平前缀下的对象（候选清理项）。"""
-    legacy_prefix = f"{oss_upload.ossBaseDir}/{slug}/{ep_dir}/"
-    return oss_upload.list_with_prefix(legacy_prefix)
+    """列出 `Drama/{slug}/{ep_dir}/...` 旧扁平前缀下的对象（候选清理项）。
+    `Drama` 是 staging/prod 拆分前的共同顶级目录，新写入永远落 Drama/staging
+    或 Drama/prod 子前缀；这里只扫旧的同名根目录。"""
+    prov = storage.provider
+    # Derive the legacy base by stripping the "/staging" suffix from staging_prefix.
+    # (Both OSS and TOS providers use the same `{base}/staging` / `{base}/prod` layout.)
+    base_dir = prov.staging_prefix.rsplit("/", 1)[0]
+    legacy_prefix = f"{base_dir}/{slug}/{ep_dir}/"
+    return prov.list_with_prefix(legacy_prefix)
 
 
 def main() -> int:
-    if not settings.oss_enabled:
-        print("[migrate] OSS_ENABLED 未启用，无需迁移；脚本退出。", file=sys.stderr)
+    if not settings.storage_enabled:
+        print(
+            "[migrate] storage 未启用 (STORAGE_PROVIDER=none / OSS_ENABLED 未设)，"
+            "无需迁移；脚本退出。",
+            file=sys.stderr,
+        )
         return 2
 
     db.init_db()

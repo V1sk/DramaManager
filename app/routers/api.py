@@ -4,10 +4,9 @@ import shutil
 from fastapi import APIRouter, File, HTTPException, Path, UploadFile
 from fastapi.responses import JSONResponse
 
-from .. import db
+from .. import db, storage
 from ..config import settings
 from ..models import DramaSummary, DrmInfo, EpisodeInfo, FallbackPlaylists, Subtitle
-from ..oss_upload import oss_staging_public_base_url
 
 router = APIRouter(prefix="/api")
 
@@ -31,8 +30,8 @@ def _row_to_episode_info(row: dict) -> EpisodeInfo:
     ep_id = row["episode_id"]                 # SDK 契约字段："{slug}-ep-{n}"
     ep_dir = f"ep-{row['ep_number']}"         # 磁盘目录 / URL 段（必须对齐 admin.py + /drm router）
     base = f"/videos/{slug}/{ep_dir}"
-    if settings.oss_enabled:
-        media_base = f"{oss_staging_public_base_url}/{slug}/{ep_dir}"
+    if settings.storage_enabled:
+        media_base = f"{storage.provider.staging_base_url}/{slug}/{ep_dir}"
     else:
         media_base = base
 
@@ -135,7 +134,7 @@ async def replace_cover(
     finally:
         await cover.close()
 
-    if settings.oss_enabled:
+    if settings.storage_enabled:
         from .. import publish
         try:
             await asyncio.to_thread(

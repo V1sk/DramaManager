@@ -29,7 +29,6 @@ from datetime import datetime, timezone
 
 from . import db, publish, sync_client
 from .config import settings
-from .oss_upload import oss_staging_public_base_url
 from .sync_client import SyncError
 
 log = logging.getLogger("hls.sync")
@@ -269,7 +268,7 @@ async def _execute_drama_delete_sync(slug: str) -> None:
         db.set_drama_sync_status(slug, "pending_delete", error=f"unexpected: {e}")
         return
 
-    if settings.oss_enabled:
+    if settings.storage_enabled:
         try:
             await asyncio.to_thread(publish.unpublish_drama_from_prod, slug)
         except Exception as e:  # noqa: BLE001
@@ -313,7 +312,7 @@ async def _execute_episode_delete_sync(slug: str, ep_number: int) -> None:
         )
         return
 
-    if settings.oss_enabled:
+    if settings.storage_enabled:
         ep_dir = f"ep-{ep_number}"
         # assets-to-oss: single prefix sweep covers all ladders + cover + subtitles.
         try:
@@ -365,7 +364,7 @@ async def handle_drama_sync(slug: str) -> None:
         # (e.g. staging object missing because never uploaded) → sync_failed
         # without calling the business server.
         poster_prod_urls: dict[str, str] = {}
-        if settings.oss_enabled:
+        if settings.storage_enabled:
             translations_view = db.list_drama_translations(slug)
             for lang_code, fields in translations_view.items():
                 rel_url = fields.get("poster")
@@ -456,7 +455,7 @@ async def handle_episode_sync(slug: str, ep_number: int) -> None:
         playlists: dict[str, str] = {}
         cover_prod_url: str | None = None
         subtitles_prod: list[dict] | None = None
-        if settings.oss_enabled:
+        if settings.storage_enabled:
             # Ladders first.
             for ladder in ("540p", "720p", "1080p"):
                 playlists[ladder] = await asyncio.to_thread(

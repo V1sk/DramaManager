@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import db
 from .config import settings
-from .queue import worker_loop
+from .work_queue import worker_loop
 from .routers import actors, admin, api, drm, languages, sync as sync_router, tags
 
 logging.basicConfig(
@@ -50,16 +50,17 @@ async def lifespan(app: FastAPI):
     else:
         log.info("lifespan up: business-sync disabled (BUSINESS_SYNC_BASE_URL unset)")
 
-    if settings.oss_enabled:
-        from .oss_upload import oss_prod_public_base_url, oss_staging_public_base_url
+    if settings.storage_enabled:
+        from . import storage
+        prov = storage.provider
         log.info(
-            "lifespan up: out_dir=%s db=%s oss_enabled=True staging=%s prod=%s",
-            settings.out_dir, settings.db_path,
-            oss_staging_public_base_url, oss_prod_public_base_url,
+            "lifespan up: out_dir=%s db=%s storage_provider=%s staging=%s prod=%s",
+            settings.out_dir, settings.db_path, settings.storage_provider,
+            prov.staging_base_url, prov.prod_base_url,
         )
     else:
         log.info(
-            "lifespan up: out_dir=%s db=%s oss_enabled=False",
+            "lifespan up: out_dir=%s db=%s storage_provider=none",
             settings.out_dir, settings.db_path,
         )
     try:
