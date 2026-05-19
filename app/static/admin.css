@@ -220,6 +220,32 @@ nav.topnav .sync-zone .sync-count { color: var(--warning-fg); font-weight: 600; 
 /* --- thumbnails --- */
 .thumb { width: 96px; height: 54px; background: var(--bg-alt); border-radius: 4px; object-fit: cover; cursor: pointer; display: block; }
 .thumb.placeholder { display: flex; align-items: center; justify-content: center; color: #aaa; font-size: 11px; }
+/* Wrapper so .thumb-lock can sit absolute-positioned over the cover image.
+   Explicit height + line-height:0 prevents inline-block baseline descender from
+   adding ~5px of phantom whitespace under the image (which made the lock chip
+   visually appear *below* the cover rather than overlaid on it). */
+.thumb-wrap {
+    position: relative;
+    display: inline-block;
+    width: 96px;
+    height: 54px;
+    vertical-align: top;
+    line-height: 0;
+}
+.thumb-wrap > .thumb { display: block; width: 100%; height: 100%; }
+.thumb-lock {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    z-index: 2;
+    background: rgba(0, 0, 0, 0.6);
+    color: #fff;
+    font-size: 12px;
+    line-height: 1;
+    padding: 2px 5px;
+    border-radius: 4px;
+    pointer-events: none;
+}
 
 .lang-chip { display: inline-block; padding: 1px 6px; border-radius: 8px; background: var(--bg-strip); color: #495057; font-size: 11px; margin-right: 4px; font-family: ui-monospace, Menlo, monospace; }
 .lang-chip.default { background: var(--ready-bg); color: var(--ready-fg); }

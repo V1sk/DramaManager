@@ -22,6 +22,10 @@
     <label for="name">剧名（默认语言）</label>
     <input type="text" id="name" name="drama_name" required maxlength="200" placeholder="例如 琅琊榜">
 
+    <label for="free_episodes">免费集数</label>
+    <input type="number" id="free_episodes" name="free_episodes" required min="0" max="9999" step="1" value="3">
+    <div class="hint">前 N 集免费，第 N+1 集起收费；0 表示全部付费。默认 3，可后续在剧详情页修改。</div>
+
     <label for="synopsis">简介（默认语言）</label>
     <textarea id="synopsis" name="synopsis" maxlength="1000" placeholder="可选；后续可在剧详情页编辑"></textarea>
 
@@ -105,6 +109,13 @@ document.getElementById('create-form').addEventListener('submit', async (ev) => 
     const slug = form.drama_slug.value.trim();
     const defaultLang = form.default_lang.value;
     const name = form.drama_name.value.trim();
+    const freeEpisodesRaw = form.free_episodes.value.trim();
+    const freeEpisodes = freeEpisodesRaw === '' ? 3 : parseInt(freeEpisodesRaw, 10);
+    if (!Number.isInteger(freeEpisodes) || freeEpisodes < 0 || freeEpisodes > 9999) {
+        flash('免费集数必须是 0–9999 之间的整数', 'error');
+        btn.disabled = false;
+        return;
+    }
     const synopsis = form.synopsis.value.trim();
     const posterFile = form.poster.files[0] || null;
     const tagSlugs = Array.from(form.tags.selectedOptions).map(o => o.value);
@@ -123,6 +134,7 @@ document.getElementById('create-form').addEventListener('submit', async (ev) => 
         fd.append('drama_slug', slug);
         fd.append('drama_name', name);
         fd.append('default_lang', defaultLang);
+        fd.append('free_episodes', String(freeEpisodes));
         const res = await fetch('/admin/dramas', { method: 'POST', body: fd, redirect: 'manual' });
         if (!(res.type === 'opaqueredirect' || res.ok || res.status === 302)) {
             // Special case: slug already exists. Offer to navigate to the existing drama

@@ -169,6 +169,9 @@ def build_drama_payload(
     return {
         "slug": slug,
         "default_lang": drama["default_lang"],
+        # 业务字段：免费集数 (0 = 全部付费; N = 前 N 集免费, 第 N+1 集起收费)。
+        # 业务服务器决定付费墙时直接读这个字段。
+        "free_episodes": drama.get("free_episodes", 3),
         "client_updated_at": drama["updated_at"],
         "translations": translations,
         "tags": tags_payload,

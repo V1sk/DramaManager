@@ -155,9 +155,17 @@ async def admin_create_drama(
     drama_slug: str = Form(...),
     drama_name: str = Form(...),
     default_lang: str = Form(...),
+    # Default 3 free episodes matches typical short-drama UX. Operators can
+    # override at create time or edit later via PATCH /admin/dramas/{slug}.
+    free_episodes: int = Form(3),
 ) -> RedirectResponse:
     try:
-        db.create_drama(slug=drama_slug, name=drama_name, default_lang=default_lang)
+        db.create_drama(
+            slug=drama_slug,
+            name=drama_name,
+            default_lang=default_lang,
+            free_episodes=free_episodes,
+        )
     except db.DramaValidationError as e:
         raise HTTPException(status_code=400, detail=f"{e.field}: {e}")
     except db.LanguageNotFoundError as e:
@@ -758,29 +766,70 @@ async def admin_patch_drama(
     drama_slug: str = PathParam(..., pattern=r"^[a-z0-9][a-z0-9-]*$"),
     payload: dict = Body(...),
 ) -> JSONResponse:
+    """Partial update of a drama row. Supported fields: `default_lang`,
+    `free_episodes`. At least one must be present; both can be set in one call.
+    """
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="body must be a JSON object")
-    extra = set(payload.keys()) - {"default_lang"}
+    allowed = {"default_lang", "free_episodes"}
+    extra = set(payload.keys()) - allowed
     if extra:
         raise HTTPException(
             status_code=400,
             detail=f"unknown / immutable fields: {sorted(extra)}",
         )
-    new_default = payload.get("default_lang")
-    if not new_default:
-        raise HTTPException(status_code=400, detail="default_lang is required")
-    try:
-        row = db.update_drama_default_lang(drama_slug, new_default)
-    except db.LanguageNotFoundError as e:
-        raise HTTPException(status_code=400, detail=f"default_lang: {e}")
-    except db.LanguageInactiveError as e:
-        raise HTTPException(status_code=400, detail=f"default_lang: {e}")
-    except db.DramaDefaultLangNotCoveredError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    if row is None:
+    if not payload:
+        raise HTTPException(
+            status_code=400,
+            detail=f"at least one of {sorted(allowed)} required",
+        )
+
+    existing = db.get_drama(drama_slug)
+    if existing is None:
         raise HTTPException(status_code=404, detail=f"drama '{drama_slug}' not found")
-    db.mark_drama_dirty(drama_slug)
-    log.info("patched drama default_lang slug=%s default_lang=%s", drama_slug, new_default)
+
+    row = existing
+    changed = False
+
+    if "default_lang" in payload:
+        new_default = payload.get("default_lang")
+        if not new_default:
+            raise HTTPException(status_code=400, detail="default_lang must be non-empty")
+        try:
+            updated = db.update_drama_default_lang(drama_slug, new_default)
+        except db.LanguageNotFoundError as e:
+            raise HTTPException(status_code=400, detail=f"default_lang: {e}")
+        except db.LanguageInactiveError as e:
+            raise HTTPException(status_code=400, detail=f"default_lang: {e}")
+        except db.DramaDefaultLangNotCoveredError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if updated is None:
+            # Drama existed at the top of this handler; vanishing here means
+            # it was deleted concurrently. Surface as 404.
+            raise HTTPException(status_code=404, detail=f"drama '{drama_slug}' not found")
+        if updated["default_lang"] != existing["default_lang"]:
+            changed = True
+        row = updated
+
+    if "free_episodes" in payload:
+        try:
+            updated = db.update_drama_free_episodes(drama_slug, payload["free_episodes"])
+        except db.DramaValidationError as e:
+            raise HTTPException(status_code=400, detail=f"{e.field}: {e}")
+        if updated is None:
+            raise HTTPException(status_code=404, detail=f"drama '{drama_slug}' not found")
+        if updated["free_episodes"] != existing["free_episodes"]:
+            changed = True
+        row = updated
+
+    # Only mark dirty when something actually changed — a no-op write shouldn't
+    # add work for the sync queue.
+    if changed:
+        db.mark_drama_dirty(drama_slug)
+    log.info(
+        "patched drama slug=%s fields=%s changed=%s",
+        drama_slug, sorted(payload.keys()), changed,
+    )
     return JSONResponse(row)
 
 

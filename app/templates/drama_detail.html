@@ -40,6 +40,15 @@
             演员：
             {% if drama.actors %}{{ drama.actors | map(attribute='name') | select | join('、') or '—' }}{% else %}<span class="meta">（无）</span>{% endif %}
         </div>
+        <div class="tags-line">
+            免费集数：
+            <span id="free-episodes-display" data-value="{{ drama.free_episodes }}">{{ drama.free_episodes }}</span>
+            <input type="number" id="free-episodes-input" min="0" max="9999" step="1" value="{{ drama.free_episodes }}" style="width: 70px; padding: 2px 6px; display: none;">
+            <button class="btn btn-sm btn-ghost" id="free-episodes-edit-btn" type="button">修改</button>
+            <button class="btn btn-sm btn-success" id="free-episodes-save-btn" type="button" style="display: none;">保存</button>
+            <button class="btn btn-sm btn-ghost" id="free-episodes-cancel-btn" type="button" style="display: none;">取消</button>
+            <span class="meta" style="margin-left: 6px;">前 N 集免费，第 N+1 集起收费；0 = 全部付费</span>
+        </div>
         <div class="synopsis">{{ default_synopsis }}</div>
         <div class="actions">
             <button class="btn-primary btn-sm" onclick="togglePanel('translations-panel')">编辑翻译</button>
@@ -123,10 +132,17 @@ function renderEpisodes() {
         tbody.innerHTML = '<tr><td colspan="7" class="meta">还没有可见的集，点击上方"上传下一集"开始（pending_delete 集不显示在此）。</td></tr>';
         return;
     }
+    const freeEpisodes = Number.isInteger(DRAMA.free_episodes) ? DRAMA.free_episodes : 3;
     tbody.innerHTML = visible.map(e => {
-        const cover = e.cover_url
+        const isPaid = e.ep_number > freeEpisodes;
+        // Lock badge on top-right of the thumbnail when the episode is paid.
+        const lockBadge = isPaid
+            ? `<span class="thumb-lock" title="付费集">🔒</span>`
+            : '';
+        const coverInner = e.cover_url
             ? `<img class="thumb" src="${e.cover_url}?t=${e.updated_at}" alt="">`
             : '<div class="thumb placeholder">无</div>';
+        const cover = `<div class="thumb-wrap">${coverInner}${lockBadge}</div>`;
         const errBlock = e.status === 'failed' && e.error_message
             ? `<details class="error"><summary>查看错误</summary><pre>${escapeHtml(e.error_message)}</pre></details>`
             : '';
@@ -245,6 +261,15 @@ async function refreshDrama() {
             badge.className = 'sync-badge ' + (DRAMA.sync_status || 'dirty');
             badge.textContent = DRAMA.sync_status || 'dirty';
             badge.title = DRAMA.sync_error || '';
+        }
+        // Keep the free-episodes label in sync with the server (an operator on
+        // another tab could have edited it). Don't touch the input when the
+        // editor panel is open mid-edit.
+        const feDisplay = document.getElementById('free-episodes-display');
+        const feInput = document.getElementById('free-episodes-input');
+        if (feDisplay && DRAMA.free_episodes != null && feInput.style.display === 'none') {
+            feDisplay.textContent = String(DRAMA.free_episodes);
+            feDisplay.dataset.value = String(DRAMA.free_episodes);
         }
         // Other panels rebuild on toggle; tag/actor lists only when their panel is open
     } catch (e) {
@@ -497,6 +522,64 @@ document.getElementById('save-actors-btn').addEventListener('click', async () =>
         location.reload();
     } catch (e) { flash(`保存失败: ${e.body?.detail || e}`, 'error'); }
 });
+
+// --- free episodes inline editor ---------------------------------------
+(function () {
+    const display = document.getElementById('free-episodes-display');
+    const input = document.getElementById('free-episodes-input');
+    const editBtn = document.getElementById('free-episodes-edit-btn');
+    const saveBtn = document.getElementById('free-episodes-save-btn');
+    const cancelBtn = document.getElementById('free-episodes-cancel-btn');
+
+    function showEditor(editing) {
+        display.style.display = editing ? 'none' : '';
+        editBtn.style.display = editing ? 'none' : '';
+        input.style.display = editing ? '' : 'none';
+        saveBtn.style.display = editing ? '' : 'none';
+        cancelBtn.style.display = editing ? '' : 'none';
+    }
+
+    editBtn.addEventListener('click', () => {
+        input.value = display.dataset.value;
+        showEditor(true);
+        input.focus();
+        input.select();
+    });
+    cancelBtn.addEventListener('click', () => {
+        input.value = display.dataset.value;
+        showEditor(false);
+    });
+    saveBtn.addEventListener('click', async () => {
+        const raw = input.value.trim();
+        const n = parseInt(raw, 10);
+        if (!Number.isInteger(n) || n < 0 || n > 9999) {
+            flash('免费集数必须是 0–9999 之间的整数', 'error');
+            return;
+        }
+        const prev = parseInt(display.dataset.value, 10);
+        if (n === prev) {
+            showEditor(false);
+            return;
+        }
+        saveBtn.disabled = true; saveBtn.textContent = '保存中…';
+        try {
+            const row = await fetchJSON(`/admin/dramas/${encodeURIComponent(SLUG)}`, {
+                method: 'PATCH', body: { free_episodes: n },
+            });
+            DRAMA.free_episodes = row.free_episodes;
+            display.textContent = String(row.free_episodes);
+            display.dataset.value = String(row.free_episodes);
+            showEditor(false);
+            // Re-render episode list so lock icons match the new threshold.
+            renderEpisodes();
+            flash('免费集数已更新', 'info');
+        } catch (e) {
+            flash(`更新失败: ${e.body?.detail || e}`, 'error');
+        } finally {
+            saveBtn.disabled = false; saveBtn.textContent = '保存';
+        }
+    });
+})();
 
 document.getElementById('delete-drama-btn').addEventListener('click', async () => {
     if (!confirm(`确定删除整部剧 "${SLUG}"？所有翻译、海报、关联标签/演员都会被清掉。`)) return;

@@ -36,6 +36,9 @@ CREATE TABLE IF NOT EXISTS dramas (
   sync_status      TEXT    NOT NULL DEFAULT 'dirty',
   sync_error       TEXT,
   last_synced_at   TEXT,
+  -- 业务字段：免费集数。值=3 表示前 3 集 (ep_number 1..3) 免费，第 4 集起收费。
+  -- 0 = 全部付费；默认 3 与业务场景对齐。SDK / 业务服务器据此决定付费墙。
+  free_episodes    INTEGER NOT NULL DEFAULT 3,
   created_at       TEXT    NOT NULL,
   updated_at       TEXT    NOT NULL,
   FOREIGN KEY (default_lang) REFERENCES languages(code) ON DELETE RESTRICT
@@ -283,6 +286,12 @@ def _migrate_add_columns(conn: sqlite3.Connection) -> None:
             ("progress", "TEXT"),
             ("source_path", "TEXT"),
         ],
+        # `free_episodes` was added after the dramas table shipped; existing
+        # rows must back-fill to the default value (3) so the column is
+        # immediately usable without manual data migration.
+        "dramas": [
+            ("free_episodes", "INTEGER NOT NULL DEFAULT 3"),
+        ],
     }
     for table, cols in wanted.items():
         existing = {
@@ -446,19 +455,29 @@ def delete_language(code: str) -> tuple[bool, dict]:
 # ---------------------------------------------------------------------------
 
 
-def create_drama(slug: str, name: str, default_lang: str) -> dict:
+def create_drama(
+    slug: str,
+    name: str,
+    default_lang: str,
+    *,
+    free_episodes: int = 3,
+) -> dict:
     """Insert a new drama row + initial `name` translation atomically.
 
     Per drama-meta-translations (step 3c), the drama's name is stored in the
     `translations` table under (entity_type='drama', entity_id=slug,
     lang_code=default_lang, field='name'). The dramas table itself no longer
     carries the column.
+
+    `free_episodes` is the count of free episodes from the start (1..N); 0
+    means everything is paid. Default 3 mirrors typical short-drama UX.
     """
     if not _SLUG_RE.match(slug):
         raise DramaValidationError("drama_slug", "drama_slug must match ^[a-z0-9][a-z0-9-]*$")
     name_trimmed = name.strip()
     if not name_trimmed:
         raise DramaValidationError("drama_name", "drama_name must not be empty")
+    free_episodes = _validate_free_episodes(free_episodes)
 
     lang = get_language(default_lang)
     if lang is None:
@@ -478,9 +497,9 @@ def create_drama(slug: str, name: str, default_lang: str) -> dict:
         try:
             try:
                 conn.execute(
-                    "INSERT INTO dramas(slug, default_lang, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    (slug, default_lang, now, now),
+                    "INSERT INTO dramas(slug, default_lang, free_episodes, "
+                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                    (slug, default_lang, free_episodes, now, now),
                 )
             except sqlite3.IntegrityError as e:
                 conn.execute("ROLLBACK")
@@ -590,6 +609,50 @@ def delete_drama(slug: str) -> tuple[bool, int]:
                 pass
             raise
         return ((cur.rowcount or 0) > 0, 0)
+
+
+_MAX_FREE_EPISODES = 9999
+
+
+def _validate_free_episodes(value) -> int:
+    """Coerce + range-check `free_episodes`. Always returns a non-negative int
+    bounded by `_MAX_FREE_EPISODES` (defensive cap so a typo can't store an
+    absurd value). Raises DramaValidationError("free_episodes", ...) on bad
+    input — routers translate to 400.
+    """
+    if isinstance(value, bool):
+        raise DramaValidationError("free_episodes", "free_episodes must be an integer")
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise DramaValidationError(
+            "free_episodes", "free_episodes must be an integer >= 0"
+        ) from None
+    if n < 0 or n > _MAX_FREE_EPISODES:
+        raise DramaValidationError(
+            "free_episodes",
+            f"free_episodes must be between 0 and {_MAX_FREE_EPISODES}",
+        )
+    return n
+
+
+def update_drama_free_episodes(slug: str, new_value: int) -> dict | None:
+    """Set drama.free_episodes. Returns the updated row, or None if drama
+    doesn't exist. Caller is responsible for marking the drama dirty (we keep
+    that out of here so a no-op write doesn't pointlessly flip sync state —
+    the router checks for an actual delta before calling mark_drama_dirty).
+    """
+    value = _validate_free_episodes(new_value)
+    if get_drama(slug) is None:
+        return None
+    now = _now_iso()
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE dramas SET free_episodes=?, updated_at=? WHERE slug=?",
+            (value, now, slug),
+        )
+        row = conn.execute("SELECT * FROM dramas WHERE slug=?", (slug,)).fetchone()
+    return dict(row) if row else None
 
 
 def update_drama_default_lang(slug: str, new_default_lang: str) -> dict | None:
@@ -2114,7 +2177,7 @@ def get_drama_with_sync(slug: str) -> dict | None:
     with _connect() as conn:
         row = conn.execute(
             "SELECT slug, default_lang, sync_status, sync_error, last_synced_at, "
-            "created_at, updated_at FROM dramas WHERE slug=?",
+            "free_episodes, created_at, updated_at FROM dramas WHERE slug=?",
             (slug,),
         ).fetchone()
     return dict(row) if row else None
