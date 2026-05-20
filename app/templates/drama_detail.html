@@ -256,11 +256,18 @@ let DRAMA = JSON.parse(document.getElementById('initial-data').textContent);
 const SLUG = DRAMA.slug;
 
 // --- Panel toggles (all buttons with data-toggle="xxx" toggle the panel section) ---
+// These three are mutually exclusive — opening one collapses the others.
+const EXCLUSIVE_PANELS = ['translations-panel', 'tags-panel', 'actors-panel'];
 document.querySelectorAll('[data-toggle]').forEach(btn => {
     btn.addEventListener('click', () => {
         const target = document.getElementById(btn.dataset.toggle);
         if (!target) return;
         const willOpen = target.classList.contains('hidden');
+        if (willOpen && EXCLUSIVE_PANELS.includes(btn.dataset.toggle)) {
+            for (const id of EXCLUSIVE_PANELS) {
+                if (id !== btn.dataset.toggle) document.getElementById(id)?.classList.add('hidden');
+            }
+        }
         target.classList.toggle('hidden');
         if (willOpen) {
             target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
