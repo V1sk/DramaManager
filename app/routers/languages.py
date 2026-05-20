@@ -7,11 +7,12 @@ all reference `languages.code` via the generic `translations` table.
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, Body, Form, HTTPException, Path as PathParam, Request, Response
+from fastapi import APIRouter, Body, Depends, Form, HTTPException, Path as PathParam, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from .. import db
+from ..auth import require_can_delete
 
 router = APIRouter()
 log = logging.getLogger("hls.languages")
@@ -108,7 +109,7 @@ async def languages_patch(
     })
 
 
-@router.delete("/admin/languages/{code}")
+@router.delete("/admin/languages/{code}", dependencies=[Depends(require_can_delete)])
 async def languages_delete(
     code: str = PathParam(..., pattern=r"^[a-z]{2,3}(-[A-Za-z0-9]{2,8})?$"),
 ) -> JSONResponse:

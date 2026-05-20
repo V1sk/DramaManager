@@ -130,6 +130,39 @@ CREATE TABLE IF NOT EXISTS subtitles (
   FOREIGN KEY (episode_id) REFERENCES episodes(episode_id) ON DELETE CASCADE,
   FOREIGN KEY (lang_code)  REFERENCES languages(code)      ON DELETE RESTRICT
 );
+
+-- admin-accounts-auth: operator accounts for the `/admin` console. Standalone
+-- (no FK into the drama/i18n graph), so adding it is purely additive — it does
+-- not disturb existing tables or force the destructive `hls.db` rebuild.
+-- `role='admin'` always has every permission; `staff` is governed by the
+-- per-account `can_delete` / `can_sync` toggles.
+CREATE TABLE IF NOT EXISTS users (
+  username       TEXT    PRIMARY KEY,
+  password_hash  TEXT    NOT NULL,
+  role           TEXT    NOT NULL DEFAULT 'staff'  CHECK(role IN ('admin','staff')),
+  is_active      INTEGER NOT NULL DEFAULT 1        CHECK(is_active IN (0,1)),
+  can_delete     INTEGER NOT NULL DEFAULT 0        CHECK(can_delete IN (0,1)),
+  can_sync       INTEGER NOT NULL DEFAULT 0        CHECK(can_sync IN (0,1)),
+  must_change_pw INTEGER NOT NULL DEFAULT 0        CHECK(must_change_pw IN (0,1)),
+  created_at     TEXT    NOT NULL,
+  updated_at     TEXT    NOT NULL
+);
+
+-- admin-accounts-auth: append-only audit trail of operator actions. One row
+-- per mutating `/admin` request and per login attempt.
+CREATE TABLE IF NOT EXISTS audit_log (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts           TEXT    NOT NULL,
+  username     TEXT,
+  action       TEXT    NOT NULL,
+  target       TEXT,
+  method       TEXT,
+  path         TEXT,
+  status_code  INTEGER,
+  ip           TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_log_id ON audit_log(id DESC);
 """
 
 
@@ -253,6 +286,28 @@ class ActorDefaultTranslationProtectedError(Exception):
     """
 
 
+class UserExistsError(Exception):
+    """Raised by create_user when the username already exists."""
+
+
+class UserNotFoundError(Exception):
+    """Raised when an operation targets an unknown username."""
+
+
+class UserValidationError(Exception):
+    """Raised on bad account input. `field` names which input was bad."""
+
+    def __init__(self, field: str, message: str) -> None:
+        super().__init__(message)
+        self.field = field
+
+
+class LastAdminError(Exception):
+    """Raised when an account operation (delete / deactivate / demote) would
+    leave the system with zero active admin accounts.
+    """
+
+
 def _connect(db_path: Path = None) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path or settings.db_path, isolation_level=None)
     conn.row_factory = sqlite3.Row
@@ -271,6 +326,37 @@ def init_db() -> None:
     # MUST raise IntegrityError. Run inside a savepoint so we don't leave
     # state behind.
     _verify_fk_enforcement()
+    _bootstrap_admin()
+
+
+def _bootstrap_admin() -> None:
+    """First-boot bootstrap (admin-accounts-auth): when the `users` table is
+    empty, create the `admin` account from `ADMIN_INITIAL_PASSWORD` with
+    `must_change_pw=1`. Fails fast if the env var is unset — a server with a
+    login wall and no way in is worse than a clear startup error. No-op once
+    any account exists.
+    """
+    with _connect() as conn:
+        n = conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+    if n > 0:
+        return
+    if not settings.admin_initial_password:
+        raise RuntimeError(
+            "users table is empty and ADMIN_INITIAL_PASSWORD is unset; "
+            "set it so the bootstrap `admin` account can be created."
+        )
+    # Deferred import: auth.py imports db, so importing it at module load
+    # would be circular. By call time the module graph is fully built.
+    from .auth import hash_password
+
+    create_user(
+        username="admin",
+        password_hash=hash_password(settings.admin_initial_password),
+        role="admin",
+        can_delete=True,
+        can_sync=True,
+        must_change_pw=True,
+    )
 
 
 def _migrate_add_columns(conn: sqlite3.Connection) -> None:
@@ -2233,3 +2319,255 @@ def list_languages_used_by_drama(slug: str) -> list[str]:
     with _connect() as conn:
         rows = conn.execute(sql, (slug, slug, slug, slug)).fetchall()
     return [r["lang_code"] for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# users CRUD (admin-accounts-auth)
+# ---------------------------------------------------------------------------
+
+_USERNAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,31}$")
+
+
+def get_user(username: str) -> dict | None:
+    """Fetch a single account, including `password_hash` (needed for login
+    verification). Callers that render accounts to the operator MUST use
+    `list_users()` instead, which omits the hash.
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE username=?", (username,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_users() -> list[dict]:
+    """All accounts for the admin management table. Omits `password_hash` so
+    the hash never reaches a template or response. Admins first, then by name.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT username, role, is_active, can_delete, can_sync, "
+            "must_change_pw, created_at, updated_at FROM users "
+            "ORDER BY (role='admin') DESC, username ASC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def create_user(
+    username: str,
+    password_hash: str,
+    *,
+    role: str = "staff",
+    can_delete: bool = False,
+    can_sync: bool = False,
+    must_change_pw: bool = False,
+) -> dict:
+    """Insert a new account. `password_hash` is already hashed by the caller
+    (the db layer never hashes). Raises UserValidationError / UserExistsError.
+    """
+    username = (username or "").strip()
+    if not _USERNAME_RE.match(username):
+        raise UserValidationError(
+            "username",
+            "username must be 2-32 chars, start alphanumeric, "
+            "and contain only letters / digits / . _ -",
+        )
+    if role not in ("admin", "staff"):
+        raise UserValidationError("role", "role must be 'admin' or 'staff'")
+    now = _now_iso()
+    with _connect() as conn:
+        try:
+            conn.execute(
+                "INSERT INTO users(username, password_hash, role, is_active, "
+                "can_delete, can_sync, must_change_pw, created_at, updated_at) "
+                "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)",
+                (
+                    username, password_hash, role,
+                    1 if can_delete else 0,
+                    1 if can_sync else 0,
+                    1 if must_change_pw else 0,
+                    now, now,
+                ),
+            )
+        except sqlite3.IntegrityError as e:
+            raise UserExistsError(f"user '{username}' already exists") from e
+        row = conn.execute(
+            "SELECT * FROM users WHERE username=?", (username,)
+        ).fetchone()
+    return dict(row)
+
+
+def update_user(
+    username: str,
+    *,
+    role: str | None = None,
+    is_active: bool | int | None = None,
+    can_delete: bool | int | None = None,
+    can_sync: bool | int | None = None,
+) -> dict | None:
+    """Partial update of mutable account fields. Returns the updated row, or
+    None if no account matched. Raises LastAdminError when the change would
+    deactivate or demote the last remaining active admin.
+    """
+    def _as_bool(v: Any, field: str) -> int:
+        if v in (True, 1, "1"):
+            return 1
+        if v in (False, 0, "0"):
+            return 0
+        raise UserValidationError(field, f"{field} must be true/false (or 1/0)")
+
+    fields: list[str] = []
+    params: list[Any] = []
+    new_role = None
+    new_active = None
+    if role is not None:
+        if role not in ("admin", "staff"):
+            raise UserValidationError("role", "role must be 'admin' or 'staff'")
+        new_role = role
+        fields.append("role = ?")
+        params.append(role)
+    if is_active is not None:
+        new_active = _as_bool(is_active, "is_active")
+        fields.append("is_active = ?")
+        params.append(new_active)
+    if can_delete is not None:
+        fields.append("can_delete = ?")
+        params.append(_as_bool(can_delete, "can_delete"))
+    if can_sync is not None:
+        fields.append("can_sync = ?")
+        params.append(_as_bool(can_sync, "can_sync"))
+    if not fields:
+        return get_user(username)
+
+    with _connect() as conn:
+        cur = conn.execute(
+            "SELECT role, is_active FROM users WHERE username=?", (username,)
+        ).fetchone()
+        if cur is None:
+            return None
+        # Last-admin guard: if this row is currently an active admin and the
+        # change would strip that (demote to staff or deactivate), ensure at
+        # least one *other* active admin remains.
+        was_active_admin = cur["role"] == "admin" and cur["is_active"] == 1
+        will_be_admin = (new_role if new_role is not None else cur["role"]) == "admin"
+        will_be_active = (new_active if new_active is not None else cur["is_active"]) == 1
+        if was_active_admin and not (will_be_admin and will_be_active):
+            others = conn.execute(
+                "SELECT COUNT(*) AS n FROM users "
+                "WHERE role='admin' AND is_active=1 AND username<>?",
+                (username,),
+            ).fetchone()["n"]
+            if others == 0:
+                raise LastAdminError(
+                    "cannot deactivate or demote the last active admin account"
+                )
+        fields.append("updated_at = ?")
+        params.append(_now_iso())
+        params.append(username)
+        conn.execute(
+            f"UPDATE users SET {', '.join(fields)} WHERE username = ?", params,
+        )
+        row = conn.execute(
+            "SELECT * FROM users WHERE username=?", (username,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def set_user_password(
+    username: str, password_hash: str, *, must_change_pw: bool = True,
+) -> bool:
+    """Replace an account's password hash. Sets `must_change_pw` (defaults to
+    True — used both for admin-driven resets and forced first-login changes;
+    self-service changes pass False). Returns False if no account matched.
+    """
+    with _connect() as conn:
+        cur = conn.execute(
+            "UPDATE users SET password_hash=?, must_change_pw=?, updated_at=? "
+            "WHERE username=?",
+            (password_hash, 1 if must_change_pw else 0, _now_iso(), username),
+        )
+        return (cur.rowcount or 0) > 0
+
+
+def clear_must_change_pw(username: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE users SET must_change_pw=0, updated_at=? WHERE username=?",
+            (_now_iso(), username),
+        )
+
+
+def delete_user(username: str) -> bool:
+    """Delete an account. Returns False if no account matched. Raises
+    LastAdminError when the account is the last remaining active admin.
+    """
+    with _connect() as conn:
+        cur = conn.execute(
+            "SELECT role, is_active FROM users WHERE username=?", (username,)
+        ).fetchone()
+        if cur is None:
+            return False
+        if cur["role"] == "admin" and cur["is_active"] == 1:
+            others = conn.execute(
+                "SELECT COUNT(*) AS n FROM users "
+                "WHERE role='admin' AND is_active=1 AND username<>?",
+                (username,),
+            ).fetchone()["n"]
+            if others == 0:
+                raise LastAdminError(
+                    "cannot delete the last active admin account"
+                )
+        conn.execute("DELETE FROM users WHERE username=?", (username,))
+    return True
+
+
+def count_active_admins() -> int:
+    with _connect() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) AS n FROM users WHERE role='admin' AND is_active=1"
+        ).fetchone()["n"]
+
+
+# ---------------------------------------------------------------------------
+# audit_log (admin-accounts-auth)
+# ---------------------------------------------------------------------------
+
+
+def insert_audit_entry(
+    *,
+    username: str | None,
+    action: str,
+    target: str | None = None,
+    method: str | None = None,
+    path: str | None = None,
+    status_code: int | None = None,
+    ip: str | None = None,
+) -> None:
+    """Append one audit row. Callers (the audit middleware, the auth router)
+    wrap this in their own try/except so a logging failure never breaks the
+    underlying request.
+    """
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO audit_log(ts, username, action, target, method, "
+            "path, status_code, ip) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (_now_iso(), username, action, target, method, path, status_code, ip),
+        )
+
+
+def list_audit_entries(*, limit: int = 50, offset: int = 0) -> list[dict]:
+    """Audit rows newest-first. Ordered by `id` (autoincrement) so rows that
+    share a one-second `ts` still sort deterministically."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM audit_log ORDER BY id DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def count_audit_entries() -> int:
+    with _connect() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) AS n FROM audit_log"
+        ).fetchone()["n"]

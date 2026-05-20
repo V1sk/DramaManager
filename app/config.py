@@ -43,6 +43,14 @@ class Settings:
     # only if the box has spare cores. Same-episode jobs are still serialized
     # by a per-episode lock in queue.py.
     pipeline_concurrency: int
+    # admin-accounts-auth: secret used to sign the `/admin` session cookie.
+    # REQUIRED — `load_settings()` fails fast if unset, because a per-boot
+    # random key would silently invalidate every session on each restart.
+    session_secret_key: str
+    # admin-accounts-auth: password for the bootstrap `admin` account, only
+    # consumed by `init_db()` on first boot when the `users` table is empty.
+    # Optional here; `init_db()` fails fast if it is needed and unset.
+    admin_initial_password: str | None
 
 
 def _parse_bool_env(name: str) -> bool:
@@ -119,6 +127,17 @@ def load_settings() -> Settings:
             f"PIPELINE_CONCURRENCY must be >= 1, got {pipeline_concurrency}"
         )
 
+    session_secret_key = os.environ.get("SESSION_SECRET_KEY", "Implementation complete.").strip()
+    if not session_secret_key:
+        raise RuntimeError(
+            "SESSION_SECRET_KEY is required (used to sign the /admin session "
+            "cookie). Set it to a long random string — a stable value across "
+            "restarts keeps operators logged in."
+        )
+    admin_initial_password = (
+        os.environ.get("ADMIN_INITIAL_PASSWORD", "123456").strip() or None
+    )
+
     return Settings(
         out_dir=out_dir,
         db_path=db_path,
@@ -131,6 +150,8 @@ def load_settings() -> Settings:
         business_sync_api_key=sync_key,
         business_sync_timeout=sync_timeout,
         pipeline_concurrency=pipeline_concurrency,
+        session_secret_key=session_secret_key,
+        admin_initial_password=admin_initial_password,
     )
 
 

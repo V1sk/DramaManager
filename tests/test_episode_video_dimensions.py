@@ -22,6 +22,10 @@ def _setup_env(tmp: Path) -> None:
     os.environ["DB_PATH"] = str(tmp / "hls.db")
     os.environ["UPLOAD_TMP_DIR"] = str(tmp / "tmp")
     os.environ.pop("OSS_ENABLED", None)
+    # admin-accounts-auth: the app fails fast without these; init_db()
+    # bootstraps the `admin` account from ADMIN_INITIAL_PASSWORD.
+    os.environ["SESSION_SECRET_KEY"] = "test-secret-key"
+    os.environ["ADMIN_INITIAL_PASSWORD"] = "test-admin-pw"
 
 
 def _reset_app_modules():

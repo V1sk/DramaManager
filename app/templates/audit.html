@@ -1,0 +1,65 @@
+{% extends "_base.html" %}
+{% block title %}操作记录 · HLS 管理{% endblock %}
+
+{% block content %}
+<header class="mb-6 pb-4 border-b border-outline-variant">
+    <h1 class="text-headline-lg text-on-surface flex items-center gap-2">
+        <span class="material-symbols-outlined text-secondary-fixed-dim">history</span>
+        操作记录
+    </h1>
+    <p class="text-body-md text-on-surface-variant mt-1">
+        每条改动类（POST / PATCH / PUT / DELETE）的 <code class="mono text-secondary-fixed-dim">/admin</code> 请求与每次登录都会留痕。共 {{ total }} 条。
+    </p>
+</header>
+
+<div class="bg-surface-container-high border border-outline-variant rounded-lg overflow-hidden">
+    <table class="data">
+        <thead>
+            <tr>
+                <th>时间 (UTC)</th><th>账号</th><th>动作</th><th>对象</th>
+                <th>方法</th><th>路径</th><th>状态</th><th>IP</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for e in entries %}
+            <tr>
+                <td class="mono meta whitespace-nowrap">{{ e.ts }}</td>
+                <td class="mono text-secondary-fixed-dim">{{ e.username or '—' }}</td>
+                <td>
+                    {% if e.action in ('login', 'logout') %}<span class="badge active">{{ e.action }}</span>
+                    {% elif e.action in ('login_failed', 'login_locked') %}<span class="badge failed">{{ e.action }}</span>
+                    {% elif e.action.startswith('delete') %}<span class="badge failed">{{ e.action }}</span>
+                    {% elif e.action.startswith('sync') %}<span class="badge encoding">{{ e.action }}</span>
+                    {% else %}<span class="badge inactive">{{ e.action }}</span>{% endif %}
+                </td>
+                <td class="mono">{{ e.target or '—' }}</td>
+                <td class="meta">{{ e.method or '—' }}</td>
+                <td class="mono meta">{{ e.path or '—' }}</td>
+                <td class="mono {% if e.status_code and e.status_code >= 400 %}text-status-danger{% else %}meta{% endif %}">
+                    {{ e.status_code if e.status_code is not none else '—' }}
+                </td>
+                <td class="mono meta">{{ e.ip or '—' }}</td>
+            </tr>
+        {% else %}
+            <tr><td colspan="8" class="meta text-center py-6">暂无操作记录。</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% if total_pages > 1 %}
+<div class="flex items-center justify-center gap-3 mt-4 text-body-sm">
+    {% if page > 1 %}
+    <a href="/admin/audit?page={{ page - 1 }}" class="btn btn-sm btn-ghost">
+        <span class="material-symbols-outlined text-[16px]">chevron_left</span> 上一页
+    </a>
+    {% endif %}
+    <span class="text-on-surface-variant">第 {{ page }} / {{ total_pages }} 页</span>
+    {% if page < total_pages %}
+    <a href="/admin/audit?page={{ page + 1 }}" class="btn btn-sm btn-ghost">
+        下一页 <span class="material-symbols-outlined text-[16px]">chevron_right</span>
+    </a>
+    {% endif %}
+</div>
+{% endif %}
+{% endblock %}

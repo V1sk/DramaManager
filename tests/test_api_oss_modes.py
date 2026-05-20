@@ -33,6 +33,10 @@ def _setup_env(tmp: Path) -> None:
     # bleeding in from the shell that invoked pytest.
     os.environ.pop("OSS_ENABLED", None)
     os.environ.pop("STORAGE_PROVIDER", None)
+    # admin-accounts-auth: the app fails fast without these; init_db()
+    # bootstraps the `admin` account from ADMIN_INITIAL_PASSWORD.
+    os.environ["SESSION_SECRET_KEY"] = "test-secret-key"
+    os.environ["ADMIN_INITIAL_PASSWORD"] = "test-admin-pw"
 
 
 def _seed_ready_row(slug: str, ep: int) -> dict:

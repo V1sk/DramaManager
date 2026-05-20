@@ -5,3 +5,6 @@ python-multipart==0.0.19
 oss2==2.19.1
 httpx==0.28.1
 tos==2.8.7
+passlib==1.7.4
+bcrypt==4.0.1
+itsdangerous==2.2.0

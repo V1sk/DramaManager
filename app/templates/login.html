@@ -1,0 +1,40 @@
+{% extends "_base.html" %}
+{% block title %}登录 · HLS 管理{% endblock %}
+
+{# Login page has no top nav — it is reachable without a session. #}
+{% block topnav %}{% endblock %}
+
+{% block content %}
+<div class="min-h-[70vh] flex items-center justify-center">
+    <div class="w-full max-w-sm bg-surface-container-high border border-outline-variant rounded-lg p-6">
+        <div class="flex items-center gap-2 mb-1">
+            <span class="material-symbols-outlined text-inverse-primary text-[26px]" style="font-variation-settings:'FILL' 1">video_library</span>
+            <h1 class="text-headline-md font-semibold tracking-tight">HLS 管理</h1>
+        </div>
+        <p class="text-body-sm text-on-surface-variant mb-5">登录以访问后台。</p>
+
+        {% if error %}
+        <div class="mb-4 px-3 py-2 rounded-md bg-error-container text-on-error text-body-sm">
+            {{ error }}
+        </div>
+        {% endif %}
+
+        <form method="post" action="/login" class="flex flex-col gap-4">
+            <input type="hidden" name="next" value="{{ next }}">
+            <div class="flex flex-col gap-1.5">
+                <label class="text-body-sm text-on-surface-variant">用户名</label>
+                <input type="text" name="username" required autofocus autocomplete="username"
+                       maxlength="32" class="font-mono">
+            </div>
+            <div class="flex flex-col gap-1.5">
+                <label class="text-body-sm text-on-surface-variant">密码</label>
+                <input type="password" name="password" required autocomplete="current-password">
+            </div>
+            <button type="submit" class="btn btn-primary mt-1">
+                <span class="material-symbols-outlined text-[18px]">login</span>
+                登录
+            </button>
+        </form>
+    </div>
+</div>
+{% endblock %}

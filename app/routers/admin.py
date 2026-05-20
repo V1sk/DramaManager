@@ -6,11 +6,12 @@ import sqlite3
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Body, File, Form, HTTPException, Path as PathParam, Query, Request, Response, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Path as PathParam, Query, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from .. import db
+from ..auth import require_can_delete
 from ..config import settings
 from ..ffmpeg_utils import (
     FfmpegError,
@@ -184,7 +185,7 @@ async def admin_create_drama(
     return RedirectResponse(url="/admin", status_code=302)
 
 
-@router.delete("/admin/dramas/{drama_slug}")
+@router.delete("/admin/dramas/{drama_slug}", dependencies=[Depends(require_can_delete)])
 async def admin_delete_drama(
     drama_slug: str = PathParam(..., pattern=r"^[a-z0-9][a-z0-9-]*$"),
 ) -> JSONResponse:
@@ -627,7 +628,7 @@ async def admin_retry_episode(
     return JSONResponse({"ok": True})
 
 
-@router.delete("/admin/episodes/{drama_slug}/{ep}")
+@router.delete("/admin/episodes/{drama_slug}/{ep}", dependencies=[Depends(require_can_delete)])
 async def admin_delete_episode(
     drama_slug: str = PathParam(..., pattern=r"^[a-z0-9][a-z0-9-]*$"),
     ep: str = PathParam(..., pattern=r"^[0-9]+$"),

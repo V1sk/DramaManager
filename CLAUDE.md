@@ -41,6 +41,8 @@ Environment variables:
 | `BUSINESS_SYNC_API_KEY` | required iff base URL set | _unset_ | 业务服务器握手用的共享密钥，作为 `X-API-Key` 头随每个 `/sync/*` 请求发送。`BUSINESS_SYNC_BASE_URL` 设而本变量未设 → 启动期 fail-fast。 |
 | `BUSINESS_SYNC_TIMEOUT` | no | `30` | 单次 `/sync/*` HTTP 请求的超时（秒）。整数；非正值 → 启动期 fail-fast。 |
 | `PIPELINE_CONCURRENCY` | no | `2` | 并发跑的 pipeline job 数（encode + encrypt + bucket publish）。每个 job 是独立 `pipeline.sh` 子进程；ffmpeg 本身已多线程，调高会过度订阅 CPU，有空闲核才往上加。同一集的多个 job 仍由 `work_queue.py` 的 per-episode 锁串行化，绝不并行写同一个 `ep-{n}/` 目录。整数 `>= 1`；非法值 → 启动期 fail-fast。 |
+| `SESSION_SECRET_KEY` | **yes** | _unset_ | 签名 `/admin` 后台会话 cookie 的密钥（`admin-accounts-auth`）。设为一串长随机字符串；**未设 → 启动期 fail-fast**。值要在重启间保持稳定，否则每次重启会让所有操作员掉登录。 |
+| `ADMIN_INITIAL_PASSWORD` | first boot only | _unset_ | 首次启动引导用：`users` 表为空时 `init_db()` 用它创建 `admin` 账号（`must_change_pw=1`，首次登录强制改密）。`users` 已有行时本变量被忽略。`users` 为空却未设本变量 → 启动期 fail-fast。 |
 
 Drama / language lifecycle (introduced by `drama-as-entity` + `i18n-foundation`):
 
@@ -64,22 +66,34 @@ Tables: `languages` (code PK + display_label + is_active flag), `dramas` (slug P
 
 URL map:
 
+所有 `/admin/*` 路由都要求登录会话（`admin-accounts-auth`）；`/api/*`、`/drm/*`、`/videos/*` 保持开放（SDK 契约，靠 VPN）。下表 `[gate]` 标注额外的权限要求。
+
 | route | purpose |
 |---|---|
-| `GET /` | 302 → `/admin` |
+| `GET /` | 302 → `/admin`（未登录则 `/admin` 再 303 → `/login`） |
+| `GET /login` | 登录页 HTML（无鉴权）。已登录则 303 → `/admin` |
+| `POST /login` | form: `username`, `password`, `next`. 成功 303 → `next`；失败重渲染登录页 (401)。带登录节流：连续 5 次失败锁 5 分钟 |
+| `POST /logout` | 清会话，303 → `/login` |
+| `GET /admin/accounts` | HTML：账号管理页（建号 + 列表 + 每行角色/状态/权限/重置密码/删除）。`[gate]` admin |
+| `POST /admin/accounts` | form: `username`, `password`, `role`, `can_delete`, `can_sync`. 新号 `must_change_pw=1`。303 / 400 / 409 (重名)。`[gate]` admin |
+| `PATCH /admin/accounts/{username}` | JSON：可选 `role` / `is_active` / `can_delete` / `can_sync`。200 / 400 / 404 / 409 (最后一个 admin 不能停用/降级)。`[gate]` admin |
+| `POST /admin/accounts/{username}/password` | JSON `{password}`：管理员重置密码，置 `must_change_pw=1`。200 / 404。`[gate]` admin |
+| `DELETE /admin/accounts/{username}` | 204 / 404 / 409 (最后一个 admin 不能删)。`[gate]` admin |
+| `GET/POST /admin/account/password` | 自助改密页 + 提交（任意已登录账号）。提交校验当前密码，成功清 `must_change_pw` 并 303 → `/admin` |
+| `GET /admin/audit` | HTML：操作记录页，`?page=N` 分页（每页 50，最新在前）。`[gate]` admin |
 | `GET /admin` | management HTML: drama-create form (with default_lang dropdown sourced from `/api/languages`) + episode-upload form + episode list (5 s auto-refresh) |
 | `GET /admin/languages` | HTML: language registry (create form + table; toggle / delete per row) |
 | `GET /admin/languages.json` | JSON list of all languages (active + inactive); fields `code, display_label, is_active, created_at, updated_at` |
 | `POST /admin/languages` | form: `code`, `display_label`. 302 / 409 (code taken) / 400 (validation). `is_active=1` on insert. |
 | `PATCH /admin/languages/{code}` | JSON body with optional `display_label` and/or `is_active`. `code` itself is immutable. 200 / 400 / 404. |
-| `DELETE /admin/languages/{code}` | 204 / 404 / 409 with `{"error": ..., "dramas": n, "translations": m}` if referenced. |
+| `DELETE /admin/languages/{code}` | 204 / 404 / 409 with `{"error": ..., "dramas": n, "translations": m}` if referenced. `[gate]` can_delete |
 | `GET /admin/dramas/new` | HTML: drama-create form (slug + default_lang + name + synopsis + poster + tags multi-select + actors multi-select). Browser orchestrates 5 endpoints in sequence. |
 | `GET /admin/dramas/{slug}` | HTML: drama detail page (translations editor, tags / actors editors, episodes table with auto-increment upload, embedded poster strip). |
 | `GET /admin/dramas/{slug}/full` | JSON: aggregate read — drama row + per-language translations + tags + actors + episodes. Used by server render and client refresh. |
 | `GET /admin/dramas/{slug}/episodes/{ep}` | HTML: episode detail page with embedded hls.js player, subtitle list, cover / video re-upload, delete. |
 | `POST /admin/dramas` | multipart: `drama_slug`, `drama_name`, `default_lang`. `default_lang` MUST exist in `languages` AND be `is_active=1`. 302 / 400 (incl. inactive lang) / 409. |
 | `GET /admin/dramas` | JSON list of all dramas (`created_at DESC`); fields `slug, name, default_lang, ep_count, created_at, updated_at` |
-| `DELETE /admin/dramas/{slug}` | Removes drama row + translations + `OUT_DIR/{slug}/`; 409 if any episodes attached; 404 if unknown |
+| `DELETE /admin/dramas/{slug}` | Removes drama row + translations + `OUT_DIR/{slug}/`; 409 if any episodes attached; 404 if unknown. `[gate]` can_delete |
 | `POST /admin/dramas/{slug}/episodes` | multipart `video`. Auto-increment `ep_number = MAX+1`. UNIQUE-collision retry up to 3×; persistent collision → 503. 404 if drama missing. |
 | `POST /admin/dramas/{slug}/episodes/{ep}` | multipart `video`. Re-encode existing episode in place. 404 if episode missing. 409 if `status=encoding`. |
 | `POST /admin/dramas/{slug}/episodes/batch` | multipart `videos` (多文件). 每个文件名须以 `EP<n>` 开头（大小写不敏感）→ 集号。已存在的集走重传语义覆盖；`status=encoding` 的集跳过。返回逐文件结果 `{ok_count, error_count, results[]}`，部分失败不致命。**路由声明在 `episodes/{ep}` 之前**，否则 `batch` 字面段会被 `{ep}` 的 `^[0-9]+$` 捕获并 422。 |
@@ -90,8 +104,8 @@ URL map:
 | `GET /api/dramas` | SDK drama catalog; `DramaSummary[]` ordered by `lastUpdatedAt DESC`; empty → `[]`; only dramas with ≥1 `ready` episode; `dramaName` sourced from `dramas.name` |
 | `GET /api/dramas/{slug}/episodes` | SDK per-drama episode list; full `EpisodeInfo[]` (with `drm` embedded) ordered by `ep_number ASC`; empty → `[]`; 422 on malformed slug |
 | `POST /api/episodes/{slug}/{ep}/cover` | multipart `cover`; overwrites `cover.jpg`；同时翻该集 `sync_status='dirty'` |
-| `POST /admin/dramas/{slug}/sync` | 业务同步：剧入队（含其下全部 dirty / pending_delete 集）。503 当 `BUSINESS_SYNC_BASE_URL` 未设；404 / 200 (no-op) / 202 |
-| `POST /admin/episodes/{slug}/{ep}/sync` | 业务同步：单集入队。503 / 404 / 200 (no-op) / 409 (剧从未同步) / 202 |
+| `POST /admin/dramas/{slug}/sync` | 业务同步：剧入队（含其下全部 dirty / pending_delete 集）。503 当 `BUSINESS_SYNC_BASE_URL` 未设；404 / 200 (no-op) / 202。`[gate]` can_sync |
+| `POST /admin/episodes/{slug}/{ep}/sync` | 业务同步：单集入队。503 / 404 / 200 (no-op) / 409 (剧从未同步) / 202。`[gate]` can_sync |
 | `GET /admin/sync` | HTML 总览页：列出全部非 clean 的剧 + 集 |
 | `GET /admin/sync/summary` | JSON `{enabled, non_clean_count}`：导航栏 5s 轮询用 |
 | `GET /drm/{slug}/{episode_id}/key` | 16 raw bytes, `application/octet-stream` (same URL embedded in the m3u8) |
@@ -133,7 +147,9 @@ openssl enc -d -aes-128-cbc \
 
 System prerequisites: `ffmpeg`, `ffprobe`, `openssl`, `xxd`, `awk`, `python3` (3.10+). No automated test suite — verify by uploading through `/admin` and playing the resulting media playlist in a hls.js page, VLC, or the Android SDK.
 
-**Deployment posture**: no auth on any endpoint (admin, upload, cover replacement, DRM key, static files). Must stay behind VPN / internal network.
+**Deployment posture**: the `/admin` console requires a login session (`admin-accounts-auth`) — operators sign in, and per-account `can_delete` / `can_sync` flags gate the destructive / production-affecting routes. The SDK-facing surface — `/api/*`, `/drm/*` (incl. the raw DRM key), `/videos/*` static files — has **no auth** and must still stay behind VPN / internal network. The login layer adds accountability and per-person permissions; it is not a substitute for the network boundary.
+
+**账号引导与锁死自救**：fresh deploy 第一次启动，`users` 表为空 → `init_db()` 用 `ADMIN_INITIAL_PASSWORD` 建 `admin` 账号（`must_change_pw=1`，首次登录强制改密）。两个必填 env：`SESSION_SECRET_KEY`（永远必填，签名会话 cookie）、`ADMIN_INITIAL_PASSWORD`（仅首启需要）。若把自己锁在外面（忘了密码 / 丢了 `SESSION_SECRET_KEY`）：服务器在内网，有 shell 的操作员可以 (a) 用 `passlib` 重算一个 `bcrypt` hash 直接 `UPDATE users SET password_hash=... WHERE username='admin'`，或 (b) `DELETE FROM users`（仅 users 表）后带 `ADMIN_INITIAL_PASSWORD` 重启，重新触发引导。`users` / `audit_log` 两张表是 `CREATE TABLE IF NOT EXISTS` 增量加表，不影响既有剧数据，无需删 `hls.db`。
 
 ## Pipeline architecture
 

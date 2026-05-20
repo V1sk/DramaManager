@@ -14,11 +14,12 @@ returns 0 so polling JS doesn't error.
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Path as PathParam, Request
+from fastapi import APIRouter, Depends, HTTPException, Path as PathParam, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
 from .. import db, sync as sync_module
+from ..auth import require_can_sync
 from ..config import settings
 
 router = APIRouter()
@@ -39,7 +40,7 @@ def _sync_disabled_503() -> HTTPException:
     )
 
 
-@router.post("/admin/dramas/{drama_slug}/sync")
+@router.post("/admin/dramas/{drama_slug}/sync", dependencies=[Depends(require_can_sync)])
 async def sync_drama(
     drama_slug: str = PathParam(..., pattern=r"^[a-z0-9][a-z0-9-]*$"),
 ) -> JSONResponse:
@@ -83,7 +84,7 @@ async def sync_drama(
     )
 
 
-@router.post("/admin/episodes/{drama_slug}/{ep}/sync")
+@router.post("/admin/episodes/{drama_slug}/{ep}/sync", dependencies=[Depends(require_can_sync)])
 async def sync_episode(
     drama_slug: str = PathParam(..., pattern=r"^[a-z0-9][a-z0-9-]*$"),
     ep: str = PathParam(..., pattern=r"^[0-9]+$"),

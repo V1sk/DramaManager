@@ -103,6 +103,8 @@
 {% set nav_active = nav_active|default('') %}
 
 <!-- Global top nav (fixed, h-14) -->
+{% block topnav %}
+{% set current_user = request.state.current_user if request.state.current_user is defined else None %}
 <header class="fixed top-0 inset-x-0 z-50 h-header-height bg-surface-container border-b border-outline-variant flex items-center px-container-padding">
     <div class="flex items-center gap-2 mr-8">
         <span class="material-symbols-outlined text-inverse-primary text-[22px]" style="font-variation-settings:'FILL' 1">video_library</span>
@@ -120,11 +122,34 @@
             {{ label }}
         </a>
         {% endfor %}
+        {% if current_user and current_user.role == 'admin' %}
+        {% for href, key, label in [('/admin/accounts', 'accounts', '账号'), ('/admin/audit', 'audit', '操作记录')] %}
+        <a href="{{ href }}" class="h-full flex items-center px-3 transition-colors {% if nav_active == key %}text-secondary border-b-2 border-secondary font-semibold{% else %}text-on-surface-variant border-b-2 border-transparent hover:text-on-surface{% endif %}">
+            {{ label }}
+        </a>
+        {% endfor %}
+        {% endif %}
     </nav>
-    <div class="ml-auto flex items-center gap-2 text-on-surface-variant">
+    <div class="ml-auto flex items-center gap-3 text-on-surface-variant">
         <div id="sync-zone" class="text-body-sm"></div>
+        {% if current_user %}
+        <span class="text-body-sm hidden sm:flex items-center gap-1">
+            <span class="material-symbols-outlined text-[18px]">account_circle</span>
+            <span class="font-medium text-on-surface">{{ current_user.username }}</span>
+            {% if current_user.role == 'admin' %}<span class="badge active">admin</span>{% endif %}
+        </span>
+        <a href="/admin/account/password" class="btn btn-sm btn-ghost" title="修改密码">
+            <span class="material-symbols-outlined text-[16px]">key</span>
+        </a>
+        <form method="post" action="/logout" class="inline">
+            <button type="submit" class="btn btn-sm btn-ghost" title="退出登录">
+                <span class="material-symbols-outlined text-[16px]">logout</span>
+            </button>
+        </form>
+        {% endif %}
     </div>
 </header>
+{% endblock %}
 
 <!-- Flash zone (positioned under fixed header) -->
 <div id="flash-zone" class="fixed top-header-height inset-x-0 z-40 max-w-5xl mx-auto px-container-padding pt-3 pointer-events-none flex flex-col gap-2"></div>

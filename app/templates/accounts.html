@@ -1,0 +1,195 @@
+{% extends "_base.html" %}
+{% block title %}账号管理 · HLS 管理{% endblock %}
+
+{% block content %}
+<header class="mb-6 pb-4 border-b border-outline-variant">
+    <h1 class="text-headline-lg text-on-surface flex items-center gap-2">
+        <span class="material-symbols-outlined text-secondary-fixed-dim">manage_accounts</span>
+        账号管理
+    </h1>
+    <p class="text-body-md text-on-surface-variant mt-1">
+        管理操作员账号。<code class="mono text-secondary-fixed-dim">admin</code> 角色拥有全部权限；
+        <code class="mono text-secondary-fixed-dim">staff</code> 角色按「删除」「同步」两个开关分配权限。新建账号首次登录会被要求改密。
+    </p>
+</header>
+
+<div class="grid grid-cols-1 xl:grid-cols-12 gap-gutter items-start">
+
+    <!-- 左：新建账号 -->
+    <div class="xl:col-span-4 bg-surface-container-high border border-outline-variant rounded-lg p-5 xl:sticky xl:top-[80px]">
+        <h3 class="text-headline-sm text-on-surface mb-4 flex items-center gap-2">
+            <span class="material-symbols-outlined text-inverse-primary">person_add</span>
+            新建账号
+        </h3>
+        <form id="create-form" class="flex flex-col gap-4">
+            <div class="flex flex-col gap-1.5">
+                <label class="text-body-sm text-on-surface-variant">用户名</label>
+                <input type="text" name="username" required maxlength="32" class="font-mono"
+                       pattern="^[a-zA-Z0-9][a-zA-Z0-9_.\-]{1,31}$" placeholder="zhangsan">
+                <span class="text-[11px] text-on-surface-variant/70">2-32 位，字母 / 数字 / . _ -</span>
+            </div>
+            <div class="flex flex-col gap-1.5">
+                <label class="text-body-sm text-on-surface-variant">初始密码</label>
+                <input type="text" name="password" required minlength="6" placeholder="至少 6 位">
+            </div>
+            <div class="flex flex-col gap-1.5">
+                <label class="text-body-sm text-on-surface-variant">角色</label>
+                <select name="role" id="create-role">
+                    <option value="staff">staff（普通员工）</option>
+                    <option value="admin">admin（管理员，全权）</option>
+                </select>
+            </div>
+            <div id="create-perms" class="flex flex-col gap-2">
+                <label class="flex items-center gap-2 text-body-sm text-on-surface">
+                    <input type="checkbox" name="can_delete" value="true"> 允许删除（剧 / 集 / 语言 / 标签 / 演员）
+                </label>
+                <label class="flex items-center gap-2 text-body-sm text-on-surface">
+                    <input type="checkbox" name="can_sync" value="true"> 允许同步到业务服务器
+                </label>
+            </div>
+            <button type="submit" id="create-btn" class="btn btn-primary">
+                <span class="material-symbols-outlined text-[18px]">add</span>
+                创建账号
+            </button>
+        </form>
+    </div>
+
+    <!-- 右：账号列表 -->
+    <div class="xl:col-span-8 bg-surface-container-high border border-outline-variant rounded-lg overflow-hidden">
+        <div class="px-4 py-3 border-b border-outline-variant bg-surface-container flex items-center justify-between">
+            <h3 class="text-headline-sm text-on-surface">当前账号</h3>
+            <span class="text-body-sm text-on-surface-variant">共 {{ users|length }} 个</span>
+        </div>
+        <table class="data">
+            <thead>
+                <tr>
+                    <th>用户名</th><th>角色</th><th>状态</th>
+                    <th>删除</th><th>同步</th><th class="text-right">操作</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for u in users %}
+                <tr data-username="{{ u.username }}">
+                    <td class="mono text-secondary-fixed-dim">
+                        {{ u.username }}
+                        {% if u.must_change_pw %}<span class="badge pending" title="首次登录 / 重置后需改密">待改密</span>{% endif %}
+                    </td>
+                    <td>
+                        <select data-field="role" class="text-body-sm">
+                            <option value="staff" {% if u.role == 'staff' %}selected{% endif %}>staff</option>
+                            <option value="admin" {% if u.role == 'admin' %}selected{% endif %}>admin</option>
+                        </select>
+                    </td>
+                    <td>
+                        {% if u.is_active %}<span class="badge active">启用</span>
+                        {% else %}<span class="badge inactive">停用</span>{% endif %}
+                    </td>
+                    {% if u.role == 'admin' %}
+                    <td class="meta">全部</td>
+                    <td class="meta">全部</td>
+                    {% else %}
+                    <td><input type="checkbox" data-field="can_delete" {% if u.can_delete %}checked{% endif %}></td>
+                    <td><input type="checkbox" data-field="can_sync" {% if u.can_sync %}checked{% endif %}></td>
+                    {% endif %}
+                    <td class="actions-col text-right whitespace-nowrap">
+                        <button class="btn btn-sm btn-ghost" data-action="toggle-active" data-active="{{ 1 if u.is_active else 0 }}"
+                                title="{{ '停用' if u.is_active else '启用' }}">
+                            <span class="material-symbols-outlined text-[16px]">{{ 'toggle_on' if u.is_active else 'toggle_off' }}</span>
+                        </button>
+                        <button class="btn btn-sm btn-ghost" data-action="reset-pw" title="重置密码">
+                            <span class="material-symbols-outlined text-[16px]">key</span>
+                        </button>
+                        <button class="btn btn-sm btn-ghost" data-action="delete" title="删除账号">
+                            <span class="material-symbols-outlined text-[16px]">delete</span>
+                        </button>
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// staff-only permission checkboxes on the create form follow the role select.
+const $role = document.getElementById('create-role');
+const $perms = document.getElementById('create-perms');
+function syncPerms() { $perms.style.display = $role.value === 'admin' ? 'none' : 'flex'; }
+$role.addEventListener('change', syncPerms);
+syncPerms();
+
+document.getElementById('create-form').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const btn = document.getElementById('create-btn');
+    btn.disabled = true;
+    try {
+        const res = await fetch('/admin/accounts', {
+            method: 'POST', body: new FormData(ev.target), redirect: 'manual',
+        });
+        if (res.type === 'opaqueredirect' || res.ok || res.status === 303) {
+            location.reload();
+        } else {
+            flash(`创建失败 (${res.status}): ${await res.text()}`, 'error');
+            btn.disabled = false;
+        }
+    } catch (e) { flash('创建出错: ' + e, 'error'); btn.disabled = false; }
+});
+
+async function patchUser(username, body) {
+    const res = await fetch(`/admin/accounts/${encodeURIComponent(username)}`, {
+        method: 'PATCH', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+    });
+    if (!res.ok) { flash(`更新失败 (${res.status}): ${await res.text()}`, 'error'); return false; }
+    return true;
+}
+
+document.querySelector('table.data tbody').addEventListener('change', async (ev) => {
+    const el = ev.target;
+    const field = el.dataset.field;
+    if (!field) return;
+    const username = el.closest('tr').dataset.username;
+    const value = el.type === 'checkbox' ? el.checked : el.value;
+    el.disabled = true;
+    const ok = await patchUser(username, { [field]: value });
+    if (ok) { location.reload(); } else { el.disabled = false; }
+});
+
+document.querySelector('table.data tbody').addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('[data-action]');
+    if (!btn) return;
+    const tr = btn.closest('tr');
+    const username = tr.dataset.username;
+    const action = btn.dataset.action;
+    if (action === 'toggle-active') {
+        btn.disabled = true;
+        const ok = await patchUser(username, { is_active: btn.dataset.active !== '1' });
+        if (ok) { location.reload(); } else { btn.disabled = false; }
+    } else if (action === 'reset-pw') {
+        const pw = prompt(`为账号 "${username}" 设置新密码（至少 6 位，该账号下次登录须改密）`);
+        if (pw === null) return;
+        btn.disabled = true;
+        try {
+            const res = await fetch(`/admin/accounts/${encodeURIComponent(username)}/password`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ password: pw }),
+            });
+            if (res.ok) { flash(`已重置 "${username}" 的密码`, 'success'); }
+            else { flash(`重置失败 (${res.status}): ${await res.text()}`, 'error'); }
+        } catch (e) { flash('重置出错: ' + e, 'error'); }
+        finally { btn.disabled = false; }
+    } else if (action === 'delete') {
+        if (!confirm(`确定删除账号 "${username}"？此操作不可撤销。`)) return;
+        btn.disabled = true;
+        try {
+            const res = await fetch(`/admin/accounts/${encodeURIComponent(username)}`, { method: 'DELETE' });
+            if (res.status === 204) { location.reload(); return; }
+            flash(`删除失败 (${res.status}): ${await res.text()}`, 'error');
+            btn.disabled = false;
+        } catch (e) { flash('删除出错: ' + e, 'error'); btn.disabled = false; }
+    }
+});
+</script>
+{% endblock %}

@@ -6,11 +6,12 @@ junction table differ.
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, Body, Form, HTTPException, Path as PathParam, Request, Response
+from fastapi import APIRouter, Body, Depends, Form, HTTPException, Path as PathParam, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from .. import db
+from ..auth import require_can_delete
 
 router = APIRouter()
 log = logging.getLogger("hls.actors")
@@ -82,7 +83,7 @@ async def actors_patch(
     return JSONResponse(row)
 
 
-@router.delete("/admin/actors/{slug}")
+@router.delete("/admin/actors/{slug}", dependencies=[Depends(require_can_delete)])
 async def actors_delete(
     slug: str = PathParam(..., pattern=_SLUG_PATTERN),
 ) -> Response:

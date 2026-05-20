@@ -8,11 +8,12 @@ All translation rows live in the generic `translations` table under
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, Body, Form, HTTPException, Path as PathParam, Request, Response
+from fastapi import APIRouter, Body, Depends, Form, HTTPException, Path as PathParam, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from .. import db
+from ..auth import require_can_delete
 
 router = APIRouter()
 log = logging.getLogger("hls.tags")
@@ -87,7 +88,7 @@ async def tags_patch(
     return JSONResponse(row)
 
 
-@router.delete("/admin/tags/{slug}")
+@router.delete("/admin/tags/{slug}", dependencies=[Depends(require_can_delete)])
 async def tags_delete(
     slug: str = PathParam(..., pattern=_SLUG_PATTERN),
 ) -> Response:
