@@ -18,11 +18,16 @@ class Subtitle(BaseModel):
     """Side-loaded subtitle track. SDK clients fetch the URL and attach it
     to the player as a text track at attach time (no `#EXT-X-MEDIA` in the
     HLS playlist — out-of-band by design).
+
+    `mimeType` is always `text/vtt` — every subtitle on disk is WebVTT
+    (single upload only accepts `.vtt`; batch upload converts `.srt` →
+    WebVTT). The field is emitted so SDK clients don't have to infer it.
     """
 
     langCode: str
     label: str
     url: str
+    mimeType: str = "text/vtt"
 
 
 class EpisodeInfo(BaseModel):

@@ -118,6 +118,10 @@
                 "type": "string",
                 "format": "uri-reference",
                 "description": "WebVTT file URL. Host-relative when served by the business host (default); future OSS staging-prod separation may move to absolute OSS URLs."
+              },
+              "mimeType": {
+                "type": "string",
+                "description": "Subtitle MIME type. Always 'text/vtt' — every subtitle on disk is WebVTT. Emitted by the server so clients need not infer it; clients may treat it as optional."
               }
             },
             "additionalProperties": false
@@ -150,12 +154,14 @@
         {
           "langCode": "en",
           "label": "English",
-          "url": "https://cdn.example.com/drama/42/ep-1/subtitles/en.vtt"
+          "url": "https://cdn.example.com/drama/42/ep-1/subtitles/en.vtt",
+          "mimeType": "text/vtt"
         },
         {
           "langCode": "zh-rCN",
           "label": "简体中文",
-          "url": "https://cdn.example.com/drama/42/ep-1/subtitles/zh-rCN.vtt"
+          "url": "https://cdn.example.com/drama/42/ep-1/subtitles/zh-rCN.vtt",
+          "mimeType": "text/vtt"
         }
       ]
     },
