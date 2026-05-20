@@ -1,88 +1,175 @@
 {% extends "_base.html" %}
-{% block title %}{{ drama.slug }} · 第 {{ episode.ep_number }} 集 · HLS 管理{% endblock %}
+{% block title %}{{ drama.slug }} · EP{{ episode.ep_number }} · HLS 管理{% endblock %}
 
 {% block content %}
-<nav style="margin-bottom: 16px; font-size: 13px;">
-    <a href="/admin/dramas/{{ drama.slug }}">← 返回 {{ drama.slug }}</a>
+<nav class="mb-4 text-body-sm">
+    <a href="/admin/dramas/{{ drama.slug }}" class="inline-flex items-center gap-1 text-on-surface-variant hover:text-secondary-fixed-dim transition-colors">
+        <span class="material-symbols-outlined text-[16px]">arrow_back</span>
+        返回 <span class="mono">{{ drama.slug }}</span>
+    </a>
 </nav>
 
-<h1>{{ drama.slug }} · 第 {{ episode.ep_number }} 集</h1>
-
-<div class="player-frame">
-    {% if episode.status == 'ready' and episode.play_url %}
-    <video id="player" controls crossorigin>
-        {% for s in subtitles %}
-        <track kind="subtitles" src="{{ s.file_url }}" srclang="{{ s.lang_code }}" label="{{ s.label }}">
-        {% endfor %}
-    </video>
-    {% else %}
-    <div class="cards-empty" style="color: #aaa; padding: 80px 20px;">
-        集状态: <span class="badge {{ episode.status }}">{{ episode.status }}</span><br>
-        {% if episode.status != 'ready' %}视频未就绪，无法预览。{% endif %}
+<!-- Header -->
+<header class="flex items-start justify-between gap-4 mb-6 pb-4 border-b border-outline-variant flex-wrap">
+    <div class="min-w-0">
+        <div class="flex items-center gap-3 flex-wrap">
+            <h1 class="text-headline-lg text-on-surface">EP{{ episode.ep_number }}</h1>
+            <span id="ep-status-badge" class="badge {{ episode.status }}">{{ episode.status }}</span>
+            <span id="ep-sync-badge" class="sync-badge {{ episode.sync_status or 'dirty' }}" title="{{ episode.sync_error or '' }}">{{ episode.sync_status or 'dirty' }}</span>
+            <span id="ep-progress-text" class="progress-text">{% if episode.status in ['encoding', 'pending'] and episode.progress %}{{ episode.progress }}{% endif %}</span>
+        </div>
+        <div class="mt-1 text-body-sm text-on-surface-variant flex items-center gap-2 flex-wrap">
+            <span class="mono">{{ drama.slug }}</span>
+            <span class="opacity-60">·</span>
+            <span class="mono">{{ episode.episode_id }}</span>
+        </div>
     </div>
+    {% if episode.status == 'failed' %}
+    <button class="btn btn-primary" id="retry-ep-btn"{% if not episode.source_path %} disabled title="源文件已不存在，请使用下方'重传视频'"{% endif %}>
+        <span class="material-symbols-outlined text-[18px]">refresh</span>
+        重试本集
+    </button>
     {% endif %}
-</div>
-
-<div class="episode-meta">
-    <div class="item"><strong>状态：</strong><span id="ep-status-badge" class="badge {{ episode.status }}">{{ episode.status }}</span><span id="ep-progress-text" class="progress-text">{% if episode.status in ['encoding', 'pending'] and episode.progress %}{{ episode.progress }}{% endif %}</span></div>
-    <div class="item"><strong>时长：</strong><span id="duration">{{ episode.duration_ms or '—' }}</span></div>
-    <div class="item"><strong>分辨率：</strong>{% if episode.width and episode.height %}{{ episode.width }}×{{ episode.height }}{% else %}—{% endif %}</div>
-    <div class="item"><strong>源文件：</strong>{{ episode.source_filename or '—' }}</div>
-    <div class="item"><strong>同步：</strong><span id="ep-sync-badge" class="sync-badge {{ episode.sync_status or 'dirty' }}" title="{{ episode.sync_error or '' }}">{{ episode.sync_status or 'dirty' }}</span></div>
-    <div class="item"><strong>更新：</strong><span class="meta">{{ episode.updated_at }}</span></div>
-</div>
+</header>
 
 {% if episode.status == 'failed' and episode.error_message %}
-<details class="error" style="margin-bottom: 16px;"><summary>查看错误</summary><pre>{{ episode.error_message }}</pre></details>
+<details class="error mb-6 bg-surface-container border border-status-danger/40 rounded-lg p-3">
+    <summary class="text-status-danger font-semibold">查看编码错误</summary>
+    <pre>{{ episode.error_message }}</pre>
+</details>
 {% endif %}
 
-{% if episode.status == 'failed' %}
-<div style="margin-bottom: 16px;">
-    <button class="btn btn-sm btn-primary" id="retry-ep-btn"{% if not episode.source_path %} disabled title="源文件已不存在，请使用下方'重传视频'"{% endif %}>重试本集</button>
-    <span class="meta" style="margin-left: 8px;">复用上次上传的源文件重新跑 pipeline，无需再次上传。</span>
-</div>
-{% endif %}
+<!-- 2-col: left player+metadata, right operations -->
+<div class="grid grid-cols-1 xl:grid-cols-3 gap-gutter items-start">
 
-<h2>封面</h2>
-<div style="margin-bottom: 16px;">
-    {% if episode.cover_url %}
-    <img id="cover-img" src="{{ episode.cover_url }}?t={{ episode.updated_at }}" alt="" style="width: 192px; height: 108px; object-fit: cover; border-radius: 4px;">
-    {% else %}
-    <div class="thumb placeholder" style="width: 192px; height: 108px;">无</div>
-    {% endif %}
-    <div style="margin-top: 8px;">
-        <button class="btn btn-sm btn-primary" id="cover-pick-btn">更换封面</button>
-        <input type="file" id="cover-file" accept="image/*" style="display: none;">
+    <!-- LEFT: player + stream metadata -->
+    <div class="xl:col-span-2 flex flex-col gap-gutter">
+
+        <!-- Player frame -->
+        <div class="bg-black rounded-lg overflow-hidden border border-outline-variant aspect-video">
+            {% if episode.status == 'ready' and episode.play_url %}
+            <video id="player" controls crossorigin class="w-full h-full block">
+                {% for s in subtitles %}
+                <track kind="subtitles" src="{{ s.file_url }}" srclang="{{ s.lang_code }}" label="{{ s.label }}">
+                {% endfor %}
+            </video>
+            {% else %}
+            <div class="w-full h-full flex flex-col items-center justify-center gap-3 text-on-surface-variant/60 p-8 text-center">
+                <span class="material-symbols-outlined text-[48px]">videocam_off</span>
+                <div class="text-body-md">视频未就绪</div>
+                <div class="text-body-sm">当前状态 <span class="badge {{ episode.status }}">{{ episode.status }}</span></div>
+            </div>
+            {% endif %}
+        </div>
+
+        <!-- Stream Metadata -->
+        <div class="bg-surface-container-high border border-outline-variant rounded-lg p-5">
+            <h3 class="text-headline-sm mb-4 flex items-center gap-2">
+                <span class="material-symbols-outlined text-secondary-fixed-dim text-[18px]">analytics</span>
+                Stream Metadata
+            </h3>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div>
+                    <div class="text-[11px] uppercase tracking-wider text-on-surface-variant">时长</div>
+                    <div class="text-body-md mono mt-1" id="duration">{{ episode.duration_ms or '—' }}</div>
+                </div>
+                <div>
+                    <div class="text-[11px] uppercase tracking-wider text-on-surface-variant">分辨率</div>
+                    <div class="text-body-md mono mt-1">{% if episode.width and episode.height %}{{ episode.width }}×{{ episode.height }}{% else %}—{% endif %}</div>
+                </div>
+                <div>
+                    <div class="text-[11px] uppercase tracking-wider text-on-surface-variant">Episode ID</div>
+                    <div class="text-body-sm mono mt-1 truncate" title="{{ episode.episode_id }}">{{ episode.episode_id }}</div>
+                </div>
+                <div>
+                    <div class="text-[11px] uppercase tracking-wider text-on-surface-variant">更新时间</div>
+                    <div class="text-body-sm mono mt-1">{{ episode.updated_at }}</div>
+                </div>
+                <div class="col-span-2 md:col-span-4">
+                    <div class="text-[11px] uppercase tracking-wider text-on-surface-variant">源文件</div>
+                    <div class="text-body-sm mono mt-1 text-on-surface-variant truncate">{{ episode.source_filename or '—' }}</div>
+                </div>
+            </div>
+        </div>
     </div>
-</div>
 
-<h2>视频源</h2>
-<div style="margin-bottom: 16px;">
-    <span class="meta">{{ episode.source_filename or '—' }}</span>
-    <button class="btn btn-sm btn-primary" id="reupload-btn" style="margin-left: 12px;">重传视频</button>
-    <input type="file" id="reupload-file" accept="video/*" style="display: none;">
-    <span class="meta" style="margin-left: 8px;">重传会触发完整重新编码</span>
-</div>
+    <!-- RIGHT: operations sidebar -->
+    <aside class="flex flex-col gap-gutter">
 
-<h2>字幕</h2>
-<table id="subtitles-table" style="margin-bottom: 12px;">
-    <thead><tr><th>语言</th><th>标签</th><th>预览</th><th>更新时间</th><th>操作</th></tr></thead>
-    <tbody id="subtitles-body"></tbody>
-</table>
-<h3>+ 添加字幕</h3>
-<form class="card" id="add-sub-form" style="max-width: 600px;">
-    <label for="sub-lang">语言</label>
-    <select id="sub-lang" name="lang"></select>
-    <label for="sub-file">文件 (.vtt)</label>
-    <input type="file" id="sub-file" name="file" accept=".vtt,text/vtt,text/plain" required>
-    <div class="actions">
-        <button type="submit" class="btn-success btn-sm">添加</button>
-    </div>
-</form>
+        <!-- Cover Asset -->
+        <div class="bg-surface-container-high border border-outline-variant rounded-lg p-5">
+            <h3 class="text-headline-sm mb-3 flex items-center gap-2">
+                <span class="material-symbols-outlined text-secondary-fixed-dim text-[18px]">image</span>
+                封面
+            </h3>
+            <div class="aspect-video bg-surface-container-lowest rounded-md overflow-hidden border border-outline-variant mb-3">
+                {% if episode.cover_url %}
+                <img id="cover-img" src="{{ episode.cover_url }}?t={{ episode.updated_at }}" alt="" class="w-full h-full object-cover">
+                {% else %}
+                <div class="w-full h-full flex items-center justify-center text-on-surface-variant/50">无封面</div>
+                {% endif %}
+            </div>
+            <button class="btn btn-secondary w-full" id="cover-pick-btn">
+                <span class="material-symbols-outlined text-[16px]">photo_camera</span>
+                替换封面
+            </button>
+            <input type="file" id="cover-file" accept="image/*" class="hidden">
+        </div>
 
-<div style="margin-top: 32px; border-top: 1px solid #eee; padding-top: 16px;">
-    <button class="btn-danger btn-sm" id="delete-ep-btn">删除本集</button>
-    <button class="btn-success btn-sm" id="sync-ep-btn">同步本集</button>
+        <!-- Subtitles -->
+        <div class="bg-surface-container-high border border-outline-variant rounded-lg p-5">
+            <div class="flex items-center justify-between mb-3">
+                <h3 class="text-headline-sm flex items-center gap-2">
+                    <span class="material-symbols-outlined text-secondary-fixed-dim text-[18px]">subtitles</span>
+                    字幕
+                </h3>
+                <button class="btn btn-xs btn-secondary" id="add-sub-toggle">
+                    <span class="material-symbols-outlined text-[14px]">add</span>添加
+                </button>
+            </div>
+            <ul id="subtitles-list" class="flex flex-col gap-2"></ul>
+            <form id="add-sub-form" class="hidden mt-4 pt-4 border-t border-dashed border-outline-variant flex flex-col gap-2">
+                <div class="flex flex-col gap-1">
+                    <label class="text-body-sm text-on-surface-variant">语言</label>
+                    <select id="sub-lang" name="lang"></select>
+                </div>
+                <div class="flex flex-col gap-1">
+                    <label class="text-body-sm text-on-surface-variant">文件 (.vtt)</label>
+                    <input type="file" id="sub-file" name="file" accept=".vtt,text/vtt,text/plain" required>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button type="submit" class="btn btn-primary btn-sm flex-1">
+                        <span class="material-symbols-outlined text-[14px]">upload</span>上传
+                    </button>
+                    <button type="button" class="btn btn-ghost btn-sm" id="add-sub-cancel">取消</button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Danger Zone -->
+        <div class="bg-surface-container-high border border-status-danger/40 rounded-lg p-5">
+            <h3 class="text-headline-sm mb-3 flex items-center gap-2 text-status-danger">
+                <span class="material-symbols-outlined text-[18px]">warning</span>
+                危险操作
+            </h3>
+            <div class="flex flex-col gap-2">
+                <button class="btn btn-secondary w-full" id="reupload-btn">
+                    <span class="material-symbols-outlined text-[16px]">cloud_upload</span>
+                    重传视频
+                </button>
+                <input type="file" id="reupload-file" accept="video/*" class="hidden">
+                <p class="text-[11px] text-on-surface-variant/70 -mt-1">重传会清掉当前视频 + DRM key，并重新编码</p>
+                <button class="btn btn-danger w-full mt-2" id="delete-ep-btn">
+                    <span class="material-symbols-outlined text-[16px]">delete</span>
+                    删除本集
+                </button>
+                <button class="btn btn-primary w-full" id="sync-ep-btn">
+                    <span class="material-symbols-outlined text-[16px]">cloud_upload</span>
+                    同步本集
+                </button>
+            </div>
+        </div>
+    </aside>
 </div>
 
 <script id="ep-data" type="application/json">{{ {"slug": drama.slug, "ep": episode.ep_number, "play_url": episode.play_url, "status": episode.status, "sync_status": episode.sync_status, "drama_last_synced_at": drama.last_synced_at, "subtitles": subtitles}|tojson }}</script>
@@ -90,15 +177,12 @@
 
 {% block scripts %}
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5"></script>
-{# Vendoring fallback (uncomment when CDN unreachable):
-<script src="/static/vendor/hls.min.js"></script>
-#}
 <script>
 const DATA = JSON.parse(document.getElementById('ep-data').textContent);
 const SLUG = DATA.slug;
 const EP = DATA.ep;
 
-// Player
+// --- Player ---
 (function () {
     const v = document.getElementById('player');
     if (!v || !DATA.play_url) return;
@@ -109,11 +193,11 @@ const EP = DATA.ep;
     } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
         v.src = DATA.play_url;
     } else {
-        v.outerHTML = '<div class="meta">浏览器不支持 HLS 播放</div>';
+        v.outerHTML = '<div class="meta p-8 text-center">浏览器不支持 HLS 播放</div>';
     }
 })();
 
-// Format duration in display
+// --- Format duration display ---
 (function () {
     const d = document.getElementById('duration');
     if (d) {
@@ -122,13 +206,11 @@ const EP = DATA.ep;
     }
 })();
 
-// Cover replace
+// --- Cover replace ---
 document.getElementById('cover-pick-btn').addEventListener('click', () => document.getElementById('cover-file').click());
 document.getElementById('cover-file').addEventListener('change', async (ev) => {
-    const f = ev.target.files[0];
-    if (!f) return;
-    const fd = new FormData();
-    fd.append('cover', f);
+    const f = ev.target.files[0]; if (!f) return;
+    const fd = new FormData(); fd.append('cover', f);
     try {
         const res = await fetch(`/api/episodes/${encodeURIComponent(SLUG)}/${EP}/cover`, { method: 'POST', body: fd });
         if (!res.ok) { flash(`封面上传失败 (${res.status})`, 'error'); return; }
@@ -137,14 +219,12 @@ document.getElementById('cover-file').addEventListener('change', async (ev) => {
     finally { ev.target.value = ''; }
 });
 
-// Re-upload video
+// --- Re-upload video ---
 document.getElementById('reupload-btn').addEventListener('click', () => document.getElementById('reupload-file').click());
 document.getElementById('reupload-file').addEventListener('change', async (ev) => {
-    const f = ev.target.files[0];
-    if (!f) return;
+    const f = ev.target.files[0]; if (!f) return;
     if (!confirm('重传会清掉当前视频和 DRM key，并重新编码。继续？')) { ev.target.value = ''; return; }
-    const fd = new FormData();
-    fd.append('video', f);
+    const fd = new FormData(); fd.append('video', f);
     try {
         const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/episodes/${EP}`, { method: 'POST', body: fd, redirect: 'manual' });
         if (res.type === 'opaqueredirect' || res.ok || res.status === 302) {
@@ -164,12 +244,9 @@ function startStatusPolling() {
             const rows = await res.json();
             const row = rows.find(r => r.drama_slug === SLUG && r.ep_number === EP);
             if (!row) return;
-            // Live-update the progress text without reloading so the operator
-            // sees "编码 720p" → "上传 OSS · 540p" tick through.
             const progEl = document.getElementById('ep-progress-text');
             if (progEl) {
-                progEl.textContent = (row.status === 'encoding' || row.status === 'pending')
-                    ? (row.progress || '') : '';
+                progEl.textContent = (row.status === 'encoding' || row.status === 'pending') ? (row.progress || '') : '';
             }
             const badge = document.getElementById('ep-status-badge');
             if (badge && badge.textContent !== row.status) {
@@ -177,36 +254,31 @@ function startStatusPolling() {
                 badge.className = 'badge ' + row.status;
             }
             if (row.status !== 'pending' && row.status !== 'encoding') {
-                clearInterval(id);
-                location.reload();
+                clearInterval(id); location.reload();
             }
-        } catch (e) {
-            console.warn('status poll failed', e);
-        }
+        } catch (e) { console.warn('status poll failed', e); }
     }, 2000);
 }
 
-// Retry button (only present when status=failed)
+// --- Retry button (only present when failed) ---
 (function () {
     const btn = document.getElementById('retry-ep-btn');
     if (!btn) return;
     btn.addEventListener('click', async () => {
-        btn.disabled = true; btn.textContent = '入队中…';
+        const orig = btn.innerHTML;
+        btn.disabled = true; btn.innerHTML = '<span class="material-symbols-outlined text-[18px]">hourglass_empty</span>入队中…';
         try {
             const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/episodes/${EP}/retry`, { method: 'POST' });
             const body = await res.json().catch(() => ({}));
-            if (res.status === 409) { flash(body.detail || '无法重试', 'warn'); btn.disabled = false; btn.textContent = '重试本集'; return; }
-            if (!res.ok) { flash(`重试失败 (${res.status}): ${body.detail || ''}`, 'error'); btn.disabled = false; btn.textContent = '重试本集'; return; }
+            if (res.status === 409) { flash(body.detail || '无法重试', 'warn'); btn.disabled = false; btn.innerHTML = orig; return; }
+            if (!res.ok) { flash(`重试失败 (${res.status}): ${body.detail || ''}`, 'error'); btn.disabled = false; btn.innerHTML = orig; return; }
             flash('已重新入队，开始编码…', 'info');
             startStatusPolling();
-        } catch (e) {
-            flash('重试出错: ' + e, 'error');
-            btn.disabled = false; btn.textContent = '重试本集';
-        }
+        } catch (e) { flash('重试出错: ' + e, 'error'); btn.disabled = false; btn.innerHTML = orig; }
     });
 })();
 
-// Subtitles
+// --- Subtitles ---
 let SUBS = DATA.subtitles || [];
 let LANGS = [];
 
@@ -219,26 +291,24 @@ async function refreshSubs() {
 }
 
 function renderSubs() {
-    const body = document.getElementById('subtitles-body');
+    const list = document.getElementById('subtitles-list');
     if (!SUBS.length) {
-        body.innerHTML = '<tr><td colspan="5" class="meta">暂无字幕。</td></tr>';
+        list.innerHTML = '<li class="meta py-3 text-center border border-dashed border-outline-variant rounded-md">暂无字幕</li>';
     } else {
-        body.innerHTML = SUBS.map(s => {
-            // s.url (from API list) or s.file_url (from DB shape) — handle both
-            const url = s.url || s.file_url;
-            return `<tr>
-                <td class="mono">${escapeHtml(s.lang_code)}</td>
-                <td>${escapeHtml(s.label)}</td>
-                <td><a href="${url}" target="_blank" class="mono">${escapeHtml(url)}</a></td>
-                <td class="meta">${fmtTime(s.uploaded_at)}</td>
-                <td class="actions-col">
-                    <button class="btn btn-sm btn-primary" data-action="replace-sub" data-lang="${escapeHtml(s.lang_code)}">替换</button>
-                    <button class="btn btn-sm btn-danger" data-action="del-sub" data-lang="${escapeHtml(s.lang_code)}">删除</button>
-                </td>
-            </tr>`;
-        }).join('');
+        list.innerHTML = SUBS.map(s => `<li class="flex items-center gap-2 p-2 rounded-md bg-surface-container-low border border-outline-variant">
+            <span class="lang-chip">${escapeHtml(s.lang_code)}</span>
+            <span class="flex-1 text-body-sm truncate" title="${escapeHtml(s.label)}">${escapeHtml(s.label)}</span>
+            <a href="${s.file_url || s.url}" target="_blank" class="btn btn-xs btn-ghost" title="查看 .vtt 文件">
+                <span class="material-symbols-outlined text-[14px]">open_in_new</span>
+            </a>
+            <button class="btn btn-xs btn-ghost" data-action="replace-sub" data-lang="${escapeHtml(s.lang_code)}" title="替换">
+                <span class="material-symbols-outlined text-[14px]">upload</span>
+            </button>
+            <button class="btn btn-xs btn-ghost" data-action="del-sub" data-lang="${escapeHtml(s.lang_code)}" title="删除">
+                <span class="material-symbols-outlined text-[14px]">delete</span>
+            </button>
+        </li>`).join('');
     }
-    // populate add-sub language select with codes not yet present
     const used = new Set(SUBS.map(s => s.lang_code));
     const sel = document.getElementById('sub-lang');
     sel.innerHTML = LANGS
@@ -248,27 +318,29 @@ function renderSubs() {
 }
 
 (async function () {
-    try {
-        const r = await fetch('/api/languages');
-        LANGS = await r.json();
-    } catch (_) { LANGS = []; }
+    try { const r = await fetch('/api/languages'); LANGS = await r.json(); }
+    catch (_) { LANGS = []; }
     renderSubs();
 })();
 
-document.getElementById('subtitles-body').addEventListener('click', async (ev) => {
-    const action = ev.target.dataset.action;
-    if (!action) return;
-    const lang = ev.target.dataset.lang;
+document.getElementById('add-sub-toggle').addEventListener('click', () => {
+    document.getElementById('add-sub-form').classList.toggle('hidden');
+});
+document.getElementById('add-sub-cancel').addEventListener('click', () => {
+    document.getElementById('add-sub-form').classList.add('hidden');
+});
+
+document.getElementById('subtitles-list').addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('[data-action]');
+    if (!btn) return;
+    const action = btn.dataset.action;
+    const lang = btn.dataset.lang;
     if (action === 'replace-sub') {
-        // Use a hidden file input
         const inp = document.createElement('input');
-        inp.type = 'file';
-        inp.accept = '.vtt,text/vtt,text/plain';
+        inp.type = 'file'; inp.accept = '.vtt,text/vtt,text/plain';
         inp.onchange = async () => {
-            const f = inp.files[0];
-            if (!f) return;
-            const fd = new FormData();
-            fd.append('file', f);
+            const f = inp.files[0]; if (!f) return;
+            const fd = new FormData(); fd.append('file', f);
             try {
                 const res = await fetch(`/admin/episodes/${encodeURIComponent(SLUG)}/${EP}/subtitles?lang=${encodeURIComponent(lang)}`, { method: 'POST', body: fd });
                 if (!res.ok) { flash(`替换失败 (${res.status}): ${await res.text()}`, 'error'); return; }
@@ -292,18 +364,18 @@ document.getElementById('add-sub-form').addEventListener('submit', async (ev) =>
     const lang = document.getElementById('sub-lang').value;
     const f = document.getElementById('sub-file').files[0];
     if (!lang || !f) return;
-    const fd = new FormData();
-    fd.append('file', f);
+    const fd = new FormData(); fd.append('file', f);
     try {
         const res = await fetch(`/admin/episodes/${encodeURIComponent(SLUG)}/${EP}/subtitles?lang=${encodeURIComponent(lang)}`, { method: 'POST', body: fd });
         if (!res.ok) { flash(`添加失败 (${res.status}): ${await res.text()}`, 'error'); return; }
         ev.target.reset();
+        document.getElementById('add-sub-form').classList.add('hidden');
         await refreshSubs();
         flash('字幕已添加；刷新播放器以加载', 'info');
     } catch (e) { flash('添加出错: ' + e, 'error'); }
 });
 
-// Delete episode
+// --- Delete episode ---
 document.getElementById('delete-ep-btn').addEventListener('click', async () => {
     if (!confirm('确定删除本集？此操作不可恢复。')) return;
     try {
@@ -319,37 +391,33 @@ document.getElementById('delete-ep-btn').addEventListener('click', async () => {
     } catch (e) { flash('删除出错: ' + e, 'error'); }
 });
 
-// Sync episode
+// --- Sync episode ---
 (function () {
     const btn = document.getElementById('sync-ep-btn');
     if (!btn) return;
-    // Disable for the three blocked cases:
     if (DATA.sync_status === 'clean') {
         btn.disabled = true; btn.title = '已是 clean，无需同步';
     } else if (!DATA.drama_last_synced_at) {
         btn.disabled = true; btn.title = '剧从未同步，先在剧详情页同步整部剧';
     }
     btn.addEventListener('click', async () => {
-        btn.disabled = true; btn.textContent = '入队中…';
+        const orig = btn.innerHTML;
+        btn.disabled = true; btn.innerHTML = '<span class="material-symbols-outlined text-[16px]">hourglass_empty</span>入队中…';
         try {
             const res = await fetch(`/admin/episodes/${encodeURIComponent(SLUG)}/${EP}/sync`, { method: 'POST' });
             const body = await res.json().catch(() => ({}));
-            if (res.status === 503) { flash('业务服务器同步未启用', 'warn'); }
-            else if (res.status === 409) { flash(body.detail || '需先同步整部剧', 'warn'); }
-            else if (!res.ok) { flash(`同步失败 (${res.status}): ${body.detail || ''}`, 'error'); }
-            else {
-                flash('已入队同步本集', 'info');
-                setTimeout(() => location.reload(), 1500);
-            }
+            if (res.status === 503) flash('业务服务器同步未启用', 'warn');
+            else if (res.status === 409) flash(body.detail || '需先同步整部剧', 'warn');
+            else if (!res.ok) flash(`同步失败 (${res.status}): ${body.detail || ''}`, 'error');
+            else { flash('已入队同步本集', 'info'); setTimeout(() => location.reload(), 1500); }
         } catch (e) { flash('同步出错: ' + e, 'error'); }
-        finally { btn.disabled = false; btn.textContent = '同步本集'; }
+        finally { btn.disabled = false; btn.innerHTML = orig; }
     });
 })();
 
-// If pipeline status is pending/encoding OR sync_status is syncing, poll for transitions
-if (
-    DATA.status === 'pending' || DATA.status === 'encoding'
-    || DATA.sync_status === 'syncing'
-) startStatusPolling();
+// --- Poll if pending/encoding/syncing ---
+if (DATA.status === 'pending' || DATA.status === 'encoding' || DATA.sync_status === 'syncing') {
+    startStatusPolling();
+}
 </script>
 {% endblock %}

@@ -1,32 +1,61 @@
 {% extends "_base.html" %}
-{% block title %}HLS 管理 · 短剧目录{% endblock %}
+{% block title %}HLS 管理 · 短剧库{% endblock %}
 
 {% block content %}
-<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
-    <h1 style="margin: 0;">短剧目录</h1>
-    <a href="/admin/dramas/new" class="btn btn-success">+ 创建短剧</a>
-</div>
+<header class="flex items-end justify-between gap-4 mb-6 pb-4 border-b border-outline-variant">
+    <div>
+        <h1 class="text-headline-lg text-on-surface">短剧库</h1>
+        <p class="text-body-md text-on-surface-variant mt-1">操作员管理所有短剧、集数、海报、字幕与同步状态。</p>
+    </div>
+    <a href="/admin/dramas/new" class="btn btn-primary">
+        <span class="material-symbols-outlined text-[18px]">add</span>
+        创建短剧
+    </a>
+</header>
 
 {% if dramas %}
-<div class="cards-grid">
+<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-gutter">
     {% for d in dramas %}
-    <a class="card-drama" href="/admin/dramas/{{ d.slug|e }}">
+    <a href="/admin/dramas/{{ d.slug|e }}"
+       class="group relative block bg-surface-container border border-outline-variant rounded-lg overflow-hidden hover:border-secondary-fixed-dim hover:-translate-y-0.5 transition-all duration-150">
+
         {% if d.non_clean_count and d.non_clean_count > 0 %}
-        <div class="sync-corner" title="非 clean: {{ d.non_clean_count }}">非 clean: {{ d.non_clean_count }}</div>
+        <div class="absolute top-2 right-2 z-10 flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/60 border border-status-warn/40 text-status-warn text-[11px] font-semibold backdrop-blur"
+             title="非 clean: {{ d.non_clean_count }}">
+            <span class="material-symbols-outlined text-[12px]">cloud_sync</span>
+            <span>{{ d.non_clean_count }}</span>
+        </div>
         {% endif %}
+
         {% if d.poster_url %}
-        <img class="poster" src="{{ d.poster_url|e }}?t={{ d.latest_ready_updated_at or d.drama_created_at }}" alt="">
+        <img class="w-full aspect-[2/3] object-cover bg-surface-container-lowest block"
+             src="{{ d.poster_url|e }}?t={{ d.latest_ready_updated_at or d.drama_created_at }}" alt="">
         {% else %}
-        <div class="poster placeholder">无封面</div>
+        <div class="w-full aspect-[2/3] bg-surface-container-lowest flex flex-col items-center justify-center gap-2 text-on-surface-variant/60">
+            <span class="material-symbols-outlined text-[32px]">photo_library</span>
+            <span class="text-body-sm">暂无海报</span>
+        </div>
         {% endif %}
-        <div class="body">
-            <div class="name">{{ d.name|e if d.name else d.slug|e }}</div>
-            <div class="synopsis">{{ d.synopsis_preview|e }}</div>
-            <div class="ep-info">
-                {% if d.ep_count > 0 %}
-                更新到第 {{ d.latest_ep_number }} 集 · 共 {{ d.ep_count }} 集
+
+        <div class="p-3">
+            <div class="text-body-md font-semibold text-on-surface truncate mb-1 group-hover:text-secondary-fixed-dim transition-colors">
+                {{ d.name|e if d.name else d.slug|e }}
+            </div>
+            <div class="text-body-sm text-on-surface-variant line-clamp-2 mb-2 min-h-[2.5em]">
+                {{ d.synopsis_preview|e if d.synopsis_preview else '—' }}
+            </div>
+            <div class="flex items-center gap-2 text-[11px] text-on-surface-variant/70">
+                {% if d.ep_count and d.ep_count > 0 %}
+                <span class="inline-flex items-center gap-1">
+                    <span class="material-symbols-outlined text-[12px]">movie</span>
+                    {{ d.ep_count }} 集
+                </span>
+                {% if d.latest_ep_number %}
+                <span class="opacity-60">·</span>
+                <span>更新到 EP{{ d.latest_ep_number }}</span>
+                {% endif %}
                 {% else %}
-                暂无已就绪集
+                <span class="opacity-60">暂无已就绪集</span>
                 {% endif %}
             </div>
         </div>
@@ -34,8 +63,13 @@
     {% endfor %}
 </div>
 {% else %}
-<div class="cards-empty">
-    <p>暂无短剧。先到 <a href="/admin/languages">语言注册表</a> 添加至少一种语言，再 <a href="/admin/dramas/new">创建第一部短剧</a>。</p>
+<div class="bg-surface-container border border-dashed border-outline-variant rounded-lg p-16 text-center">
+    <span class="material-symbols-outlined text-[48px] text-on-surface-variant/40">movie_filter</span>
+    <p class="mt-4 text-body-lg text-on-surface">暂无短剧</p>
+    <p class="mt-1 text-body-sm text-on-surface-variant">
+        先到 <a class="text-secondary-fixed-dim hover:underline" href="/admin/languages">语言注册表</a> 添加至少一种语言，
+        再 <a class="text-secondary-fixed-dim hover:underline" href="/admin/dramas/new">创建第一部短剧</a>。
+    </p>
 </div>
 {% endif %}
 {% endblock %}

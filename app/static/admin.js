@@ -56,8 +56,27 @@
         if (!zone) { alert(message); return; }
         const div = document.createElement('div');
         div.className = 'flash ' + (kind || 'info');
-        div.textContent = message;
+        div.style.display = 'flex';
+        div.style.alignItems = 'flex-start';
+        div.style.justifyContent = 'space-between';
+        div.style.gap = '8px';
+        const span = document.createElement('span');
+        span.textContent = message;
+        span.style.flex = '1';
+        const btn = document.createElement('button');
+        btn.innerHTML = '&times;';
+        btn.setAttribute('aria-label', 'close');
+        btn.style.cssText = 'background:transparent;border:0;color:inherit;cursor:pointer;font-size:18px;line-height:1;padding:0 4px;opacity:0.7;';
+        btn.onmouseover = () => (btn.style.opacity = '1');
+        btn.onmouseout = () => (btn.style.opacity = '0.7');
+        const dismiss = () => { div.style.opacity = '0'; setTimeout(() => div.remove(), 200); };
+        btn.onclick = dismiss;
+        div.appendChild(span);
+        div.appendChild(btn);
+        div.style.transition = 'opacity 0.2s ease';
         zone.appendChild(div);
+        // Auto-dismiss after 6s for info/warn; keep errors until manual close.
+        if (kind !== 'error') setTimeout(dismiss, 6000);
     }
 
     function fmtDuration(ms) {
@@ -98,9 +117,9 @@
             }
             const n = j.non_clean_count || 0;
             if (n === 0) {
-                zone.innerHTML = '<a href="/admin/sync">已同步 ✓</a>';
+                zone.innerHTML = '<a href="/admin/sync" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-status-ready hover:bg-surface-container-highest transition-colors" title="已同步"><span class="material-symbols-outlined text-[16px]">cloud_done</span><span>已同步</span></a>';
             } else {
-                zone.innerHTML = '<a href="/admin/sync">需同步: <span class="sync-count">' + n + '</span></a>';
+                zone.innerHTML = '<a href="/admin/sync" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-status-warn hover:bg-surface-container-highest transition-colors" title="需同步: ' + n + '"><span class="material-symbols-outlined text-[16px]">cloud_sync</span><span>需同步 <strong>' + n + '</strong></span></a>';
             }
         } catch (_) {
             // network / parse error — ignore, try again next tick

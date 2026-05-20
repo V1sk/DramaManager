@@ -2,41 +2,82 @@
 {% block title %}标签库 · HLS 管理{% endblock %}
 
 {% block content %}
-<h1>标签库</h1>
-<p class="meta">标签的多语言标签（如 <code>都市</code> / <code>Urban</code>）通过 <code>translations</code> 表存储；每个标签必须有一个默认语言。</p>
+<header class="mb-6 pb-4 border-b border-outline-variant">
+    <h1 class="text-headline-lg text-on-surface flex items-center gap-2">
+        <span class="material-symbols-outlined text-secondary-fixed-dim">sell</span>
+        标签库
+    </h1>
+    <p class="text-body-md text-on-surface-variant mt-1">
+        标签的多语言 label（如 <code class="mono text-secondary-fixed-dim">都市 / Urban</code>）通过 translations 表存储；每个标签必须有一个默认语言。
+    </p>
+</header>
 
-<h2>① 添加标签</h2>
-<form class="card" id="create-form">
-    <label for="slug">slug</label>
-    <input type="text" id="slug" name="slug" required pattern="^[a-z0-9][a-z0-9-]*$" placeholder="例如 urban / sci-fi / wuxia">
-    <div class="hint">英文/数字/连字符；后续不可改名</div>
-    <label for="default_lang">默认语言</label>
-    <select id="default_lang" name="default_lang" required></select>
-    <label for="label">默认 label</label>
-    <input type="text" id="label" name="label" required maxlength="100" placeholder="例如 都市 / Urban">
-    <div class="actions">
-        <button type="submit" id="create-btn" class="btn-success">添加标签</button>
+<div class="grid grid-cols-1 xl:grid-cols-12 gap-gutter items-start">
+
+    <!-- 左：添加标签 -->
+    <div class="xl:col-span-4 bg-surface-container-high border border-outline-variant rounded-lg p-5 xl:sticky xl:top-[80px]">
+        <h3 class="text-headline-sm text-on-surface mb-4 flex items-center gap-2">
+            <span class="material-symbols-outlined text-inverse-primary">add_box</span>
+            添加标签
+        </h3>
+        <form id="create-form" class="flex flex-col gap-4">
+            <div class="flex flex-col gap-1.5">
+                <label class="text-body-sm text-on-surface-variant">slug</label>
+                <input type="text" name="slug" required pattern="^[a-z0-9][a-z0-9-]*$"
+                       placeholder="urban / sci-fi / wuxia" class="font-mono">
+                <span class="text-[11px] text-on-surface-variant/70">英文/数字/连字符；后续不可改名</span>
+            </div>
+            <div class="flex flex-col gap-1.5">
+                <label class="text-body-sm text-on-surface-variant">默认语言</label>
+                <select name="default_lang" id="default_lang" required></select>
+            </div>
+            <div class="flex flex-col gap-1.5">
+                <label class="text-body-sm text-on-surface-variant">默认 label</label>
+                <input type="text" name="label" required maxlength="100" placeholder="都市 / Urban">
+            </div>
+            <button type="submit" id="create-btn" class="btn btn-primary">
+                <span class="material-symbols-outlined text-[18px]">add</span>
+                添加标签
+            </button>
+        </form>
     </div>
-</form>
 
-<h2>② 当前标签</h2>
-<table>
-    <thead><tr><th>slug</th><th>默认 label</th><th>语言覆盖</th><th>引用剧数</th><th>操作</th></tr></thead>
-    <tbody id="tags-body"><tr><td colspan="5" class="meta">加载中…</td></tr></tbody>
-</table>
+    <!-- 右：列表 -->
+    <div class="xl:col-span-8 bg-surface-container-high border border-outline-variant rounded-lg overflow-hidden">
+        <div class="px-4 py-3 border-b border-outline-variant bg-surface-container flex items-center justify-between">
+            <h3 class="text-headline-sm text-on-surface">当前标签</h3>
+            <span id="tag-count" class="text-body-sm text-on-surface-variant"></span>
+        </div>
+        <table class="data">
+            <thead>
+                <tr>
+                    <th>slug</th>
+                    <th>默认 label</th>
+                    <th>语言覆盖</th>
+                    <th class="text-right">引用剧数</th>
+                    <th class="text-right">操作</th>
+                </tr>
+            </thead>
+            <tbody id="tags-body">
+                <tr><td colspan="5" class="meta text-center py-6">加载中…</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
 const $body = document.getElementById('tags-body');
+const $count = document.getElementById('tag-count');
 let LANGUAGES = [];
+let CACHE = [];
 
 async function loadLanguages() {
     const sel = document.getElementById('default_lang');
     const btn = document.getElementById('create-btn');
-    try {
-        LANGUAGES = await (await fetch('/api/languages')).json();
-    } catch (e) { LANGUAGES = []; }
+    try { LANGUAGES = await (await fetch('/api/languages')).json(); }
+    catch (e) { LANGUAGES = []; }
     sel.innerHTML = '';
     if (!LANGUAGES.length) {
         sel.innerHTML = '<option value="">— 无可用语言 —</option>';
@@ -59,58 +100,74 @@ function langChips(row) {
 }
 
 function render(rows) {
+    $count.textContent = rows.length ? `共 ${rows.length} 个` : '';
     if (!rows.length) {
-        $body.innerHTML = '<tr><td colspan="5" class="meta">暂无标签。</td></tr>';
+        $body.innerHTML = '<tr><td colspan="5" class="meta text-center py-6">暂无标签。</td></tr>';
         return;
     }
     $body.innerHTML = rows.map(r => `<tr data-slug="${escapeHtml(r.slug)}">
-        <td class="mono">${escapeHtml(r.slug)}</td>
+        <td class="mono text-secondary-fixed-dim">${escapeHtml(r.slug)}</td>
         <td>${escapeHtml(r.default_label || '(缺失)')}</td>
         <td>${langChips(r)}</td>
-        <td>${r.usage_count}</td>
-        <td class="actions-col">
-            <button class="btn btn-sm btn-primary" data-action="manage" data-slug="${escapeHtml(r.slug)}">管理翻译</button>
-            <button class="btn btn-sm btn-danger" data-action="delete" data-slug="${escapeHtml(r.slug)}">删除</button>
+        <td class="text-right">${r.usage_count}</td>
+        <td class="actions-col text-right">
+            <button class="btn btn-sm btn-secondary" data-action="manage" data-slug="${escapeHtml(r.slug)}">
+                <span class="material-symbols-outlined text-[16px]">translate</span>翻译
+            </button>
+            <button class="btn btn-sm btn-ghost" data-action="delete" data-slug="${escapeHtml(r.slug)}" title="删除">
+                <span class="material-symbols-outlined text-[16px]">delete</span>
+            </button>
         </td>
     </tr>
     <tr class="panel-row" data-slug="${escapeHtml(r.slug)}" style="display:none">
-        <td colspan="5"><div class="panel" data-slug="${escapeHtml(r.slug)}"></div></td>
+        <td colspan="5" class="bg-surface-container-lowest border-t border-outline-variant p-0">
+            <div class="p-4">
+                <div class="flex items-center gap-2 mb-3 text-headline-sm">
+                    <span class="material-symbols-outlined text-secondary-fixed-dim text-[18px]">edit_document</span>
+                    <span>多语言 label · <span class="mono text-secondary-fixed-dim">${escapeHtml(r.slug)}</span></span>
+                </div>
+                <div class="panel-body" data-slug="${escapeHtml(r.slug)}"></div>
+            </div>
+        </td>
     </tr>`).join('');
 }
 
 function renderPanel(slug, row) {
-    const panel = document.querySelector(`.panel[data-slug="${slug}"]`);
+    const panel = document.querySelector(`.panel-body[data-slug="${slug}"]`);
     if (!panel) return;
     const langs = row.available_langs || [];
-    let html = '';
+    let html = '<div class="flex flex-col gap-2">';
     for (const code of langs) {
         const isDefault = code === row.default_lang;
-        html += `<div class="row" data-lang="${escapeHtml(code)}">
-            <span class="mono">${escapeHtml(code)}${isDefault ? ' ★' : ''}</span>
-            <input type="text" class="lang-label" placeholder="(留空读取当前值)">
-            <button class="btn btn-sm btn-success" data-action="save-tr">保存</button>
-            <button class="btn btn-sm btn-danger" data-action="del-tr" ${isDefault ? 'disabled title="默认语言不可删"' : ''}>${isDefault ? '默认' : '删除'}</button>
+        html += `<div class="row flex items-center gap-2" data-lang="${escapeHtml(code)}">
+            <span class="lang-chip ${isDefault ? 'default' : ''}" style="min-width:80px;text-align:center">${escapeHtml(code)}${isDefault ? ' ★' : ''}</span>
+            <input type="text" class="lang-label flex-1" placeholder="(留空读取当前值)">
+            <button class="btn btn-sm btn-primary" data-action="save-tr">保存</button>
+            ${isDefault
+                ? '<button class="btn btn-sm btn-ghost" disabled title="默认语言不可删">默认</button>'
+                : `<button class="btn btn-sm btn-ghost" data-action="set-default" data-lang="${escapeHtml(code)}" title="设为默认">★</button>
+                   <button class="btn btn-sm btn-ghost" data-action="del-tr" title="删除翻译"><span class="material-symbols-outlined text-[14px]">delete</span></button>`}
         </div>`;
-        if (!isDefault) {
-            html += `<div class="row" data-lang="${escapeHtml(code)}"><span></span><span></span><span></span><button class="btn btn-sm btn-primary" data-action="set-default" data-lang="${escapeHtml(code)}">设为默认</button></div>`;
-        }
     }
     const otherLangs = LANGUAGES.filter(l => !langs.includes(l.code));
     if (otherLangs.length) {
         const opts = otherLangs.map(l => `<option value="${escapeHtml(l.code)}">${escapeHtml(l.display_label)} (${escapeHtml(l.code)})</option>`).join('');
-        html += `<div class="add-row"><select class="add-lang">${opts}</select><input type="text" class="add-label" placeholder="新语言下的 label"><button class="btn btn-sm btn-success" data-action="add-tr">添加</button></div>`;
+        html += `<div class="add-row flex items-center gap-2 pt-3 mt-2 border-t border-dashed border-outline-variant">
+            <select class="add-lang" style="width:160px">${opts}</select>
+            <input type="text" class="add-label flex-1" placeholder="新语言下的 label">
+            <button class="btn btn-sm btn-primary" data-action="add-tr">添加</button>
+        </div>`;
     }
+    html += '</div>';
     panel.innerHTML = html;
 }
-
-let CACHE = [];
 
 async function refresh() {
     try {
         CACHE = await (await fetch('/admin/tags.json')).json();
         render(CACHE);
     } catch (e) {
-        $body.innerHTML = `<tr><td colspan="5" class="meta">加载失败：${escapeHtml(e)}</td></tr>`;
+        $body.innerHTML = `<tr><td colspan="5" class="meta text-center py-6">加载失败：${escapeHtml(e)}</td></tr>`;
     }
 }
 
@@ -118,7 +175,7 @@ $body.addEventListener('click', async (ev) => {
     const btn = ev.target.closest('[data-action]');
     if (!btn) return;
     const action = btn.dataset.action;
-    const slug = btn.dataset.slug || btn.closest('.panel')?.dataset.slug;
+    const slug = btn.dataset.slug || btn.closest('.panel-body')?.dataset.slug || btn.closest('tr')?.dataset.slug;
     const lang = btn.closest('.row')?.dataset.lang || btn.dataset.lang;
 
     if (action === 'manage') {
@@ -128,15 +185,13 @@ $body.addEventListener('click', async (ev) => {
             const cache = CACHE.find(r => r.slug === slug);
             if (cache) renderPanel(slug, cache);
             row.style.display = '';
-        } else {
-            row.style.display = 'none';
-        }
+        } else { row.style.display = 'none'; }
     } else if (action === 'delete') {
         if (!confirm(`确定删除标签 "${slug}"？`)) return;
         btn.disabled = true;
         try {
             const res = await fetch(`/admin/tags/${encodeURIComponent(slug)}`, { method: 'DELETE' });
-            if (res.status === 204) { await refresh(); }
+            if (res.status === 204) await refresh();
             else flash(`删除失败 (${res.status}): ${await res.text()}`, 'error');
         } catch (e) { flash('删除出错: ' + e, 'error'); }
         finally { btn.disabled = false; }
@@ -161,7 +216,7 @@ $body.addEventListener('click', async (ev) => {
             await refresh();
         } catch (e) { flash(`切换失败: ${e.body?.detail || e}`, 'error'); }
     } else if (action === 'add-tr') {
-        const panel = btn.closest('.panel');
+        const panel = btn.closest('.panel-body') || btn.closest('div');
         const lang2 = panel.querySelector('.add-lang').value;
         const label = panel.querySelector('.add-label').value.trim();
         if (!label) { flash('label 不能为空', 'warn'); return; }

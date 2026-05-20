@@ -1,28 +1,139 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html class="dark" lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>{% block title %}HLS 管理{% endblock %}</title>
+
+    <!-- Fonts are NOT loaded from Google Fonts — fonts.googleapis.com is
+         unreachable on the internal network. Material Symbols icon font is
+         vendored locally (see @font-face in admin.css → /static/...woff2).
+         Geist is not vendored; the font stack falls back to system-ui. -->
+
+    <!-- Tailwind via CDN with project tokens.
+         NOTE: the `forms` plugin is intentionally NOT loaded — it injects a
+         white-background base reset on inputs/selects/textareas that clashes
+         with the dark theme. All form controls are styled in admin.css. -->
+    <script src="https://cdn.tailwindcss.com?plugins=container-queries"></script>
+    <script>
+      tailwind.config = {
+        darkMode: 'class',
+        theme: {
+          extend: {
+            colors: {
+              // Streamline Ops · Material 3 dark
+              background: '#0b1326',
+              surface: '#0b1326',
+              'surface-dim': '#0b1326',
+              'surface-bright': '#31394d',
+              'surface-container-lowest': '#060e20',
+              'surface-container-low': '#131b2e',
+              'surface-container': '#171f33',
+              'surface-container-high': '#222a3d',
+              'surface-container-highest': '#2d3449',
+              'surface-variant': '#2d3449',
+              'on-surface': '#dae2fd',
+              'on-surface-variant': '#c7c4d7',
+              'on-background': '#dae2fd',
+              outline: '#908fa0',
+              'outline-variant': '#464554',
+              primary: '#c0c1ff',
+              'on-primary': '#1000a9',
+              'primary-container': '#8083ff',
+              'on-primary-container': '#0d0096',
+              'inverse-primary': '#494bd6',
+              secondary: '#cebdff',
+              'on-secondary': '#381385',
+              'secondary-container': '#4f319c',
+              'on-secondary-container': '#bea8ff',
+              'secondary-fixed-dim': '#cebdff',
+              tertiary: '#ffb783',
+              'on-tertiary': '#4f2500',
+              'tertiary-container': '#d97721',
+              error: '#ffb4ab',
+              'on-error': '#690005',
+              'error-container': '#93000a',
+              // Status semantics (admin-only — not in mock palette but needed for clarity)
+              'status-ready':   '#62d27e',
+              'status-warn':    '#f5c46b',
+              'status-info':    '#aab3ff',
+              'status-danger':  '#ff8a8a',
+              'status-pendingdelete': '#ffb27a',
+            },
+            spacing: {
+              'header-height': '56px',
+              'container-padding': '24px',
+              gutter: '16px',
+              'item-gap-dense': '8px',
+              'item-gap-ui': '12px',
+            },
+            borderRadius: {
+              DEFAULT: '0.25rem',
+              sm: '0.125rem',
+              md: '0.375rem',
+              lg: '0.5rem',
+              xl: '0.75rem',
+            },
+            fontFamily: {
+              sans: ['Geist', 'ui-sans-serif', 'system-ui', '-apple-system', 'PingFang SC', 'sans-serif'],
+              mono: ['JetBrains Mono', 'ui-monospace', 'SF Mono', 'Menlo', 'monospace'],
+            },
+            fontSize: {
+              'headline-lg': ['24px', { lineHeight: '32px', letterSpacing: '-0.02em', fontWeight: '600' }],
+              'headline-md': ['20px', { lineHeight: '28px', letterSpacing: '-0.01em', fontWeight: '600' }],
+              'headline-sm': ['16px', { lineHeight: '24px', fontWeight: '600' }],
+              'body-lg':     ['16px', { lineHeight: '24px', fontWeight: '400' }],
+              'body-md':     ['14px', { lineHeight: '20px', fontWeight: '400' }],
+              'body-sm':     ['13px', { lineHeight: '18px', fontWeight: '400' }],
+              'label-caps':  ['11px', { lineHeight: '12px', letterSpacing: '0.05em', fontWeight: '700' }],
+              'status-pill': ['11px', { lineHeight: '1',    letterSpacing: '0.01em', fontWeight: '600' }],
+            },
+          },
+        },
+      };
+    </script>
+
+    <!-- Alpine.js for show/hide / inline-edit panels -->
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/@alpinejs/collapse@3.x.x/dist/cdn.min.js"></script>
+
     <link rel="stylesheet" href="/static/admin.css">
 </head>
-<body>
+<body class="bg-background text-on-background antialiased font-sans">
 {% set nav_active = nav_active|default('') %}
-<nav class="topnav">
-    <span class="brand">HLS 管理</span>
-    <a href="/admin"           class="{{ 'active' if nav_active == 'home' }}">首页</a>
-    <a href="/admin/tags"      class="{{ 'active' if nav_active == 'tags' }}">标签</a>
-    <a href="/admin/actors"    class="{{ 'active' if nav_active == 'actors' }}">演员</a>
-    <a href="/admin/languages" class="{{ 'active' if nav_active == 'languages' }}">语言</a>
-    <span class="spacer"></span>
-    {# step 6 (business-server-sync) populates this with "需同步: N" / "已同步" link #}
-    <div id="sync-zone" class="sync-zone"></div>
-</nav>
 
-<div id="flash-zone"></div>
+<!-- Global top nav (fixed, h-14) -->
+<header class="fixed top-0 inset-x-0 z-50 h-header-height bg-surface-container border-b border-outline-variant flex items-center px-container-padding">
+    <div class="flex items-center gap-2 mr-8">
+        <span class="material-symbols-outlined text-inverse-primary text-[22px]" style="font-variation-settings:'FILL' 1">video_library</span>
+        <span class="text-headline-md font-semibold tracking-tight">HLS 管理</span>
+    </div>
+    <nav class="hidden md:flex items-center gap-1 h-full text-body-md">
+        {% set nav_items = [
+            ('/admin',           'home',      '首页'),
+            ('/admin/tags',      'tags',      '标签'),
+            ('/admin/actors',    'actors',    '演员'),
+            ('/admin/languages', 'languages', '语言'),
+        ] %}
+        {% for href, key, label in nav_items %}
+        <a href="{{ href }}" class="h-full flex items-center px-3 transition-colors {% if nav_active == key %}text-secondary border-b-2 border-secondary font-semibold{% else %}text-on-surface-variant border-b-2 border-transparent hover:text-on-surface{% endif %}">
+            {{ label }}
+        </a>
+        {% endfor %}
+    </nav>
+    <div class="ml-auto flex items-center gap-2 text-on-surface-variant">
+        <div id="sync-zone" class="text-body-sm"></div>
+    </div>
+</header>
 
-<main>
-{% block content %}{% endblock %}
+<!-- Flash zone (positioned under fixed header) -->
+<div id="flash-zone" class="fixed top-header-height inset-x-0 z-40 max-w-5xl mx-auto px-container-padding pt-3 pointer-events-none flex flex-col gap-2"></div>
+
+<!-- Main canvas — top padding to clear the fixed header -->
+<main class="pt-header-height min-h-screen">
+    <div class="max-w-[1280px] mx-auto px-container-padding py-6">
+        {% block content %}{% endblock %}
+    </div>
 </main>
 
 <script src="/static/admin.js"></script>

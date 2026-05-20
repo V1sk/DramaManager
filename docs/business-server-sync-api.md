@@ -2,8 +2,6 @@
 
 HLS 管理服务器（staging）通过 4 个 HTTP 接口把剧 / 集 / 翻译 / 标签 / 演员 / 字幕 / 封面 / 海报 / DRM 推送给业务服务器（prod）。媒体字节走 TOS server-side copy，业务服务器只接 JSON。
 
-> 长版本（含拓扑图 / 状态机 / 升级说明 / FAQ）见 `docs/business-server-integration.md`。本文档只列协议本身。
-
 ---
 
 ## 通用

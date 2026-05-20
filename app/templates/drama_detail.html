@@ -8,104 +8,244 @@
 {% set default_synopsis = default_trans.get('synopsis') or '' %}
 {% set default_poster = default_trans.get('poster') %}
 
-<nav style="margin-bottom: 16px; font-size: 13px;">
-    <a href="/admin">← 返回首页</a>
+<nav class="mb-4 text-body-sm">
+    <a href="/admin" class="inline-flex items-center gap-1 text-on-surface-variant hover:text-secondary-fixed-dim transition-colors">
+        <span class="material-symbols-outlined text-[16px]">arrow_back</span>
+        返回短剧库
+    </a>
 </nav>
 
-<div class="drama-header">
-    <div class="poster-strip">
-        {% if default_poster %}
-        <img id="poster-img" src="{{ default_poster }}?t={{ drama.updated_at }}" alt="">
-        {% else %}
-        <img id="poster-img" src="" alt="" style="display: {{ 'none' if not default_poster else 'block' }};">
-        <div id="poster-placeholder" class="thumb placeholder" style="width: 200px; aspect-ratio: 2/3; height: auto;">无海报</div>
-        {% endif %}
-        <select id="poster-lang">
-            {% for lang_code, _trans in drama.translations.items() %}
-            <option value="{{ lang_code }}" {% if lang_code == drama.default_lang %}selected{% endif %}>{{ lang_code }}{% if lang_code == drama.default_lang %} ★{% endif %}</option>
-            {% endfor %}
-        </select>
-    </div>
-    <div class="info">
-        <h2>
-            {{ default_name }}
-            <span class="meta mono">({{ drama.slug }} · 默认 {{ drama.default_lang }})</span>
-            <span id="drama-sync-badge" class="sync-badge {{ drama.sync_status }}" title="{{ drama.sync_error or '' }}">{{ drama.sync_status }}</span>
-        </h2>
-        <div class="tags-line">
-            标签：
-            {% if drama.tags %}{% for t in drama.tags %}<span class="tag-chip">{{ t.label or t.slug }}</span>{% endfor %}{% else %}<span class="meta">（无）</span>{% endif %}
+<!-- Header: drama name + sync badge + horizontal action buttons -->
+<header class="mb-6 pb-4 border-b border-outline-variant">
+    <div class="flex items-start justify-between gap-4 flex-wrap">
+        <div class="min-w-0">
+            <div class="flex items-center gap-3 flex-wrap">
+                <h1 class="text-headline-lg text-on-surface truncate">{{ default_name }}</h1>
+                <span id="drama-sync-badge" class="sync-badge {{ drama.sync_status }}" title="{{ drama.sync_error or '' }}">{{ drama.sync_status }}</span>
+            </div>
+            <div class="mt-1 text-body-sm text-on-surface-variant flex items-center gap-2">
+                <span class="mono">{{ drama.slug }}</span>
+                <span class="opacity-60">·</span>
+                <span>默认语言 <span class="mono text-secondary-fixed-dim">{{ drama.default_lang }}</span></span>
+            </div>
         </div>
-        <div class="tags-line">
-            演员：
-            {% if drama.actors %}{{ drama.actors | map(attribute='name') | select | join('、') or '—' }}{% else %}<span class="meta">（无）</span>{% endif %}
-        </div>
-        <div class="tags-line">
-            免费集数：
-            <span id="free-episodes-display" data-value="{{ drama.free_episodes }}">{{ drama.free_episodes }}</span>
-            <input type="number" id="free-episodes-input" min="0" max="9999" step="1" value="{{ drama.free_episodes }}" style="width: 70px; padding: 2px 6px; display: none;">
-            <button class="btn btn-sm btn-ghost" id="free-episodes-edit-btn" type="button">修改</button>
-            <button class="btn btn-sm btn-success" id="free-episodes-save-btn" type="button" style="display: none;">保存</button>
-            <button class="btn btn-sm btn-ghost" id="free-episodes-cancel-btn" type="button" style="display: none;">取消</button>
-            <span class="meta" style="margin-left: 6px;">前 N 集免费，第 N+1 集起收费；0 = 全部付费</span>
-        </div>
-        <div class="synopsis">{{ default_synopsis }}</div>
-        <div class="actions">
-            <button class="btn-primary btn-sm" onclick="togglePanel('translations-panel')">编辑翻译</button>
-            <button class="btn-primary btn-sm" onclick="togglePanel('tags-panel')">编辑标签</button>
-            <button class="btn-primary btn-sm" onclick="togglePanel('actors-panel')">编辑演员</button>
-            <button class="btn-danger btn-sm" id="delete-drama-btn" {% if drama.episodes %}disabled title="先删除全部集数"{% endif %}>删除剧</button>
-            <button class="btn-success btn-sm" id="sync-drama-btn">同步整部剧</button>
+        <div class="flex items-center gap-2 flex-wrap">
+            <button class="btn btn-secondary btn-sm" data-toggle="translations-panel">
+                <span class="material-symbols-outlined text-[16px]">translate</span>编辑翻译
+            </button>
+            <button class="btn btn-secondary btn-sm" data-toggle="tags-panel">
+                <span class="material-symbols-outlined text-[16px]">sell</span>编辑标签
+            </button>
+            <button class="btn btn-secondary btn-sm" data-toggle="actors-panel">
+                <span class="material-symbols-outlined text-[16px]">person</span>编辑演员
+            </button>
+            <button class="btn btn-danger btn-sm" id="delete-drama-btn" {% if drama.episodes %}disabled title="先删除全部集数"{% endif %}>
+                <span class="material-symbols-outlined text-[16px]">delete</span>删除剧
+            </button>
+            <button class="btn btn-primary btn-sm" id="sync-drama-btn">
+                <span class="material-symbols-outlined text-[16px]">cloud_upload</span>同步整部剧
+            </button>
         </div>
     </div>
-</div>
+</header>
 
-<div id="translations-panel" class="panel hidden">
-    <h3>翻译编辑</h3>
-    <div id="translations-rows"></div>
-    <div class="add-row">
-        <select id="add-tr-lang"></select>
-        <input id="add-tr-name" placeholder="必填：剧名">
-        <button class="btn-success btn-sm" id="add-tr-btn">添加语言</button>
+<!-- 2-col layout: left poster+meta, right panels + episodes -->
+<div class="grid grid-cols-1 xl:grid-cols-12 gap-gutter items-start">
+
+    <!-- Left column: poster + drama metadata -->
+    <aside class="xl:col-span-3 flex flex-col gap-gutter xl:sticky xl:top-[80px]">
+
+        <!-- Poster card -->
+        <div class="bg-surface-container-high border border-outline-variant rounded-lg overflow-hidden">
+            <div class="relative aspect-[2/3] bg-surface-container-lowest">
+                {% if default_poster %}
+                <img id="poster-img" class="absolute inset-0 w-full h-full object-cover"
+                     src="{{ default_poster }}?t={{ drama.updated_at }}" alt="">
+                <div id="poster-placeholder" class="absolute inset-0 hidden items-center justify-center text-on-surface-variant/50 flex-col gap-2">
+                    <span class="material-symbols-outlined text-[32px]">photo_library</span>
+                    <span class="text-body-sm">无海报</span>
+                </div>
+                {% else %}
+                <img id="poster-img" class="absolute inset-0 w-full h-full object-cover hidden" src="" alt="">
+                <div id="poster-placeholder" class="absolute inset-0 flex items-center justify-center text-on-surface-variant/50 flex-col gap-2">
+                    <span class="material-symbols-outlined text-[32px]">photo_library</span>
+                    <span class="text-body-sm">无海报</span>
+                </div>
+                {% endif %}
+            </div>
+            <div class="p-3 border-t border-outline-variant">
+                <label class="text-[11px] uppercase tracking-wider text-on-surface-variant">海报语言</label>
+                <select id="poster-lang" class="mt-1">
+                    {% for lang_code, _trans in drama.translations.items() %}
+                    <option value="{{ lang_code }}" {% if lang_code == drama.default_lang %}selected{% endif %}>
+                        {{ lang_code }}{% if lang_code == drama.default_lang %} ★{% endif %}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+        </div>
+
+        <!-- Drama metadata card -->
+        <div class="bg-surface-container-high border border-outline-variant rounded-lg p-4 flex flex-col gap-3">
+            <!-- 标签 -->
+            <div>
+                <div class="text-[11px] uppercase tracking-wider text-on-surface-variant mb-1">标签</div>
+                <div class="flex flex-wrap gap-1">
+                    {% if drama.tags %}
+                        {% for t in drama.tags %}<span class="tag-chip">{{ t.label or t.slug }}</span>{% endfor %}
+                    {% else %}<span class="meta">（无）</span>{% endif %}
+                </div>
+            </div>
+
+            <!-- 演员 -->
+            <div>
+                <div class="text-[11px] uppercase tracking-wider text-on-surface-variant mb-1">演员</div>
+                <div class="text-body-sm text-on-surface">
+                    {% if drama.actors %}{{ drama.actors | map(attribute='name') | select | join('、') or '—' }}
+                    {% else %}<span class="meta">（无）</span>{% endif %}
+                </div>
+            </div>
+
+            <!-- 免费集数 (inline editor) -->
+            <div>
+                <div class="text-[11px] uppercase tracking-wider text-on-surface-variant mb-1">免费集数</div>
+                <div class="flex items-center gap-2 flex-wrap">
+                    <span id="free-episodes-display" data-value="{{ drama.free_episodes }}" class="text-body-md font-semibold text-on-surface">{{ drama.free_episodes }}</span>
+                    <input type="number" id="free-episodes-input" min="0" max="9999" step="1" value="{{ drama.free_episodes }}" class="inline-input hidden">
+                    <button class="btn btn-xs btn-ghost" id="free-episodes-edit-btn" type="button" title="修改">
+                        <span class="material-symbols-outlined text-[14px]">edit</span>
+                    </button>
+                    <button class="btn btn-xs btn-primary hidden" id="free-episodes-save-btn" type="button">保存</button>
+                    <button class="btn btn-xs btn-ghost hidden" id="free-episodes-cancel-btn" type="button">取消</button>
+                </div>
+                <div class="text-[11px] text-on-surface-variant/70 mt-1">前 N 集免费，第 N+1 集起付费</div>
+            </div>
+
+            <!-- 简介 -->
+            <div>
+                <div class="text-[11px] uppercase tracking-wider text-on-surface-variant mb-1">简介</div>
+                <div class="text-body-sm text-on-surface-variant whitespace-pre-wrap">{{ default_synopsis or '（暂无简介，可在"编辑翻译"中添加）' }}</div>
+            </div>
+        </div>
+    </aside>
+
+    <!-- Right column: editor panels + episodes list -->
+    <div class="xl:col-span-9 flex flex-col gap-gutter">
+
+        <!-- Translations editor (collapsible) -->
+        <section id="translations-panel" class="bg-surface-container-high border border-outline-variant rounded-lg overflow-hidden hidden">
+            <div class="px-4 py-3 border-b border-outline-variant bg-surface-container flex items-center justify-between">
+                <h3 class="text-headline-sm flex items-center gap-2">
+                    <span class="material-symbols-outlined text-secondary-fixed-dim text-[18px]">translate</span>
+                    多语言翻译
+                </h3>
+                <button class="btn btn-xs btn-ghost" data-toggle="translations-panel" title="收起">
+                    <span class="material-symbols-outlined text-[16px]">close</span>
+                </button>
+            </div>
+            <div class="p-4">
+                <div id="translations-rows" class="flex flex-col gap-3"></div>
+                <div class="mt-4 pt-4 border-t border-dashed border-outline-variant flex items-end gap-2 flex-wrap">
+                    <div class="flex-1 min-w-[150px]">
+                        <label class="text-body-sm text-on-surface-variant">添加语言</label>
+                        <select id="add-tr-lang" class="mt-1"></select>
+                    </div>
+                    <div class="flex-1 min-w-[200px]">
+                        <label class="text-body-sm text-on-surface-variant">剧名</label>
+                        <input id="add-tr-name" placeholder="必填：剧名" class="mt-1">
+                    </div>
+                    <button class="btn btn-primary" id="add-tr-btn">
+                        <span class="material-symbols-outlined text-[16px]">add</span>添加
+                    </button>
+                </div>
+                <p class="meta mt-3">每条翻译可独立保存。删除翻译会清掉该语言的剧名 / 简介 / 海报。默认语言不可整体删除。</p>
+            </div>
+        </section>
+
+        <!-- Tags editor (collapsible) -->
+        <section id="tags-panel" class="bg-surface-container-high border border-outline-variant rounded-lg overflow-hidden hidden">
+            <div class="px-4 py-3 border-b border-outline-variant bg-surface-container flex items-center justify-between">
+                <h3 class="text-headline-sm flex items-center gap-2">
+                    <span class="material-symbols-outlined text-secondary-fixed-dim text-[18px]">sell</span>
+                    标签关联
+                </h3>
+                <button class="btn btn-xs btn-ghost" data-toggle="tags-panel"><span class="material-symbols-outlined text-[16px]">close</span></button>
+            </div>
+            <div class="p-4">
+                <select id="tags-multi" multiple size="8" class="w-full"></select>
+                <div class="mt-3 flex items-center gap-3">
+                    <button class="btn btn-primary" id="save-tags-btn">
+                        <span class="material-symbols-outlined text-[16px]">save</span>保存标签
+                    </button>
+                    <span class="meta">按住 Ctrl/Cmd 多选；保存为整体替换</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Actors editor (collapsible) -->
+        <section id="actors-panel" class="bg-surface-container-high border border-outline-variant rounded-lg overflow-hidden hidden">
+            <div class="px-4 py-3 border-b border-outline-variant bg-surface-container flex items-center justify-between">
+                <h3 class="text-headline-sm flex items-center gap-2">
+                    <span class="material-symbols-outlined text-secondary-fixed-dim text-[18px]">person</span>
+                    演员关联
+                </h3>
+                <button class="btn btn-xs btn-ghost" data-toggle="actors-panel"><span class="material-symbols-outlined text-[16px]">close</span></button>
+            </div>
+            <div class="p-4">
+                <select id="actors-multi" multiple size="8" class="w-full"></select>
+                <div class="mt-3 flex items-center gap-3">
+                    <button class="btn btn-primary" id="save-actors-btn">
+                        <span class="material-symbols-outlined text-[16px]">save</span>保存演员
+                    </button>
+                    <span class="meta">按住 Ctrl/Cmd 多选；保存为整体替换</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Episodes section -->
+        <section class="bg-surface-container-high border border-outline-variant rounded-lg overflow-hidden">
+            <div class="px-4 py-3 border-b border-outline-variant bg-surface-container flex items-center justify-between flex-wrap gap-2">
+                <h3 class="text-headline-sm flex items-center gap-2">
+                    <span class="material-symbols-outlined text-secondary-fixed-dim text-[18px]">movie</span>
+                    集列表
+                </h3>
+                <div class="flex items-center gap-2 flex-wrap">
+                    <button class="btn btn-secondary btn-sm" id="upload-next-btn">
+                        <span class="material-symbols-outlined text-[16px]">upload</span>上传下一集
+                    </button>
+                    <input type="file" id="upload-next-file" accept="video/*" class="hidden">
+                    <button class="btn btn-secondary btn-sm" id="batch-upload-btn">
+                        <span class="material-symbols-outlined text-[16px]">cloud_upload</span>批量上传
+                    </button>
+                    <input type="file" id="batch-upload-file" accept="video/*" multiple class="hidden">
+                    <button class="btn btn-secondary btn-sm" id="batch-subtitle-btn">
+                        <span class="material-symbols-outlined text-[16px]">subtitles</span>批量字幕
+                    </button>
+                    <input type="file" id="batch-subtitle-file" accept=".vtt,.srt" multiple class="hidden">
+                </div>
+            </div>
+            <div class="px-4 py-2 text-[11px] text-on-surface-variant border-b border-outline-variant bg-surface-container/40">
+                单集：自动分配下一个集号（MAX+1）·
+                批量集：文件名须以 <code class="mono">EP&lt;数字&gt;</code> 开头（如 <code class="mono">EP1.mp4</code>）·
+                批量字幕：文件名形如 <code class="mono">EP&lt;集号&gt;-&lt;语言&gt;-说明.vtt/srt</code>
+            </div>
+            <table class="data" id="episodes-table">
+                <thead>
+                    <tr>
+                        <th>集</th>
+                        <th>封面</th>
+                        <th>状态</th>
+                        <th>时长</th>
+                        <th>更新时间</th>
+                        <th>同步</th>
+                        <th class="text-right">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="episodes-body"></tbody>
+            </table>
+        </section>
     </div>
-    <div style="margin-top: 8px; font-size: 12px; color: #888;">每条翻译可独立保存。删除翻译会清掉该语言的剧名/简介/海报。默认语言不能整体删除（可单独清空海报）。</div>
 </div>
-
-<div id="tags-panel" class="panel hidden">
-    <h3>标签关联</h3>
-    <select id="tags-multi" multiple style="height: 100px; width: 100%;"></select>
-    <div style="margin-top: 8px;">
-        <button class="btn-success btn-sm" id="save-tags-btn">保存标签</button>
-        <span class="meta">按住 Ctrl/Cmd 多选；保存为整体替换</span>
-    </div>
-</div>
-
-<div id="actors-panel" class="panel hidden">
-    <h3>演员关联</h3>
-    <select id="actors-multi" multiple style="height: 100px; width: 100%;"></select>
-    <div style="margin-top: 8px;">
-        <button class="btn-success btn-sm" id="save-actors-btn">保存演员</button>
-        <span class="meta">按住 Ctrl/Cmd 多选；保存为整体替换</span>
-    </div>
-</div>
-
-<h2>集列表</h2>
-<div style="margin-bottom: 8px;">
-    <button class="btn-success btn-sm" id="upload-next-btn">+ 上传下一集</button>
-    <input type="file" id="upload-next-file" accept="video/*" style="display: none;">
-    <button class="btn-success btn-sm" id="batch-upload-btn">+ 批量上传</button>
-    <input type="file" id="batch-upload-file" accept="video/*" multiple style="display: none;">
-    <button class="btn-success btn-sm" id="batch-subtitle-btn">+ 批量上传字幕</button>
-    <input type="file" id="batch-subtitle-file" accept=".vtt,.srt" multiple style="display: none;">
-    <div class="meta" style="margin-top: 6px;">单集：服务器自动分配下一个集号 (MAX+1)；批量集：文件名须以 EP&lt;数字&gt; 开头（如 EP1.mp4）；批量字幕：文件名须形如 EP&lt;集号&gt;-&lt;语言&gt;-说明.vtt/srt（如 EP1-en-x.srt）</div>
-</div>
-
-<table id="episodes-table">
-    <thead>
-        <tr><th>集</th><th>封面</th><th>状态</th><th>时长</th><th>更新时间</th><th>同步</th><th>操作</th></tr>
-    </thead>
-    <tbody id="episodes-body"></tbody>
-</table>
 
 <script id="initial-data" type="application/json">{{ drama|tojson }}</script>
 {% endblock %}
@@ -115,60 +255,86 @@
 let DRAMA = JSON.parse(document.getElementById('initial-data').textContent);
 const SLUG = DRAMA.slug;
 
-function togglePanel(id) {
-    const el = document.getElementById(id);
-    el.classList.toggle('hidden');
-}
+// --- Panel toggles (all buttons with data-toggle="xxx" toggle the panel section) ---
+document.querySelectorAll('[data-toggle]').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const target = document.getElementById(btn.dataset.toggle);
+        if (!target) return;
+        const willOpen = target.classList.contains('hidden');
+        target.classList.toggle('hidden');
+        if (willOpen) {
+            target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            // Lazy load panel content
+            if (btn.dataset.toggle === 'translations-panel' && !document.getElementById('translations-rows').dataset.loaded) {
+                renderTranslationsPanel().then(() => { document.getElementById('translations-rows').dataset.loaded = '1'; });
+            } else if (btn.dataset.toggle === 'tags-panel' && !document.getElementById('tags-multi').dataset.loaded) {
+                renderTagsPanel().then(() => { document.getElementById('tags-multi').dataset.loaded = '1'; });
+            } else if (btn.dataset.toggle === 'actors-panel' && !document.getElementById('actors-multi').dataset.loaded) {
+                renderActorsPanel().then(() => { document.getElementById('actors-multi').dataset.loaded = '1'; });
+            }
+        }
+    });
+});
 
 function renderEpisodes() {
     const tbody = document.getElementById('episodes-body');
     if (!DRAMA.episodes || DRAMA.episodes.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" class="meta">还没有上传任何集，点击上方"上传下一集"开始。</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="meta text-center py-6">还没有任何集，点击上方"上传下一集"开始。</td></tr>';
         return;
     }
-    // Hide pending_delete rows from the table (they show on /admin/sync only).
     const visible = DRAMA.episodes.filter(e => e.sync_status !== 'pending_delete');
     if (visible.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" class="meta">还没有可见的集，点击上方"上传下一集"开始（pending_delete 集不显示在此）。</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="meta text-center py-6">还没有可见的集（pending_delete 集在此隐藏，可去 /admin/sync 查看）。</td></tr>';
         return;
     }
     const freeEpisodes = Number.isInteger(DRAMA.free_episodes) ? DRAMA.free_episodes : 3;
     tbody.innerHTML = visible.map(e => {
         const isPaid = e.ep_number > freeEpisodes;
-        // Lock badge on top-right of the thumbnail when the episode is paid.
-        const lockBadge = isPaid
-            ? `<span class="thumb-lock" title="付费集">🔒</span>`
-            : '';
+        const lockBadge = isPaid ? '<span class="thumb-lock" title="付费集">🔒</span>' : '';
         const coverInner = e.cover_url
             ? `<img class="thumb" src="${e.cover_url}?t=${e.updated_at}" alt="">`
             : '<div class="thumb placeholder">无</div>';
         const cover = `<div class="thumb-wrap">${coverInner}${lockBadge}</div>`;
         const errBlock = e.status === 'failed' && e.error_message
-            ? `<details class="error"><summary>查看错误</summary><pre>${escapeHtml(e.error_message)}</pre></details>`
+            ? `<details class="error mt-1"><summary>查看错误</summary><pre>${escapeHtml(e.error_message)}</pre></details>`
             : '';
         const progBlock = (e.status === 'encoding' || e.status === 'pending') && e.progress
-            ? `<div class="progress-text">${escapeHtml(e.progress)}</div>`
-            : '';
+            ? `<div class="progress-text">${escapeHtml(e.progress)}</div>` : '';
         const delDisabled = e.status === 'encoding' ? 'disabled title="编码中不能删除"' : '';
         const syncStatus = e.sync_status || 'dirty';
         const syncErr = e.sync_error || '';
         const syncTitle = syncErr ? ` title="${escapeHtml(syncErr)}"` : '';
-        const syncBtnDisabled = (syncStatus === 'clean') ? 'disabled' : '';
+        // Episode sync is blocked in two cases — disable + explain why on hover:
+        //  1. drama never synced — must sync the whole drama at least once first
+        //  2. episode already clean — nothing to sync
+        const dramaNeverSynced = !DRAMA.last_synced_at;
+        let syncBtnAttr = '';
+        if (dramaNeverSynced) {
+            syncBtnAttr = ' disabled title="剧从未同步，请先点上方『同步整部剧』"';
+        } else if (syncStatus === 'clean') {
+            syncBtnAttr = ' disabled title="已是 clean，无需同步"';
+        }
         const retryBtn = e.status === 'failed'
-            ? `<button class="btn btn-sm btn-primary" data-action="retry-ep" data-ep="${e.ep_number}"${e.can_retry ? '' : ' disabled title="源文件已不存在，请重传"'}>重试</button>`
+            ? `<button class="btn btn-xs btn-secondary" data-action="retry-ep" data-ep="${e.ep_number}"${e.can_retry ? '' : ' disabled title="源文件已不存在，请重传"'}><span class="material-symbols-outlined text-[14px]">refresh</span>重试</button>`
             : '';
         return `<tr data-ep="${e.ep_number}">
-            <td>EP${e.ep_number}</td>
+            <td><span class="font-semibold text-on-surface">EP${e.ep_number}</span></td>
             <td>${cover}</td>
             <td><span class="badge ${e.status}">${e.status}</span>${progBlock}${errBlock}</td>
-            <td>${fmtDuration(e.duration_ms)}</td>
+            <td class="mono text-on-surface-variant">${fmtDuration(e.duration_ms)}</td>
             <td class="meta">${fmtTime(e.updated_at)}</td>
             <td><span class="sync-badge ${syncStatus}"${syncTitle}>${syncStatus}</span></td>
-            <td class="actions-col">
-                <a href="/admin/dramas/${encodeURIComponent(SLUG)}/episodes/${e.ep_number}" class="btn btn-sm btn-primary">详情</a>
+            <td class="actions-col text-right">
+                <a href="/admin/dramas/${encodeURIComponent(SLUG)}/episodes/${e.ep_number}" class="btn btn-xs btn-secondary">
+                    <span class="material-symbols-outlined text-[14px]">visibility</span>详情
+                </a>
                 ${retryBtn}
-                <button class="btn btn-sm btn-success" data-action="sync-ep" data-ep="${e.ep_number}" ${syncBtnDisabled}>同步</button>
-                <button class="btn btn-sm btn-danger" data-action="delete-ep" data-ep="${e.ep_number}" ${delDisabled}>删除</button>
+                <button class="btn btn-xs btn-secondary" data-action="sync-ep" data-ep="${e.ep_number}"${syncBtnAttr}>
+                    <span class="material-symbols-outlined text-[14px]">cloud_upload</span>同步
+                </button>
+                <button class="btn btn-xs btn-ghost" data-action="delete-ep" data-ep="${e.ep_number}" ${delDisabled} title="删除">
+                    <span class="material-symbols-outlined text-[14px]">delete</span>
+                </button>
             </td>
         </tr>`;
     }).join('');
@@ -208,39 +374,51 @@ function renderTranslationsPanel() {
     const wrap = document.getElementById('translations-rows');
     const langs = Object.keys(DRAMA.translations || {}).sort();
     if (!langs.length) {
-        wrap.innerHTML = '<div class="meta">尚无翻译。下方添加新语言。</div>';
+        wrap.innerHTML = '<div class="meta py-4 text-center">尚无翻译。下方添加新语言。</div>';
     } else {
         wrap.innerHTML = langs.map(lang => {
             const t = DRAMA.translations[lang];
             const isDefault = lang === DRAMA.default_lang;
             const posterRow = t.poster
-                ? `<img class="thumb" src="${t.poster}" alt="" style="width: 60px; height: auto;">`
-                : '<span class="meta">无海报</span>';
-            return `<div class="panel" style="margin-bottom: 8px;" data-lang="${lang}">
-                <div style="font-weight: 600;">${lang}${isDefault ? ' ★' : ''}</div>
-                <div class="row">
-                    <span>名称</span>
-                    <input class="tr-name" value="${escapeHtml(t.name || '')}" placeholder="必填">
-                    <button class="btn btn-sm btn-success" data-action="save-tr">保存</button>
-                    <button class="btn btn-sm btn-danger" data-action="del-tr" ${isDefault ? 'disabled title="默认语言不可整体删除"' : ''}>删除该语言</button>
+                ? `<img class="rounded-md border border-outline-variant" src="${t.poster}" alt="" style="width:60px;height:auto">`
+                : '<span class="meta inline-flex items-center justify-center w-[60px] h-[90px] rounded-md border border-dashed border-outline-variant">无海报</span>';
+            return `<div class="bg-surface-container-low border border-outline-variant rounded-lg p-4" data-lang="${lang}">
+                <div class="flex items-center justify-between mb-3">
+                    <div class="flex items-center gap-2">
+                        <span class="lang-chip ${isDefault ? 'default' : ''}">${lang}${isDefault ? ' ★' : ''}</span>
+                        ${isDefault ? '<span class="text-[11px] text-on-surface-variant/70">默认语言</span>' : ''}
+                    </div>
+                    <button class="btn btn-xs btn-ghost" data-action="del-tr" ${isDefault ? 'disabled title="默认语言不可整体删除"' : ''}>
+                        <span class="material-symbols-outlined text-[14px]">delete</span>删除该语言
+                    </button>
                 </div>
-                <div class="row">
-                    <span>简介</span>
-                    <textarea class="tr-syn" placeholder="可留空">${escapeHtml(t.synopsis || '')}</textarea>
-                    <span></span>
-                    <span></span>
+                <div class="grid grid-cols-1 md:grid-cols-[60px_1fr] gap-3">
+                    <div class="md:col-span-2 grid grid-cols-1 md:grid-cols-[80px_1fr] gap-2 items-center">
+                        <label class="text-body-sm text-on-surface-variant">剧名</label>
+                        <input class="tr-name" value="${escapeHtml(t.name || '')}" placeholder="必填">
+                    </div>
+                    <div class="md:col-span-2 grid grid-cols-1 md:grid-cols-[80px_1fr] gap-2 items-start">
+                        <label class="text-body-sm text-on-surface-variant mt-2">简介</label>
+                        <textarea class="tr-syn" rows="3" placeholder="可留空">${escapeHtml(t.synopsis || '')}</textarea>
+                    </div>
+                    <div class="md:col-span-2 grid grid-cols-1 md:grid-cols-[80px_60px_1fr_auto] gap-2 items-center">
+                        <label class="text-body-sm text-on-surface-variant">海报</label>
+                        ${posterRow}
+                        <input type="file" class="poster-file" accept="image/jpeg,image/png,image/webp">
+                        <div class="flex items-center gap-2">
+                            <button class="btn btn-sm btn-secondary" data-action="upload-poster"><span class="material-symbols-outlined text-[14px]">upload</span>上传</button>
+                            ${t.poster ? '<button class="btn btn-sm btn-ghost" data-action="del-poster" title="删海报"><span class="material-symbols-outlined text-[14px]">delete</span></button>' : ''}
+                        </div>
+                    </div>
                 </div>
-                <div class="row">
-                    <span>海报</span>
-                    ${posterRow}
-                    <input type="file" class="poster-file" accept="image/jpeg,image/png,image/webp">
-                    <button class="btn btn-sm btn-primary" data-action="upload-poster">上传</button>
+                <div class="flex justify-end mt-3">
+                    <button class="btn btn-sm btn-primary" data-action="save-tr">
+                        <span class="material-symbols-outlined text-[14px]">save</span>保存翻译
+                    </button>
                 </div>
-                ${t.poster ? `<div class="row"><span></span><span></span><span></span><button class="btn btn-sm btn-danger" data-action="del-poster">删海报</button></div>` : ''}
             </div>`;
         }).join('');
     }
-    // populate add-language select with codes not yet used
     return fetch('/api/languages').then(r => r.json()).then(allLangs => {
         const sel = document.getElementById('add-tr-lang');
         const used = new Set(langs);
@@ -262,21 +440,18 @@ async function refreshDrama() {
             badge.textContent = DRAMA.sync_status || 'dirty';
             badge.title = DRAMA.sync_error || '';
         }
-        // Keep the free-episodes label in sync with the server (an operator on
-        // another tab could have edited it). Don't touch the input when the
-        // editor panel is open mid-edit.
         const feDisplay = document.getElementById('free-episodes-display');
         const feInput = document.getElementById('free-episodes-input');
-        if (feDisplay && DRAMA.free_episodes != null && feInput.style.display === 'none') {
+        if (feDisplay && DRAMA.free_episodes != null && feInput.classList.contains('hidden')) {
             feDisplay.textContent = String(DRAMA.free_episodes);
             feDisplay.dataset.value = String(DRAMA.free_episodes);
         }
-        // Other panels rebuild on toggle; tag/actor lists only when their panel is open
     } catch (e) {
         console.error('refresh failed', e);
     }
 }
 
+// --- Episode row actions ---
 document.getElementById('episodes-body').addEventListener('click', async (ev) => {
     const delBtn = ev.target.closest('[data-action="delete-ep"]');
     if (delBtn) {
@@ -285,161 +460,114 @@ document.getElementById('episodes-body').addEventListener('click', async (ev) =>
         delBtn.disabled = true;
         try {
             const res = await fetch(`/admin/episodes/${encodeURIComponent(SLUG)}/${ep}`, { method: 'DELETE' });
-            if (!res.ok) {
-                flash(`删除失败 (${res.status}): ${await res.text()}`, 'error');
-                delBtn.disabled = false;
-                return;
-            }
+            if (!res.ok) { flash(`删除失败 (${res.status}): ${await res.text()}`, 'error'); delBtn.disabled = false; return; }
             const body = await res.json().catch(() => ({}));
-            if (body.pending_sync) {
-                flash(`第 ${ep} 集已标记为待同步删除，下次同步时通知业务服务器删除。`, 'info');
-            }
+            if (body.pending_sync) flash(`第 ${ep} 集已标记为待同步删除，下次同步时通知业务服务器删除。`, 'info');
             await refreshDrama();
-        } catch (e) {
-            flash('删除出错: ' + e, 'error');
-            delBtn.disabled = false;
-        }
+        } catch (e) { flash('删除出错: ' + e, 'error'); delBtn.disabled = false; }
         return;
     }
     const retryBtn = ev.target.closest('[data-action="retry-ep"]');
     if (retryBtn) {
         const ep = retryBtn.dataset.ep;
+        const orig = retryBtn.innerHTML;
         retryBtn.disabled = true; retryBtn.textContent = '入队中…';
         try {
             const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/episodes/${ep}/retry`, { method: 'POST' });
             const body = await res.json().catch(() => ({}));
-            if (res.status === 409) {
-                flash(body.detail || '无法重试', 'warn');
-                retryBtn.disabled = false; retryBtn.textContent = '重试';
-                return;
-            }
-            if (!res.ok) {
-                flash(`重试失败 (${res.status}): ${body.detail || ''}`, 'error');
-                retryBtn.disabled = false; retryBtn.textContent = '重试';
-                return;
-            }
+            if (res.status === 409) { flash(body.detail || '无法重试', 'warn'); retryBtn.disabled = false; retryBtn.innerHTML = orig; return; }
+            if (!res.ok) { flash(`重试失败 (${res.status}): ${body.detail || ''}`, 'error'); retryBtn.disabled = false; retryBtn.innerHTML = orig; return; }
             flash(`第 ${ep} 集已重新入队`, 'info');
             await refreshDrama();
-        } catch (e) {
-            flash('重试出错: ' + e, 'error');
-            retryBtn.disabled = false; retryBtn.textContent = '重试';
-        }
+        } catch (e) { flash('重试出错: ' + e, 'error'); retryBtn.disabled = false; retryBtn.innerHTML = orig; }
         return;
     }
     const syncBtn = ev.target.closest('[data-action="sync-ep"]');
     if (syncBtn) {
         const ep = syncBtn.dataset.ep;
+        const orig = syncBtn.innerHTML;
         syncBtn.disabled = true; syncBtn.textContent = '入队中…';
         try {
             const res = await fetch(`/admin/episodes/${encodeURIComponent(SLUG)}/${ep}/sync`, { method: 'POST' });
             const body = await res.json().catch(() => ({}));
-            if (res.status === 503) { flash('业务服务器同步未启用', 'warn'); syncBtn.disabled = false; syncBtn.textContent = '同步'; return; }
-            if (res.status === 409) { flash(body.detail || '需先同步整部剧', 'warn'); syncBtn.disabled = false; syncBtn.textContent = '同步'; return; }
-            if (!res.ok)       { flash(`同步失败 (${res.status}): ${body.detail || ''}`, 'error'); syncBtn.disabled = false; syncBtn.textContent = '同步'; return; }
+            if (res.status === 503) { flash('业务服务器同步未启用', 'warn'); syncBtn.disabled = false; syncBtn.innerHTML = orig; return; }
+            if (res.status === 409) { flash(body.detail || '需先同步整部剧', 'warn'); syncBtn.disabled = false; syncBtn.innerHTML = orig; return; }
+            if (!res.ok) { flash(`同步失败 (${res.status}): ${body.detail || ''}`, 'error'); syncBtn.disabled = false; syncBtn.innerHTML = orig; return; }
             await refreshDrama();
-        } catch (e) {
-            flash('同步出错: ' + e, 'error');
-            syncBtn.disabled = false; syncBtn.textContent = '同步';
-        }
+        } catch (e) { flash('同步出错: ' + e, 'error'); syncBtn.disabled = false; syncBtn.innerHTML = orig; }
     }
 });
 
+// --- Single-episode upload ---
 document.getElementById('upload-next-btn').addEventListener('click', () => {
     document.getElementById('upload-next-file').click();
 });
 document.getElementById('upload-next-file').addEventListener('change', async (ev) => {
-    const file = ev.target.files[0];
-    if (!file) return;
+    const file = ev.target.files[0]; if (!file) return;
     const btn = document.getElementById('upload-next-btn');
-    btn.disabled = true;
-    btn.textContent = '上传中…';
-    const fd = new FormData();
-    fd.append('video', file);
+    const orig = btn.innerHTML;
+    btn.disabled = true; btn.innerHTML = '<span class="material-symbols-outlined text-[16px]">hourglass_empty</span>上传中…';
+    const fd = new FormData(); fd.append('video', file);
     try {
         const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/episodes`, { method: 'POST', body: fd, redirect: 'manual' });
-        if (res.type === 'opaqueredirect' || res.ok || res.status === 302) {
-            await refreshDrama();
-        } else {
-            flash(`上传失败 (${res.status}): ${await res.text()}`, 'error');
-        }
-    } catch (e) {
-        flash('上传出错: ' + e, 'error');
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '+ 上传下一集';
-        ev.target.value = '';
-    }
+        if (res.type === 'opaqueredirect' || res.ok || res.status === 302) await refreshDrama();
+        else flash(`上传失败 (${res.status}): ${await res.text()}`, 'error');
+    } catch (e) { flash('上传出错: ' + e, 'error'); }
+    finally { btn.disabled = false; btn.innerHTML = orig; ev.target.value = ''; }
 });
 
+// --- Batch episode upload ---
 document.getElementById('batch-upload-btn').addEventListener('click', () => {
     document.getElementById('batch-upload-file').click();
 });
 document.getElementById('batch-upload-file').addEventListener('change', async (ev) => {
-    const files = Array.from(ev.target.files);
-    if (!files.length) return;
+    const files = Array.from(ev.target.files); if (!files.length) return;
     const btn = document.getElementById('batch-upload-btn');
-    btn.disabled = true;
-    btn.textContent = `上传中… (${files.length} 个文件)`;
-    const fd = new FormData();
-    for (const f of files) fd.append('videos', f);
+    const orig = btn.innerHTML;
+    btn.disabled = true; btn.innerHTML = `<span class="material-symbols-outlined text-[16px]">hourglass_empty</span>上传中 (${files.length})…`;
+    const fd = new FormData(); for (const f of files) fd.append('videos', f);
     try {
         const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/episodes/batch`, { method: 'POST', body: fd });
-        if (!res.ok) {
-            flash(`批量上传失败 (${res.status}): ${await res.text()}`, 'error');
-        } else {
+        if (!res.ok) flash(`批量上传失败 (${res.status}): ${await res.text()}`, 'error');
+        else {
             const body = await res.json();
             flash(`批量上传完成：成功 ${body.ok_count} 个，失败 ${body.error_count} 个`, body.error_count ? 'warn' : 'info');
-            for (const r of (body.results || []).filter(r => !r.ok)) {
-                flash(`✗ ${r.filename || '(无文件名)'}: ${r.detail}`, 'error');
-            }
+            for (const r of (body.results || []).filter(r => !r.ok)) flash(`✗ ${r.filename || '(无文件名)'}: ${r.detail}`, 'error');
             await refreshDrama();
         }
-    } catch (e) {
-        flash('批量上传出错: ' + e, 'error');
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '+ 批量上传';
-        ev.target.value = '';
-    }
+    } catch (e) { flash('批量上传出错: ' + e, 'error'); }
+    finally { btn.disabled = false; btn.innerHTML = orig; ev.target.value = ''; }
 });
 
+// --- Batch subtitle upload ---
 document.getElementById('batch-subtitle-btn').addEventListener('click', () => {
     document.getElementById('batch-subtitle-file').click();
 });
 document.getElementById('batch-subtitle-file').addEventListener('change', async (ev) => {
-    const files = Array.from(ev.target.files);
-    if (!files.length) return;
+    const files = Array.from(ev.target.files); if (!files.length) return;
     const btn = document.getElementById('batch-subtitle-btn');
-    btn.disabled = true;
-    btn.textContent = `上传中… (${files.length} 个文件)`;
-    const fd = new FormData();
-    for (const f of files) fd.append('files', f);
+    const orig = btn.innerHTML;
+    btn.disabled = true; btn.innerHTML = `<span class="material-symbols-outlined text-[16px]">hourglass_empty</span>上传中 (${files.length})…`;
+    const fd = new FormData(); for (const f of files) fd.append('files', f);
     try {
         const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/subtitles/batch`, { method: 'POST', body: fd });
-        if (!res.ok) {
-            flash(`批量上传字幕失败 (${res.status}): ${await res.text()}`, 'error');
-        } else {
+        if (!res.ok) flash(`批量字幕上传失败 (${res.status}): ${await res.text()}`, 'error');
+        else {
             const body = await res.json();
             flash(`批量字幕上传完成：成功 ${body.ok_count} 个，失败 ${body.error_count} 个`, body.error_count ? 'warn' : 'info');
-            for (const r of (body.results || []).filter(r => !r.ok)) {
-                flash(`✗ ${r.filename || '(无文件名)'}: ${r.detail}`, 'error');
-            }
+            for (const r of (body.results || []).filter(r => !r.ok)) flash(`✗ ${r.filename || '(无文件名)'}: ${r.detail}`, 'error');
             await refreshDrama();
         }
-    } catch (e) {
-        flash('批量上传字幕出错: ' + e, 'error');
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '+ 批量上传字幕';
-        ev.target.value = '';
-    }
+    } catch (e) { flash('批量字幕上传出错: ' + e, 'error'); }
+    finally { btn.disabled = false; btn.innerHTML = orig; ev.target.value = ''; }
 });
 
-// Translation panel actions
+// --- Translation panel actions ---
 document.getElementById('translations-panel').addEventListener('click', async (ev) => {
-    const action = ev.target.dataset.action;
-    if (!action) return;
-    const langPanel = ev.target.closest('[data-lang]');
+    const target = ev.target.closest('[data-action]');
+    if (!target) return;
+    const action = target.dataset.action;
+    const langPanel = target.closest('[data-lang]');
     const lang = langPanel?.dataset.lang;
     if (action === 'save-tr') {
         const name = langPanel.querySelector('.tr-name').value.trim();
@@ -450,39 +578,33 @@ document.getElementById('translations-panel').addEventListener('click', async (e
         if (!Object.keys(body).length) { flash('至少填写名称或简介', 'warn'); return; }
         try {
             await fetchJSON(`/admin/dramas/${encodeURIComponent(SLUG)}/translations/${encodeURIComponent(lang)}`, { method: 'PUT', body });
-            await refreshDrama();
-            await renderTranslationsPanel();
-        } catch (e) {
-            flash(`保存失败: ${e.body?.detail || e}`, 'error');
-        }
+            await refreshDrama(); await renderTranslationsPanel();
+            flash('翻译已保存', 'info');
+        } catch (e) { flash(`保存失败: ${e.body?.detail || e}`, 'error'); }
     } else if (action === 'del-tr') {
         if (!confirm(`删除 "${lang}" 的全部翻译（含海报文件）？`)) return;
         try {
             const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/translations/${encodeURIComponent(lang)}`, { method: 'DELETE' });
             if (!res.ok) { flash(`删除失败 (${res.status})`, 'error'); return; }
-            await refreshDrama();
-            await renderTranslationsPanel();
+            await refreshDrama(); await renderTranslationsPanel();
         } catch (e) { flash('删除出错: ' + e, 'error'); }
     } else if (action === 'upload-poster') {
         const f = langPanel.querySelector('.poster-file').files[0];
         if (!f) { flash('请先选择海报文件', 'warn'); return; }
-        const fd = new FormData();
-        fd.append('file', f);
+        const fd = new FormData(); fd.append('file', f);
         try {
             const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/poster?lang=${encodeURIComponent(lang)}`, { method: 'POST', body: fd });
             if (!res.ok) { flash(`上传失败 (${res.status}): ${await res.text()}`, 'error'); return; }
-            await refreshDrama();
-            await renderTranslationsPanel();
-            // refresh poster strip if this is the currently shown lang
+            await refreshDrama(); await renderTranslationsPanel();
             if (lang === document.getElementById('poster-lang').value) updatePosterImg();
+            flash('海报已上传', 'info');
         } catch (e) { flash('上传出错: ' + e, 'error'); }
     } else if (action === 'del-poster') {
         if (!confirm(`删除 "${lang}" 的海报？`)) return;
         try {
             const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/poster?lang=${encodeURIComponent(lang)}`, { method: 'DELETE' });
             if (res.status !== 204) { flash(`删除失败 (${res.status})`, 'error'); return; }
-            await refreshDrama();
-            await renderTranslationsPanel();
+            await refreshDrama(); await renderTranslationsPanel();
             if (lang === document.getElementById('poster-lang').value) updatePosterImg();
         } catch (e) { flash('删除出错: ' + e, 'error'); }
     }
@@ -496,11 +618,9 @@ document.getElementById('add-tr-btn').addEventListener('click', async () => {
     try {
         await fetchJSON(`/admin/dramas/${encodeURIComponent(SLUG)}/translations/${encodeURIComponent(lang)}`, { method: 'PUT', body: { name } });
         document.getElementById('add-tr-name').value = '';
-        await refreshDrama();
-        await renderTranslationsPanel();
-    } catch (e) {
-        flash(`添加失败: ${e.body?.detail || e}`, 'error');
-    }
+        await refreshDrama(); await renderTranslationsPanel();
+        flash('翻译已添加', 'info');
+    } catch (e) { flash(`添加失败: ${e.body?.detail || e}`, 'error'); }
 });
 
 document.getElementById('save-tags-btn').addEventListener('click', async () => {
@@ -508,8 +628,7 @@ document.getElementById('save-tags-btn').addEventListener('click', async () => {
     try {
         await fetchJSON(`/admin/dramas/${encodeURIComponent(SLUG)}/tags`, { method: 'PUT', body: slugs });
         flash('标签已保存', 'info');
-        await refreshDrama();
-        location.reload();  // simplest way to refresh the header tags chips
+        location.reload();
     } catch (e) { flash(`保存失败: ${e.body?.detail || e}`, 'error'); }
 });
 
@@ -518,12 +637,11 @@ document.getElementById('save-actors-btn').addEventListener('click', async () =>
     try {
         await fetchJSON(`/admin/dramas/${encodeURIComponent(SLUG)}/actors`, { method: 'PUT', body: slugs });
         flash('演员已保存', 'info');
-        await refreshDrama();
         location.reload();
     } catch (e) { flash(`保存失败: ${e.body?.detail || e}`, 'error'); }
 });
 
-// --- free episodes inline editor ---------------------------------------
+// --- Free episodes inline editor ---
 (function () {
     const display = document.getElementById('free-episodes-display');
     const input = document.getElementById('free-episodes-input');
@@ -532,52 +650,32 @@ document.getElementById('save-actors-btn').addEventListener('click', async () =>
     const cancelBtn = document.getElementById('free-episodes-cancel-btn');
 
     function showEditor(editing) {
-        display.style.display = editing ? 'none' : '';
-        editBtn.style.display = editing ? 'none' : '';
-        input.style.display = editing ? '' : 'none';
-        saveBtn.style.display = editing ? '' : 'none';
-        cancelBtn.style.display = editing ? '' : 'none';
+        display.classList.toggle('hidden', editing);
+        editBtn.classList.toggle('hidden', editing);
+        input.classList.toggle('hidden', !editing);
+        saveBtn.classList.toggle('hidden', !editing);
+        cancelBtn.classList.toggle('hidden', !editing);
     }
-
-    editBtn.addEventListener('click', () => {
-        input.value = display.dataset.value;
-        showEditor(true);
-        input.focus();
-        input.select();
-    });
-    cancelBtn.addEventListener('click', () => {
-        input.value = display.dataset.value;
-        showEditor(false);
-    });
+    editBtn.addEventListener('click', () => { input.value = display.dataset.value; showEditor(true); input.focus(); input.select(); });
+    cancelBtn.addEventListener('click', () => { input.value = display.dataset.value; showEditor(false); });
     saveBtn.addEventListener('click', async () => {
         const raw = input.value.trim();
         const n = parseInt(raw, 10);
-        if (!Number.isInteger(n) || n < 0 || n > 9999) {
-            flash('免费集数必须是 0–9999 之间的整数', 'error');
-            return;
-        }
+        if (!Number.isInteger(n) || n < 0 || n > 9999) { flash('免费集数必须是 0–9999 之间的整数', 'error'); return; }
         const prev = parseInt(display.dataset.value, 10);
-        if (n === prev) {
-            showEditor(false);
-            return;
-        }
+        if (n === prev) { showEditor(false); return; }
         saveBtn.disabled = true; saveBtn.textContent = '保存中…';
         try {
-            const row = await fetchJSON(`/admin/dramas/${encodeURIComponent(SLUG)}`, {
-                method: 'PATCH', body: { free_episodes: n },
-            });
+            const result = await fetchJSON(`/admin/dramas/${encodeURIComponent(SLUG)}`, { method: 'PATCH', body: { free_episodes: n } });
+            const row = result.body;
             DRAMA.free_episodes = row.free_episodes;
             display.textContent = String(row.free_episodes);
             display.dataset.value = String(row.free_episodes);
             showEditor(false);
-            // Re-render episode list so lock icons match the new threshold.
             renderEpisodes();
             flash('免费集数已更新', 'info');
-        } catch (e) {
-            flash(`更新失败: ${e.body?.detail || e}`, 'error');
-        } finally {
-            saveBtn.disabled = false; saveBtn.textContent = '保存';
-        }
+        } catch (e) { flash(`更新失败: ${e.body?.detail || e}`, 'error'); }
+        finally { saveBtn.disabled = false; saveBtn.textContent = '保存'; }
     });
 })();
 
@@ -598,25 +696,24 @@ document.getElementById('delete-drama-btn').addEventListener('click', async () =
 
 document.getElementById('sync-drama-btn').addEventListener('click', async () => {
     const btn = document.getElementById('sync-drama-btn');
-    btn.disabled = true; btn.textContent = '入队中…';
+    const orig = btn.innerHTML;
+    btn.disabled = true; btn.innerHTML = '<span class="material-symbols-outlined text-[16px]">hourglass_empty</span>入队中…';
     try {
         const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/sync`, { method: 'POST' });
         const body = await res.json().catch(() => ({}));
-        if (res.status === 503) { flash('业务服务器同步未启用', 'warn'); }
-        else if (!res.ok) { flash(`同步失败 (${res.status}): ${body.detail || ''}`, 'error'); }
-        else if (body.noop) { flash('该剧已 clean 且无 dirty 子集，无需同步', 'info'); }
+        if (res.status === 503) flash('业务服务器同步未启用', 'warn');
+        else if (!res.ok) flash(`同步失败 (${res.status}): ${body.detail || ''}`, 'error');
+        else if (body.noop) flash('该剧已 clean 且无 dirty 子集，无需同步', 'info');
         else {
             const n = (body.child_episodes_to_sync || []).length;
             flash(`已入队同步剧 + ${n} 集`, 'info');
             setTimeout(refreshDrama, 800);
         }
     } catch (e) { flash('同步出错: ' + e, 'error'); }
-    finally {
-        btn.disabled = false; btn.textContent = '同步整部剧';
-    }
+    finally { btn.disabled = false; btn.innerHTML = orig; }
 });
 
-// poster strip language switcher
+// --- Poster strip language switcher ---
 document.getElementById('poster-lang').addEventListener('change', updatePosterImg);
 function updatePosterImg() {
     const lang = document.getElementById('poster-lang').value;
@@ -625,40 +722,18 @@ function updatePosterImg() {
     const ph = document.getElementById('poster-placeholder');
     if (url) {
         img.src = url + '?t=' + Date.now();
-        img.style.display = 'block';
-        if (ph) ph.style.display = 'none';
+        img.classList.remove('hidden');
+        if (ph) ph.classList.add('hidden');
     } else {
-        img.style.display = 'none';
-        if (ph) ph.style.display = 'flex';
+        img.classList.add('hidden');
+        if (ph) ph.classList.remove('hidden');
     }
 }
 
-// Initial render of episodes table from server-rendered data
+// --- Initial render ---
 renderEpisodes();
-// Lazy-load tags/actors panels on first toggle (saves a fetch on page load)
-document.querySelectorAll('button[onclick*="translations-panel"]')[0]?.addEventListener('click', () => {
-    if (!document.getElementById('translations-rows').dataset.loaded) {
-        renderTranslationsPanel().then(() => {
-            document.getElementById('translations-rows').dataset.loaded = '1';
-        });
-    }
-});
-document.querySelectorAll('button[onclick*="tags-panel"]')[0]?.addEventListener('click', () => {
-    if (!document.getElementById('tags-multi').dataset.loaded) {
-        renderTagsPanel().then(() => {
-            document.getElementById('tags-multi').dataset.loaded = '1';
-        });
-    }
-});
-document.querySelectorAll('button[onclick*="actors-panel"]')[0]?.addEventListener('click', () => {
-    if (!document.getElementById('actors-multi').dataset.loaded) {
-        renderActorsPanel().then(() => {
-            document.getElementById('actors-multi').dataset.loaded = '1';
-        });
-    }
-});
 
-// Periodic refresh while any episode is in transient pipeline OR sync status
+// --- Periodic refresh while any episode is in transient pipeline/sync status ---
 setInterval(() => {
     const transient = (DRAMA.episodes || []).some(e =>
         e.status === 'pending' || e.status === 'encoding' || e.sync_status === 'syncing'
@@ -666,7 +741,7 @@ setInterval(() => {
     if (transient) refreshDrama();
 }, 5000);
 
-// Show partial-failure flash from the create-drama redirect
+// --- Show partial-failure flash from drama-new redirect ---
 const flashJson = sessionStorage.getItem('drama-new-flash');
 if (flashJson) {
     sessionStorage.removeItem('drama-new-flash');
