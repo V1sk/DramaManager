@@ -21,7 +21,7 @@ python3 -m venv venv
 
 URL 归属（HLS 自家 SDK 端点，本地审片预览用）：
 
-- **永远是业务 host 相对路径** (`/videos/...`, `/drm/...`): `playUrl` / `initUrl` / `firstSegUrl` / `coverUrl` / `fallback.low` / `fallback.high` / `drm.keyUri` / `DramaSummary.posterUrl` 全部如此。m3u8 里的 `#EXT-X-MAP:URI` 与 segment 行也是相对文件名（`init-720p.mp4` / `seg-720p-0.m4s`），播放器按 m3u8 自身 host 通过 `/videos/` 静态挂载读本地切片。
+- **永远是业务 host 相对路径** (`/videos/...`, `/drm/...`): `videoTracks[].url` / `coverUrl` / `drm.keyUri` / `DramaSummary.posterUrl` 全部如此。m3u8 里的 `#EXT-X-MAP:URI` 与 segment 行也是相对文件名（`init-720p.mp4` / `seg-720p-0.m4s`），播放器按 m3u8 自身 host 通过 `/videos/` 静态挂载读本地切片。
 - **不绕桶**：HLS 服务器只负责本地审片，预览不需要 CDN，所以不管 `STORAGE_PROVIDER` 选 `oss` / `tos` / `none`，对外 API 形态都一致。桶上传只为给业务服务器同步资产用，预览页直接读 `OUT_DIR` 下的本地文件，零 CORS、零公网出站。
 - **生产侧的 CDN-友好 URL**：业务服务器收到 sync payload 后拿到的是 path-only 形态（`Drama/prod/...`），它持有自己的 `MEDIA_BASE_URL`（默认 TOS 直链，可换 CDN 域名）给客户端拼前缀。详见 `docs/business-server-sync-api.md`。
 
@@ -36,7 +36,7 @@ Environment variables:
 | `UPLOAD_TMP_DIR` | no | `./tmp` | Staging dir for uploaded sources; files are deleted after the worker finishes the job. |
 | `STORAGE_PROVIDER` | no | `none` | 选 bucket 厂商：`none` / `oss` (Aliyun OSS) / `tos` (Volcengine TOS)。设为 `oss` 或 `tos` 时启用上传：worker 把每档 init.mp4 + 加密 .m4s 推到所选桶的 **staging 前缀** (`Drama/staging/...`)，并把本地 m3u8 里 init / segment 引用改写成绝对 staging URL。`#EXT-X-KEY:URI` 不动。endpoint / bucket / 前缀硬编码在 `app/storage/oss_provider.py` 或 `app/storage/tos_provider.py`，不走 env；AK/SK 走 gitignore 的 `app/storage/credentials.py`（fresh clone 后按 `credentials.example.py` 拷一份填自己的密钥，按人分配，不进 git）。Prod 前缀 (`Drama/prod/...`) 只在执行业务服务器同步时由 `publish_ladder_to_prod` server-side copy 进去（详见 "业务服务器同步"）。非法值 → 启动期 fail-fast。 |
 | `OSS_ENABLED` | no | `false` | **Deprecated alias** — `OSS_ENABLED=true` 等价于 `STORAGE_PROVIDER=oss`。仅在 `STORAGE_PROVIDER` 未设时生效；新部署请直接用 `STORAGE_PROVIDER`。 |
-| `DEFAULT_LADDER` | no | `720p` | 控制 `EpisodeInfo.playUrl` / `initUrl` / `firstSegUrl` 默认指向哪个 ladder rung。可选 `540p` / `720p` / `1080p`。**在 API 读取时动态生效**——改 env 重启 uvicorn 就能切换，不需要重新编码（pipeline 始终生产三档完整切片）。`fallback.low` / `fallback.high` 永远是 540p / 1080p 两端，不受影响。非法值在启动时 fail-fast。 |
+| `DEFAULT_LADDER` | no | `720p` | 控制 **admin 审片预览**默认用哪档 ladder rung（重写 admin 侧的 `play_url`，见 `db._apply_default_ladder`）。可选 `540p` / `720p` / `1080p`。**在读取时动态生效**——改 env 重启 uvicorn 就能切换，不需要重新编码（pipeline 始终生产三档完整切片）。SDK 的 `GET /api/*` 不受影响：`EpisodeInfo.videoTracks` 永远带全三档，由客户端选档。非法值在启动时 fail-fast。 |
 | `BUSINESS_SYNC_BASE_URL` | no | _unset_ | 业务服务器同步 base URL（`https://...`，无尾部 `/`）。**未设时同步功能整体禁用**：`POST /admin/dramas/{slug}/sync` 等返回 503，导航栏 `sync-zone` 不显示。设了就必须同时设 `BUSINESS_SYNC_API_KEY`。 |
 | `BUSINESS_SYNC_API_KEY` | required iff base URL set | _unset_ | 业务服务器握手用的共享密钥，作为 `X-API-Key` 头随每个 `/sync/*` 请求发送。`BUSINESS_SYNC_BASE_URL` 设而本变量未设 → 启动期 fail-fast。 |
 | `BUSINESS_SYNC_TIMEOUT` | no | `30` | 单次 `/sync/*` HTTP 请求的超时（秒）。整数；非正值 → 启动期 fail-fast。 |
@@ -101,7 +101,7 @@ Upload → pipeline lifecycle (all synchronous work happens in the request handl
 
 1. Validate path (`drama_slug ~ ^[a-z0-9][a-z0-9-]*$`; for re-upload, `ep` numeric). Drama must already exist (404 otherwise). For auto-increment (`POST /admin/dramas/{slug}/episodes`), the server computes `ep_number = MAX(ep_number)+1`. For re-upload (`POST /admin/dramas/{slug}/episodes/{ep}`), the episode must exist and not be in `status=encoding` (409 otherwise).
 2. Stream upload to `UPLOAD_TMP_DIR/upload-<uuid>.mp4`.
-3. `ffprobe` → `duration_ms` + `width` + `height`（codec dimension，与 SDK `Format.width/height` 同口径）。
+3. `ffprobe` → `duration_ms` + `width` + `height`（源视频 codec dimension；用于推导 `EpisodeInfo.videoTracks` 每档的 width / height）。
 4. `ffmpeg -ss 0 -vframes 1 -vf scale=-2:720` → `OUT_DIR/{slug}/ep-{n}/cover.jpg`.
 5. Upsert `episodes` row: `status=pending`, `episode_id="{slug}-ep-{n}"`, cover URL set.
 6. Enqueue job on the global `asyncio.Queue` and 302 back to `/admin`.
@@ -131,7 +131,7 @@ openssl enc -d -aes-128-cbc \
   -in out/<slug>/ep-1/720p/seg-720p-0.m4s | ffprobe -i -
 ```
 
-System prerequisites: `ffmpeg`, `ffprobe`, `openssl`, `xxd`, `awk`, `python3` (3.10+). No automated test suite — verify by uploading through `/admin` and playing the resulting `playUrl` in a hls.js page, VLC, or the Android SDK.
+System prerequisites: `ffmpeg`, `ffprobe`, `openssl`, `xxd`, `awk`, `python3` (3.10+). No automated test suite — verify by uploading through `/admin` and playing the resulting media playlist in a hls.js page, VLC, or the Android SDK.
 
 **Deployment posture**: no auth on any endpoint (admin, upload, cover replacement, DRM key, static files). Must stay behind VPN / internal network.
 
@@ -154,7 +154,7 @@ Ladder rung metadata (`NAME HEIGHT FPS BV_kbps`) lives in the `LADDERS` array in
 
 | 资源 | 哪台 host | m3u8 / API 里写什么 |
 |---|---|---|
-| `media-{rung}.m3u8` | 业务 host（这台 HLS 服务器） | API `playUrl` / `fallback.*` 写相对路径 |
+| `media-{rung}.m3u8` | 业务 host（这台 HLS 服务器） | API `videoTracks[].url` 写相对路径 |
 | `#EXT-X-KEY:URI` | 业务 host（同 m3u8） | 相对路径 `/drm/...`，与 `EpisodeInfo.drm.keyUri` verbatim 一致 |
 | `init-{rung}.mp4` | **桶 staging 前缀**（这台服务器写）／ **桶 prod 前缀**（业务服务器读） | 本地 m3u8 写**相对文件名** `init-720p.mp4`（HLS 预览页通过 `/videos/` 读本地切片，绕桶）；sync 给业务服务器的 m3u8 里 `#EXT-X-MAP:URI` + segment 行是 **prod 对象 key**（`Drama/prod/...`，无 host），业务端按自己 `MEDIA_BASE_URL` 拼前缀 |
 | `seg-{rung}-N.m4s` | **桶 staging 前缀** ／ **桶 prod 前缀** | 同上 |
@@ -318,10 +318,10 @@ pending_delete ─→ syncing ─→ (row 物理删除 + prod OSS 清理)
 ## Cross-system contracts to preserve
 
 - **`#EXT-X-KEY:URI` ↔ `EpisodeInfo.drm.keyUri` must match verbatim** (query string, fragment, everything). The SDK uses it as the `DrmKeyStore` lookup key. If one changes, the other must change in lockstep. （OSS 启用时这条契约不变 —— 两边仍是业务 host 的相对路径 `/drm/{slug}/ep-{n}/key`。）
-- **`#EXT-X-MAP:URI` 与 segment 行**与任何 API 字段都无 verbatim 比对关系：OSS 启用时它们是绝对 OSS URL，仅供播放器消费；`EpisodeInfo.initUrl` / `firstSegUrl` 是 helper 重新拼出来的（用同一份 OSS 公网前缀 + 文件名约定），不强求字节级等于 m3u8 里的串。
+- **`#EXT-X-MAP:URI` 与 segment 行**与任何 API 字段都无 verbatim 比对关系：它们仅供播放器消费。API 侧每档只暴露 `videoTracks[].url`（即 `media-{rung}.m3u8` 本身），不暴露 init / segment 级 URL。
 - **Playlist ordering**: `#EXT-X-MAP` (init) → `#EXT-X-KEY` → first `#EXTINF`. Reordering breaks ExoPlayer decryption. `encrypt-segments.sh`'s awk program enforces this; keep it.
-- **`episode-info-schema.json`** is the source of truth for the SDK contract. Only `episodeId`, `playUrl`, `durationMs` are required in Phase 1; `initUrl` / `firstSegUrl` / `fallback` are reserved for Phase 2 (ConnectionWarmer, RebufferWatchdog) and may be null. `drm.keyBase64` decoded length must be exactly 16 bytes; `drm.ivHex` is optional and falls back to `#EXT-X-KEY:IV`. `width` / `height` 是源视频 codec dimension（与 SDK `Format.width/height` 同口径），新上传写入；老 ready 行（升级前已存在）可能为 `null`，SDK 拿到 null 时退化到首帧解码后再读宽高。
-- **No master playlist / no ABR.** The SDK is served a single-rung media playlist chosen server-side; do not introduce `#EXT-X-STREAM-INF` logic or a master manifest.
+- **`episode-info-schema.json`** is the source of truth for the SDK contract. Required fields: `episodeId`, `durationMs`, `videoTracks`. `videoTracks` 始终带全三档 rung（`id` = `high` / `mid` / `low` → 1080p / 720p / 540p），每档含 `url` + `width` / `height`。`drm.keyBase64` decoded length must be exactly 16 bytes; `drm.ivHex` is optional and falls back to `#EXT-X-KEY:IV`. `videoTracks[].width` / `height` 是该档 encoded codec dimension，由源视频尺寸按 `scale=-2:HEIGHT` 推导；老 ready 行（升级前源尺寸缺失）该两字段为 `null`，SDK 拿到 null 时退化到首帧解码后再读宽高。
+- **No master playlist / no in-player ABR.** Each `videoTracks[].url` is a standalone single-rung media playlist; the SDK picks a rung client-side from the `videoTracks` array. Do not introduce `#EXT-X-STREAM-INF` logic or a master manifest.
 
 ## Spec-driven workflow
 

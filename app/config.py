@@ -23,11 +23,12 @@ class Settings:
     # Which bucket provider to use. `"oss"` = Aliyun OSS; `"tos"` = Volcengine TOS;
     # `"none"` = bucket disabled, everything stays on local disk.
     storage_provider: str
-    # Which ladder rung the SDK / preview player should consume by default.
-    # Affects EpisodeInfo.playUrl / initUrl / firstSegUrl at read time. Flipping
-    # this env var takes effect on the next API read — no re-encoding needed.
-    # Useful for ad-hoc debugging (e.g. force 540p to test bandwidth-constrained
-    # client behavior without re-encoding the source).
+    # Which ladder rung the admin preview player consumes by default. The SDK
+    # EpisodeInfo carries all three rungs (videoTracks) and is unaffected; this
+    # only rewrites the admin-facing play_url at read time (see
+    # db._apply_default_ladder). Flipping the env var takes effect on the next
+    # read — no re-encoding needed. Useful for ad-hoc debugging (e.g. force 540p
+    # to test bandwidth-constrained client behavior without re-encoding).
     default_ladder: str
     # business-server-sync (step 6): when `business_sync_base_url` is unset,
     # sync is disabled — admin sync endpoints return 503 and the sync UI is

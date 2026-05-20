@@ -74,10 +74,10 @@ async def _handle_job(job: Job) -> bool:
     # 相对路径：写进 m3u8 的 #EXT-X-KEY:URI 是同一个字符串，播放器按 playlist 自身的
     # host 补全；SDK 主动调用也基于同一个 host，和 m3u8 里 verbatim 一致。
     key_uri = f"/drm/{slug}/{ep_dir}/key"
-    # The persisted play_url is informational; api.py derives the actual playUrl
-    # from settings.default_ladder at read time so flipping the env var takes
-    # effect without re-encoding. We still write a sensible value here so
-    # one-off DB inspections don't show NULL.
+    # The persisted play_url is informational; db._apply_default_ladder rewrites
+    # it from settings.default_ladder at read time (admin preview only — the SDK
+    # API returns all rungs via videoTracks). We still write a sensible value
+    # here so one-off DB inspections don't show NULL.
     ladder = settings.default_ladder
     play_url = f"/videos/{slug}/{ep_dir}/{ladder}/media-{ladder}.m3u8"
 

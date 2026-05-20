@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 
 from .. import db
 from ..config import settings
-from ..models import DramaSummary, DrmInfo, EpisodeInfo, FallbackPlaylists, Subtitle
+from ..models import DramaSummary, DrmInfo, EpisodeInfo, Subtitle, VideoTrack
 
 router = APIRouter(prefix="/api")
 
@@ -14,26 +14,43 @@ _SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]*$"
 _EP_PATTERN = r"^[0-9]+$"
 
 
+# Ladder rungs (must mirror LADDERS in pipeline.sh) mapped to the SDK
+# `videoTracks` id. Ordered high → low so the SDK gets descending quality.
+_LADDER_TRACKS = (
+    ("high", "1080p", 1080),
+    ("mid", "720p", 720),
+    ("low", "540p", 540),
+)
+
+
+def _rung_dimensions(src_w, src_h, rung_height):
+    """Encoded (width, height) of one ladder rung. `encode-clear.sh` runs
+    `scale=-2:HEIGHT`, so the rung height is fixed and the width follows the
+    source aspect ratio rounded to an even integer. Returns (None, None) when
+    the source dimensions are unknown (legacy rows)."""
+    if not src_w or not src_h:
+        return None, None
+    width = int(src_w * rung_height / src_h / 2 + 0.5) * 2
+    return max(width, 2), rung_height
+
+
 def _row_to_episode_info(row: dict) -> EpisodeInfo:
     """把 DB row 映射为对外的 EpisodeInfo 对象。单集端点和按剧集数列表端点共用此函数，
     保证 SDK 侧看到的同一集 payload 永远一致。
 
-    所有 URL（playUrl / initUrl / firstSegUrl / fallback / coverUrl / drm.keyUri）
-    都是业务 host 相对路径 —— HLS 服务器是本地审片用，预览页通过 `/videos/`
-    静态挂载直接读 OUT_DIR 下的本地切片，零 CORS、零 TOS 公网出站。
-    生产端（业务服务器）从 sync payload 拿到 path-only 形态后自行拼 `MEDIA_BASE_URL`。
+    所有 URL（videoTracks[].url / coverUrl / drm.keyUri）都是业务 host 相对路径
+    —— HLS 服务器是本地审片用，预览页通过 `/videos/` 静态挂载直接读 OUT_DIR 下的
+    本地切片，零 CORS、零 TOS 公网出站。生产端（业务服务器）从 sync payload 拿到
+    path-only 形态后自行拼 `MEDIA_BASE_URL`。
 
-    Default-ladder 选择：playUrl / initUrl / firstSegUrl 由 `settings.default_ladder`
-    决定（540p / 720p / 1080p），方便调试切换。fallback.low / fallback.high 永远是
-    540p / 1080p 两端，让 SDK 侧的 RebufferWatchdog 拿到稳定的"上下两档"。
+    `videoTracks` 始终带全三档 rung（high / mid / low）；SDK 客户端自行选档。
+    每档 width / height 由源视频 codec 尺寸按 `scale=-2:HEIGHT` 推导（老行源尺寸
+    缺失时为 null）。
     """
     slug = row["drama_slug"]
     ep_id = row["episode_id"]                 # SDK 契约字段："{slug}-ep-{n}"
     ep_dir = f"ep-{row['ep_number']}"         # 磁盘目录 / URL 段（必须对齐 admin.py + /drm router）
     base = f"/videos/{slug}/{ep_dir}"
-    media_base = base
-
-    ladder = settings.default_ladder
 
     drm = None
     if row["key_uri"] and row["key_b64"]:
@@ -43,7 +60,19 @@ def _row_to_episode_info(row: dict) -> EpisodeInfo:
             ivHex=row["iv_hex"],
         )
 
-    # subtitles: side-loaded; null when none exist (matches the cover/drm/fallback
+    src_w = row.get("width")
+    src_h = row.get("height")
+    video_tracks = []
+    for track_id, ladder, rung_height in _LADDER_TRACKS:
+        w, h = _rung_dimensions(src_w, src_h, rung_height)
+        video_tracks.append(VideoTrack(
+            id=track_id,
+            url=f"{base}/{ladder}/media-{ladder}.m3u8",
+            width=w,
+            height=h,
+        ))
+
+    # subtitles: side-loaded; null when none exist (matches the cover/drm
     # convention). Always sourced from the same db helper so the per-drama list
     # endpoint and the single-episode endpoint stay byte-identical.
     sub_rows = db.list_subtitles_for_slug_ep(slug, row["ep_number"])
@@ -58,18 +87,10 @@ def _row_to_episode_info(row: dict) -> EpisodeInfo:
 
     return EpisodeInfo(
         episodeId=ep_id,
-        playUrl=row["play_url"],
         durationMs=row["duration_ms"],
         coverUrl=row["cover_url"],
-        width=row.get("width"),
-        height=row.get("height"),
-        initUrl=f"{media_base}/{ladder}/init-{ladder}.mp4",
-        firstSegUrl=f"{media_base}/{ladder}/seg-{ladder}-0.m4s",
+        videoTracks=video_tracks,
         drm=drm,
-        fallback=FallbackPlaylists(
-            low=f"{base}/540p/media-540p.m3u8",
-            high=f"{base}/1080p/media-1080p.m3u8",
-        ),
         subtitles=subtitles,
     )
 

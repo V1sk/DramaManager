@@ -2,19 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://coocent.com/shortdrama/episode-info-schema.json",
   "title": "EpisodeInfo",
-  "description": "Business-supplied metadata for a single short-drama episode. The short-drama SDK (media3-shortdrama) consumes this via the EpisodeSource interface. Only episodeId, playUrl and durationMs are required; the remaining fields feed Phase-2 features (ConnectionWarmer, RebufferWatchdog) and may be null or absent in Phase 1.",
+  "description": "Business-supplied metadata for a single short-drama episode. The short-drama SDK (media3-shortdrama) consumes this via the EpisodeSource interface. episodeId, durationMs and videoTracks are required; coverUrl, drm and subtitles may be null or absent.",
   "type": "object",
-  "required": ["episodeId", "playUrl", "durationMs"],
+  "required": ["episodeId", "durationMs", "videoTracks"],
   "properties": {
     "episodeId": {
       "type": "string",
       "minLength": 1,
       "description": "Stable unique identifier used in every TTFF / DRM metric event emitted for this episode."
-    },
-    "playUrl": {
-      "type": "string",
-      "format": "uri-reference",
-      "description": "Single-bitrate HLS media playlist URL. The business has already selected the ladder rung based on client-reported network / device info; the SDK does NOT parse a master playlist or perform adaptive bitrate switching."
     },
     "durationMs": {
       "type": "integer",
@@ -26,25 +21,37 @@
       "format": "uri-reference",
       "description": "Optional episode cover image URL. Default is a JPEG extracted from the source's first frame; operators may replace it via the management page."
     },
-    "width": {
-      "type": ["integer", "null"],
-      "minimum": 1,
-      "description": "Source video codec width in pixels (not display dimension; SAR-corrected width is left to the client). May be null for episodes uploaded before this field existed."
-    },
-    "height": {
-      "type": ["integer", "null"],
-      "minimum": 1,
-      "description": "Source video codec height in pixels (not display dimension). May be null for episodes uploaded before this field existed."
-    },
-    "initUrl": {
-      "type": ["string", "null"],
-      "format": "uri-reference",
-      "description": "Optional CMAF init.mp4 URL for the selected rung. Reserved for Phase-2 byte-level prewarming; Phase 1 ignores this field."
-    },
-    "firstSegUrl": {
-      "type": ["string", "null"],
-      "format": "uri-reference",
-      "description": "Optional first media segment URL for the selected rung. Reserved for Phase-2 ConnectionWarmer."
+    "videoTracks": {
+      "type": "array",
+      "minItems": 1,
+      "description": "All ladder rungs of this episode (high / mid / low). The business has already encoded every rung; the SDK picks one client-side based on screen / network. There is no master playlist and no in-player ABR — each track's url is a plain single-rung HLS media playlist.",
+      "items": {
+        "type": "object",
+        "required": ["id", "url"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "enum": ["high", "mid", "low"],
+            "description": "Stable rung identity: high = 1080p, mid = 720p, low = 540p."
+          },
+          "url": {
+            "type": "string",
+            "format": "uri-reference",
+            "description": "Single-bitrate HLS media playlist URL for this rung."
+          },
+          "width": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "description": "Encoded codec width of this rung in pixels. Null when the source dimensions are unknown (episodes uploaded before width/height were recorded)."
+          },
+          "height": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "description": "Encoded codec height of this rung in pixels. Null when the source dimensions are unknown."
+          }
+        },
+        "additionalProperties": false
+      }
     },
     "drm": {
       "description": "AES-128 key material. Absent or null when the episode is clear content.",
@@ -68,28 +75,6 @@
               "type": ["string", "null"],
               "pattern": "^[0-9A-Fa-f]{32}$",
               "description": "Optional explicit IV (32 hex chars / 16 bytes). When omitted the IV declared by #EXT-X-KEY:IV is used."
-            }
-          },
-          "additionalProperties": false
-        }
-      ]
-    },
-    "fallback": {
-      "description": "Optional lower / higher ladder playlists. Reserved for Phase-2 RebufferWatchdog.",
-      "oneOf": [
-        { "type": "null" },
-        {
-          "type": "object",
-          "properties": {
-            "low": {
-              "type": ["string", "null"],
-              "format": "uri-reference",
-              "description": "Lower-bitrate fallback media playlist (e.g. 540p)."
-            },
-            "high": {
-              "type": ["string", "null"],
-              "format": "uri-reference",
-              "description": "Higher-bitrate fallback media playlist (e.g. 1080p)."
             }
           },
           "additionalProperties": false
@@ -134,21 +119,32 @@
   "examples": [
     {
       "episodeId": "drama-42-ep-1",
-      "playUrl": "https://cdn.example.com/drama/42/ep-1/720p/media-720p.m3u8?token=xyz",
       "durationMs": 120000,
       "coverUrl": "https://cdn.example.com/drama/42/ep-1/cover.jpg",
-      "width": 720,
-      "height": 1280,
-      "initUrl": "https://cdn.example.com/drama/42/ep-1/720p/init-720p.mp4?token=xyz",
-      "firstSegUrl": "https://cdn.example.com/drama/42/ep-1/720p/seg-720p-0.m4s?token=xyz",
+      "videoTracks": [
+        {
+          "id": "high",
+          "url": "https://cdn.example.com/drama/42/ep-1/1080p/media-1080p.m3u8?token=xyz",
+          "width": 608,
+          "height": 1080
+        },
+        {
+          "id": "mid",
+          "url": "https://cdn.example.com/drama/42/ep-1/720p/media-720p.m3u8?token=xyz",
+          "width": 406,
+          "height": 720
+        },
+        {
+          "id": "low",
+          "url": "https://cdn.example.com/drama/42/ep-1/540p/media-540p.m3u8?token=xyz",
+          "width": 304,
+          "height": 540
+        }
+      ],
       "drm": {
         "keyUri": "https://api.example.com/drama/42/ep-1/key",
         "keyBase64": "QUJDREVGR0hJSktMTU5PUA==",
         "ivHex": "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
-      },
-      "fallback": {
-        "low": "https://cdn.example.com/drama/42/ep-1/540p/media-540p.m3u8?token=xyz",
-        "high": "https://cdn.example.com/drama/42/ep-1/1080p/media-1080p.m3u8?token=xyz"
       },
       "subtitles": [
         {
@@ -167,8 +163,27 @@
     },
     {
       "episodeId": "drama-free-ep-1",
-      "playUrl": "https://cdn.example.com/drama/free/ep-1/720p/media-720p.m3u8",
       "durationMs": 90000,
+      "videoTracks": [
+        {
+          "id": "high",
+          "url": "https://cdn.example.com/drama/free/ep-1/1080p/media-1080p.m3u8",
+          "width": 1080,
+          "height": 1920
+        },
+        {
+          "id": "mid",
+          "url": "https://cdn.example.com/drama/free/ep-1/720p/media-720p.m3u8",
+          "width": 720,
+          "height": 1280
+        },
+        {
+          "id": "low",
+          "url": "https://cdn.example.com/drama/free/ep-1/540p/media-540p.m3u8",
+          "width": 540,
+          "height": 960
+        }
+      ],
       "drm": null
     }
   ]

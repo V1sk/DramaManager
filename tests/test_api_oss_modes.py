@@ -6,7 +6,7 @@ production CDN base lives on the business server (`MEDIA_BASE_URL`) and is
 applied at serve-time.
 
 Covers:
-  - initUrl / firstSegUrl / playUrl / fallback / coverUrl / drm.keyUri 都是相对路径
+  - videoTracks[].url / coverUrl / drm.keyUri 都是相对路径
   - 单集端点和列表端点 payload 逐字节一致
   - schema 严格校验通过（episode-info-schema.json, uri-reference）
 
@@ -91,16 +91,20 @@ def run_relative_url_case():
         assert r.status_code == 200, r.text
         single = r.json()
 
-        # All URL-ish fields are business-host relative (start with '/', no scheme)
-        assert single["initUrl"] == "/videos/ly/ep-3/720p/init-720p.mp4"
-        assert single["firstSegUrl"] == "/videos/ly/ep-3/720p/seg-720p-0.m4s"
-        assert single["playUrl"] == "/videos/ly/ep-3/720p/media-720p.m3u8"
-        assert single["fallback"]["low"] == "/videos/ly/ep-3/540p/media-540p.m3u8"
-        assert single["fallback"]["high"] == "/videos/ly/ep-3/1080p/media-1080p.m3u8"
+        # videoTracks: all three rungs, business-host relative URLs
+        tracks = single["videoTracks"]
+        assert [t["id"] for t in tracks] == ["high", "mid", "low"]
+        assert tracks[0]["url"] == "/videos/ly/ep-3/1080p/media-1080p.m3u8"
+        assert tracks[1]["url"] == "/videos/ly/ep-3/720p/media-720p.m3u8"
+        assert tracks[2]["url"] == "/videos/ly/ep-3/540p/media-540p.m3u8"
         assert single["coverUrl"] == "/videos/ly/ep-3/cover.jpg"
         assert single["drm"]["keyUri"] == "/drm/ly/ep-3/key"
-        for k in ("playUrl", "coverUrl", "initUrl", "firstSegUrl"):
-            assert "://" not in single[k], f"{k} must not be absolute: {single[k]}"
+        for t in tracks:
+            assert "://" not in t["url"], f"track url must not be absolute: {t['url']}"
+        assert "://" not in single["coverUrl"]
+        # Old single-rung fields are gone from the contract.
+        for gone in ("playUrl", "fallback", "initUrl", "firstSegUrl", "width", "height"):
+            assert gone not in single, f"{gone} should have been removed"
 
         # Single-episode and list endpoints must agree byte-for-byte.
         r2 = client.get("/api/dramas/ly/episodes")

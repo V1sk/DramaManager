@@ -9,9 +9,23 @@ class DrmInfo(BaseModel):
     ivHex: Optional[str] = Field(default=None, pattern=r"^[0-9A-Fa-f]{32}$")
 
 
-class FallbackPlaylists(BaseModel):
-    low: Optional[str] = None
-    high: Optional[str] = None
+class VideoTrack(BaseModel):
+    """One ladder rung of an episode. The SDK is handed all three rungs and
+    picks one client-side based on screen / network. There is still no master
+    playlist and no in-player ABR — each `url` is a plain single-rung media
+    playlist; the only change is that rung selection moved to the client.
+
+    `id` is the stable rung identity: `high` = 1080p, `mid` = 720p, `low` = 540p.
+    `width` / `height` are the rung's encoded dimensions, derived from the
+    source codec dimensions via `encode-clear.sh`'s `scale=-2:HEIGHT`; both are
+    null when the source dimensions are unknown (episodes uploaded before
+    width/height were recorded).
+    """
+
+    id: str
+    url: str
+    width: Optional[int] = Field(default=None, ge=1)
+    height: Optional[int] = Field(default=None, ge=1)
 
 
 class Subtitle(BaseModel):
@@ -32,15 +46,10 @@ class Subtitle(BaseModel):
 
 class EpisodeInfo(BaseModel):
     episodeId: str
-    playUrl: str
     durationMs: int = Field(ge=0)
     coverUrl: Optional[str] = None
-    width: Optional[int] = Field(default=None, ge=1)
-    height: Optional[int] = Field(default=None, ge=1)
-    initUrl: Optional[str] = None
-    firstSegUrl: Optional[str] = None
+    videoTracks: List[VideoTrack]
     drm: Optional[DrmInfo] = None
-    fallback: Optional[FallbackPlaylists] = None
     subtitles: Optional[List[Subtitle]] = None
 
 

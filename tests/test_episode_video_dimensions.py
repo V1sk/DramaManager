@@ -1,9 +1,9 @@
-"""TestClient verification for EpisodeInfo width / height pass-through.
+"""TestClient verification for EpisodeInfo videoTracks dimensions.
 
 Spec scenarios:
-  - 新上传 ready 行响应含正整数 width / height
-  - 老 ready 行响应 width / height 为 null
-  - 单集与列表端点同一行 width / height 一致
+  - 新上传 ready 行：每档 videoTracks 含正整数 width / height（按源尺寸推导）
+  - 老 ready 行：每档 width / height 为 null
+  - 单集与列表端点同一行 videoTracks 一致
   - schema 严格校验在两种形态下都通过
 """
 
@@ -78,8 +78,11 @@ def case_new_row_with_dimensions():
         r = client.get("/api/episodes/ly/3")
         assert r.status_code == 200, r.text
         single = r.json()
-        assert single["width"] == 720
-        assert single["height"] == 1280
+        # 源 720x1280 → 每档 height 固定，width 按 scale=-2:HEIGHT 推导
+        tracks = {t["id"]: t for t in single["videoTracks"]}
+        assert (tracks["high"]["width"], tracks["high"]["height"]) == (608, 1080)
+        assert (tracks["mid"]["width"], tracks["mid"]["height"]) == (406, 720)
+        assert (tracks["low"]["width"], tracks["low"]["height"]) == (304, 540)
 
         r2 = client.get("/api/dramas/ly/episodes")
         listed = r2.json()
@@ -87,7 +90,7 @@ def case_new_row_with_dimensions():
         assert listed[0] == single  # 单集 / 列表逐字节相等
 
         _validator().validate(single)
-        print("OK new row: width=720 height=1280; single == list; schema validate")
+        print("OK new row: per-rung dims 608/406/304; single == list; schema validate")
 
 
 def case_legacy_row_null_dimensions():
@@ -100,19 +103,22 @@ def case_legacy_row_null_dimensions():
         r = client.get("/api/episodes/oldslug/1")
         assert r.status_code == 200, r.text
         single = r.json()
-        assert single["width"] is None
-        assert single["height"] is None
+        # 源尺寸缺失 → 每档 width / height 都是 null
+        for t in single["videoTracks"]:
+            assert t["width"] is None
+            assert t["height"] is None
         # 其它字段仍然完整
         assert single["episodeId"] == "oldslug-ep-1"
         assert single["durationMs"] == 120000
-        assert single["playUrl"] == "/videos/oldslug/ep-1/720p/media-720p.m3u8"
+        assert [t["id"] for t in single["videoTracks"]] == ["high", "mid", "low"]
+        assert single["videoTracks"][1]["url"] == "/videos/oldslug/ep-1/720p/media-720p.m3u8"
 
         r2 = client.get("/api/dramas/oldslug/episodes")
         listed = r2.json()
         assert listed[0] == single
 
         _validator().validate(single)
-        print("OK legacy row: width/height null; other fields intact; schema validate")
+        print("OK legacy row: per-rung dims null; other fields intact; schema validate")
 
 
 if __name__ == "__main__":
