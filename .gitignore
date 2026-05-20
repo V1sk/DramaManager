@@ -5,3 +5,6 @@ tmp
 venv
 .idea
 app/oss_upload.py
+
+# Per-developer object-storage credentials (copy credentials.example.py).
+app/storage/credentials.py

@@ -34,7 +34,7 @@ Environment variables:
 | `OUT_DIR` | no | `./out` | Pipeline artifact root (`<OUT_DIR>/<drama_slug>/...`). |
 | `DB_PATH` | no | `./hls.db` | SQLite file. |
 | `UPLOAD_TMP_DIR` | no | `./tmp` | Staging dir for uploaded sources; files are deleted after the worker finishes the job. |
-| `STORAGE_PROVIDER` | no | `none` | 选 bucket 厂商：`none` / `oss` (Aliyun OSS) / `tos` (Volcengine TOS)。设为 `oss` 或 `tos` 时启用上传：worker 把每档 init.mp4 + 加密 .m4s 推到所选桶的 **staging 前缀** (`Drama/staging/...`)，并把本地 m3u8 里 init / segment 引用改写成绝对 staging URL。`#EXT-X-KEY:URI` 不动。凭证 / endpoint / bucket / 前缀硬编码在 `app/storage/oss_provider.py` 或 `app/storage/tos_provider.py`，不走 env。Prod 前缀 (`Drama/prod/...`) 只在执行业务服务器同步时由 `publish_ladder_to_prod` server-side copy 进去（详见 "业务服务器同步"）。非法值 → 启动期 fail-fast。 |
+| `STORAGE_PROVIDER` | no | `none` | 选 bucket 厂商：`none` / `oss` (Aliyun OSS) / `tos` (Volcengine TOS)。设为 `oss` 或 `tos` 时启用上传：worker 把每档 init.mp4 + 加密 .m4s 推到所选桶的 **staging 前缀** (`Drama/staging/...`)，并把本地 m3u8 里 init / segment 引用改写成绝对 staging URL。`#EXT-X-KEY:URI` 不动。endpoint / bucket / 前缀硬编码在 `app/storage/oss_provider.py` 或 `app/storage/tos_provider.py`，不走 env；AK/SK 走 gitignore 的 `app/storage/credentials.py`（fresh clone 后按 `credentials.example.py` 拷一份填自己的密钥，按人分配，不进 git）。Prod 前缀 (`Drama/prod/...`) 只在执行业务服务器同步时由 `publish_ladder_to_prod` server-side copy 进去（详见 "业务服务器同步"）。非法值 → 启动期 fail-fast。 |
 | `OSS_ENABLED` | no | `false` | **Deprecated alias** — `OSS_ENABLED=true` 等价于 `STORAGE_PROVIDER=oss`。仅在 `STORAGE_PROVIDER` 未设时生效；新部署请直接用 `STORAGE_PROVIDER`。 |
 | `DEFAULT_LADDER` | no | `720p` | 控制 `EpisodeInfo.playUrl` / `initUrl` / `firstSegUrl` 默认指向哪个 ladder rung。可选 `540p` / `720p` / `1080p`。**在 API 读取时动态生效**——改 env 重启 uvicorn 就能切换，不需要重新编码（pipeline 始终生产三档完整切片）。`fallback.low` / `fallback.high` 永远是 540p / 1080p 两端，不受影响。非法值在启动时 fail-fast。 |
 | `BUSINESS_SYNC_BASE_URL` | no | _unset_ | 业务服务器同步 base URL（`https://...`，无尾部 `/`）。**未设时同步功能整体禁用**：`POST /admin/dramas/{slug}/sync` 等返回 503，导航栏 `sync-zone` 不显示。设了就必须同时设 `BUSINESS_SYNC_API_KEY`。 |
@@ -213,7 +213,7 @@ Drama/prod/zhetian/ep-1/720p/seg-720p-1.m4s
 注意事项：
 
 - **桶 CORS** 必须允许 GET 来自业务 host 的 Origin，否则 hls.js / 浏览器播放会被 CORS 拒（ExoPlayer / iOS 原生 HLS 不走 CORS，不受影响）。两个前缀共用一套 CORS；切到 TOS 时记得在 TOS 控制台也配同样规则。
-- **凭证当前硬编码**在 `app/storage/oss_provider.py`（OSS：`accessKeyId` / `accessKeySecret` / `endpoint` / bucket `photobundle`）和 `app/storage/tos_provider.py`（TOS：`ak` / `sk` / `endpoint` / bucket `coocent-drama`）。前缀常量 (`Drama/staging` / `Drama/prod`) 在两个 provider 里独立写，两边保持一致。多环境部署 / 凭证轮换需另开 follow-up。
+- **AK/SK 走 gitignore 的 `app/storage/credentials.py`**（4 个常量 `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET` / `TOS_ACCESS_KEY` / `TOS_SECRET_KEY`），该文件不进 git——fresh clone 后 `cp app/storage/credentials.example.py app/storage/credentials.py` 再填自己的密钥（按人分配）。文件缺失时 provider import 抛带提示的 `RuntimeError`。endpoint / bucket（OSS `photobundle` / TOS `coocent-drama`）不是密钥，仍硬编码在各自 provider。前缀常量 (`Drama/staging` / `Drama/prod`) 在两个 provider 里独立写，两边保持一致。
 - **本地切片不会被自动删**：上传到桶成功后 `OUT_DIR/{slug}/ep-{n}/` 仍保留。`DELETE /admin/episodes/{slug}/{ep}` 现在会同步清 staging 桶对象（warnings 收集失败项）；prod 桶对象由后续 sync 触发的 `unpublish_*_from_prod` 清掉。
 - **切换 provider 时桶内已有的对象不会自动迁移**。从 OSS 切到 TOS（或反向）要先手工把旧桶里 `Drama/staging` + `Drama/prod` 全量复制到新桶，或者跑 `scripts/migrate_to_oss.py` 重新发布（脚本现在跟随 `STORAGE_PROVIDER` 走，会向当前选中的桶写）。
 
