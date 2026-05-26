@@ -78,11 +78,6 @@ The response is 200 with the new row's contents.
 - **WHEN** the operator posts a subtitle for a non-existent `(slug, ep)`
 - **THEN** the response is 404
 
-#### Scenario: inactive language is rejected
-- **GIVEN** language `ja` exists with `is_active=0`
-- **WHEN** the operator posts a subtitle for `lang=ja`
-- **THEN** the response is 400
-
 ### Requirement: subtitle listing endpoint
 
 The service SHALL provide `GET /admin/episodes/{drama_slug}/{ep}/subtitles` returning a JSON array `[{lang_code, label, url, uploaded_at}, ...]` ordered by `lang_code ASC`. `label` is the corresponding `languages.display_label`.

@@ -43,7 +43,7 @@ The service's existing `POST /admin/dramas` (form: `drama_slug`, `drama_name`, `
 1. Insert the `dramas` row with `created_at = updated_at = now`.
 2. Insert the translation row `(entity_type='drama', entity_id=slug, lang_code=default_lang, field='name', value=drama_name)`.
 
-Both inserts SHALL share a transaction; either succeeds or both roll back. Validation rules (slug regex, drama_name non-empty after trim, default_lang exists and is_active) are the same as before; only the persistence target changes.
+Both inserts SHALL share a transaction; either succeeds or both roll back. Validation rules (slug regex, drama_name non-empty after trim, default_lang exists) are the same as before; only the persistence target changes.
 
 #### Scenario: drama creation writes name to translations
 - **GIVEN** `languages` has active `('zh-rCN', '简体中文', 1)`

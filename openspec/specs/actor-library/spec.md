@@ -26,7 +26,7 @@ The service SHALL provide `POST /admin/actors` accepting form fields `slug` (req
 
 On success the service SHALL atomically insert the `actors` row and a `translations` row `(entity_type='actor', entity_id=slug, lang_code=default_lang, field='name', value=name)`. Failures roll back so no partial state remains.
 
-If the slug already exists the response is 409. If `default_lang` is missing or inactive the response is 400. If `name` is empty after trim the response is 400.
+If the slug already exists the response is 409. If `default_lang` is missing the response is 400. If `name` is empty after trim the response is 400.
 
 #### Scenario: valid creation succeeds
 - **GIVEN** `languages` has active row `('zh-rCN', '简体中文', 1)`

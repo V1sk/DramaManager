@@ -16,7 +16,6 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS languages (
   code           TEXT    PRIMARY KEY,
   display_label  TEXT    NOT NULL,
-  is_active      INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
   created_at     TEXT    NOT NULL,
   updated_at     TEXT    NOT NULL
 );
@@ -140,7 +139,6 @@ CREATE TABLE IF NOT EXISTS users (
   username       TEXT    PRIMARY KEY,
   password_hash  TEXT    NOT NULL,
   role           TEXT    NOT NULL DEFAULT 'staff'  CHECK(role IN ('admin','staff')),
-  is_active      INTEGER NOT NULL DEFAULT 1        CHECK(is_active IN (0,1)),
   can_delete     INTEGER NOT NULL DEFAULT 0        CHECK(can_delete IN (0,1)),
   can_sync       INTEGER NOT NULL DEFAULT 0        CHECK(can_sync IN (0,1)),
   must_change_pw INTEGER NOT NULL DEFAULT 0        CHECK(must_change_pw IN (0,1)),
@@ -198,10 +196,6 @@ class LanguageValidationError(Exception):
 
 class LanguageNotFoundError(Exception):
     """Raised by create_drama when default_lang refers to no language row."""
-
-
-class LanguageInactiveError(Exception):
-    """Raised by create_drama when default_lang refers to an inactive language."""
 
 
 class TagExistsError(Exception):
@@ -320,6 +314,7 @@ def init_db() -> None:
     with _connect() as conn:
         conn.executescript(_SCHEMA)
         _migrate_add_columns(conn)
+        _migrate_drop_columns(conn)
     # FK enforcement self-test: the i18n-foundation spec requires verifying
     # that the translations.lang_code FK isn't silently dropped. We attempt
     # to insert a translation referencing a non-existent language; SQLite
@@ -388,6 +383,29 @@ def _migrate_add_columns(conn: sqlite3.Connection) -> None:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
+def _migrate_drop_columns(conn: sqlite3.Connection) -> None:
+    """Idempotent column removal for an already-deployed `hls.db`.
+
+    `is_active` once existed on `languages` and `users`; both concepts were
+    dropped (operators delete rows instead of deactivating them). Listed
+    columns are removed if still present so the live db matches `_SCHEMA`.
+    Requires SQLite 3.35+ for `ALTER TABLE DROP COLUMN`.
+    """
+    drops = {
+        "languages": ["is_active"],
+        "users": ["is_active"],
+    }
+    for table, cols in drops.items():
+        existing = {
+            r["name"] for r in conn.execute(f"PRAGMA table_info({table})")
+        }
+        if not existing:
+            continue
+        for col in cols:
+            if col in existing:
+                conn.execute(f"ALTER TABLE {table} DROP COLUMN {col}")
+
+
 def _verify_fk_enforcement() -> None:
     """One-shot startup check: confirm `PRAGMA foreign_keys = ON` is taking
     effect by attempting an INSERT that should fail under FK enforcement.
@@ -433,8 +451,8 @@ def create_language(code: str, display_label: str) -> dict:
     with _connect() as conn:
         try:
             conn.execute(
-                "INSERT INTO languages(code, display_label, is_active, created_at, updated_at) "
-                "VALUES (?, ?, 1, ?, ?)",
+                "INSERT INTO languages(code, display_label, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?)",
                 (code, label, now, now),
             )
         except sqlite3.IntegrityError as e:
@@ -449,16 +467,11 @@ def get_language(code: str) -> dict | None:
     return dict(row) if row else None
 
 
-def list_languages(active_only: bool = False) -> list[dict]:
+def list_languages() -> list[dict]:
     with _connect() as conn:
-        if active_only:
-            rows = conn.execute(
-                "SELECT * FROM languages WHERE is_active=1 ORDER BY code ASC"
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM languages ORDER BY code ASC"
-            ).fetchall()
+        rows = conn.execute(
+            "SELECT * FROM languages ORDER BY code ASC"
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -466,7 +479,6 @@ def update_language(
     code: str,
     *,
     display_label: str | None = None,
-    is_active: bool | int | None = None,
 ) -> dict | None:
     """Update mutable fields. `code` itself is immutable — the path identifies
     the row. Returns the updated row, or None if no row matched.
@@ -480,16 +492,6 @@ def update_language(
             raise LanguageValidationError("display_label", "display_label must not be empty")
         fields.append("display_label = ?")
         params.append(label)
-    if is_active is not None:
-        if is_active in (True, 1, "1"):
-            params.append(1)
-        elif is_active in (False, 0, "0"):
-            params.append(0)
-        else:
-            raise LanguageValidationError(
-                "is_active", "is_active must be true/false (or 1/0)"
-            )
-        fields.append("is_active = ?")
     if not fields:
         # nothing to update; return current row (or None)
         return get_language(code)
@@ -570,11 +572,6 @@ def create_drama(
         raise LanguageNotFoundError(
             f"default_lang '{default_lang}' is not a registered language; "
             f"create it via POST /admin/languages first"
-        )
-    if not lang["is_active"]:
-        raise LanguageInactiveError(
-            f"default_lang '{default_lang}' is registered but inactive; "
-            f"reactivate via PATCH /admin/languages/{default_lang}"
         )
 
     now = _now_iso()
@@ -753,10 +750,6 @@ def update_drama_default_lang(slug: str, new_default_lang: str) -> dict | None:
         raise LanguageNotFoundError(
             f"new default_lang '{new_default_lang}' is not a registered language"
         )
-    if not lang["is_active"]:
-        raise LanguageInactiveError(
-            f"new default_lang '{new_default_lang}' is inactive"
-        )
     with _connect() as conn:
         cov = conn.execute(
             "SELECT 1 FROM translations "
@@ -811,8 +804,6 @@ def upsert_drama_translation(
     lang = get_language(lang_code)
     if lang is None:
         raise LanguageNotFoundError(f"lang_code '{lang_code}' is not a registered language")
-    if not lang["is_active"]:
-        raise LanguageInactiveError(f"lang_code '{lang_code}' is inactive")
 
     with _connect() as conn:
         # "name required for fresh language" precondition
@@ -1417,10 +1408,6 @@ def create_tag(slug: str, default_lang: str, label: str) -> dict:
         raise LanguageNotFoundError(
             f"default_lang '{default_lang}' is not a registered language"
         )
-    if not lang["is_active"]:
-        raise LanguageInactiveError(
-            f"default_lang '{default_lang}' is registered but inactive"
-        )
 
     now = _now_iso()
     with _connect() as conn:
@@ -1504,10 +1491,6 @@ def update_tag_default_lang(slug: str, new_default_lang: str) -> dict | None:
         raise LanguageNotFoundError(
             f"new default_lang '{new_default_lang}' is not a registered language"
         )
-    if not lang["is_active"]:
-        raise LanguageInactiveError(
-            f"new default_lang '{new_default_lang}' is inactive"
-        )
     with _connect() as conn:
         cov = conn.execute(
             "SELECT 1 FROM translations "
@@ -1568,8 +1551,6 @@ def upsert_tag_translation(slug: str, lang_code: str, label: str) -> dict:
     lang = get_language(lang_code)
     if lang is None:
         raise LanguageNotFoundError(f"lang_code '{lang_code}' is not a registered language")
-    if not lang["is_active"]:
-        raise LanguageInactiveError(f"lang_code '{lang_code}' is inactive")
     with _connect() as conn:
         conn.execute(
             "INSERT INTO translations(entity_type, entity_id, lang_code, field, value) "
@@ -1684,10 +1665,6 @@ def create_actor(slug: str, default_lang: str, name: str) -> dict:
         raise LanguageNotFoundError(
             f"default_lang '{default_lang}' is not a registered language"
         )
-    if not lang["is_active"]:
-        raise LanguageInactiveError(
-            f"default_lang '{default_lang}' is registered but inactive"
-        )
 
     now = _now_iso()
     with _connect() as conn:
@@ -1764,10 +1741,6 @@ def update_actor_default_lang(slug: str, new_default_lang: str) -> dict | None:
         raise LanguageNotFoundError(
             f"new default_lang '{new_default_lang}' is not a registered language"
         )
-    if not lang["is_active"]:
-        raise LanguageInactiveError(
-            f"new default_lang '{new_default_lang}' is inactive"
-        )
     with _connect() as conn:
         cov = conn.execute(
             "SELECT 1 FROM translations "
@@ -1821,8 +1794,6 @@ def upsert_actor_translation(slug: str, lang_code: str, name: str) -> dict:
     lang = get_language(lang_code)
     if lang is None:
         raise LanguageNotFoundError(f"lang_code '{lang_code}' is not a registered language")
-    if not lang["is_active"]:
-        raise LanguageInactiveError(f"lang_code '{lang_code}' is inactive")
     with _connect() as conn:
         conn.execute(
             "INSERT INTO translations(entity_type, entity_id, lang_code, field, value) "
@@ -2346,7 +2317,7 @@ def list_users() -> list[dict]:
     """
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT username, role, is_active, can_delete, can_sync, "
+            "SELECT username, role, can_delete, can_sync, "
             "must_change_pw, created_at, updated_at FROM users "
             "ORDER BY (role='admin') DESC, username ASC"
         ).fetchall()
@@ -2378,9 +2349,9 @@ def create_user(
     with _connect() as conn:
         try:
             conn.execute(
-                "INSERT INTO users(username, password_hash, role, is_active, "
+                "INSERT INTO users(username, password_hash, role, "
                 "can_delete, can_sync, must_change_pw, created_at, updated_at) "
-                "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     username, password_hash, role,
                     1 if can_delete else 0,
@@ -2401,13 +2372,13 @@ def update_user(
     username: str,
     *,
     role: str | None = None,
-    is_active: bool | int | None = None,
     can_delete: bool | int | None = None,
     can_sync: bool | int | None = None,
 ) -> dict | None:
     """Partial update of mutable account fields. Returns the updated row, or
-    None if no account matched. Raises LastAdminError when the change would
-    deactivate or demote the last remaining active admin.
+    None if no account matched. Raises LastAdminError when demoting the last
+    remaining admin (deactivation no longer exists — operators delete the
+    row instead).
     """
     def _as_bool(v: Any, field: str) -> int:
         if v in (True, 1, "1"):
@@ -2419,17 +2390,12 @@ def update_user(
     fields: list[str] = []
     params: list[Any] = []
     new_role = None
-    new_active = None
     if role is not None:
         if role not in ("admin", "staff"):
             raise UserValidationError("role", "role must be 'admin' or 'staff'")
         new_role = role
         fields.append("role = ?")
         params.append(role)
-    if is_active is not None:
-        new_active = _as_bool(is_active, "is_active")
-        fields.append("is_active = ?")
-        params.append(new_active)
     if can_delete is not None:
         fields.append("can_delete = ?")
         params.append(_as_bool(can_delete, "can_delete"))
@@ -2441,25 +2407,20 @@ def update_user(
 
     with _connect() as conn:
         cur = conn.execute(
-            "SELECT role, is_active FROM users WHERE username=?", (username,)
+            "SELECT role FROM users WHERE username=?", (username,)
         ).fetchone()
         if cur is None:
             return None
-        # Last-admin guard: if this row is currently an active admin and the
-        # change would strip that (demote to staff or deactivate), ensure at
-        # least one *other* active admin remains.
-        was_active_admin = cur["role"] == "admin" and cur["is_active"] == 1
-        will_be_admin = (new_role if new_role is not None else cur["role"]) == "admin"
-        will_be_active = (new_active if new_active is not None else cur["is_active"]) == 1
-        if was_active_admin and not (will_be_admin and will_be_active):
+        # Last-admin guard: a demotion that would leave zero admins is rejected.
+        if cur["role"] == "admin" and new_role == "staff":
             others = conn.execute(
                 "SELECT COUNT(*) AS n FROM users "
-                "WHERE role='admin' AND is_active=1 AND username<>?",
+                "WHERE role='admin' AND username<>?",
                 (username,),
             ).fetchone()["n"]
             if others == 0:
                 raise LastAdminError(
-                    "cannot deactivate or demote the last active admin account"
+                    "cannot demote the last admin account"
                 )
         fields.append("updated_at = ?")
         params.append(_now_iso())
@@ -2499,32 +2460,32 @@ def clear_must_change_pw(username: str) -> None:
 
 def delete_user(username: str) -> bool:
     """Delete an account. Returns False if no account matched. Raises
-    LastAdminError when the account is the last remaining active admin.
+    LastAdminError when the account is the last remaining admin.
     """
     with _connect() as conn:
         cur = conn.execute(
-            "SELECT role, is_active FROM users WHERE username=?", (username,)
+            "SELECT role FROM users WHERE username=?", (username,)
         ).fetchone()
         if cur is None:
             return False
-        if cur["role"] == "admin" and cur["is_active"] == 1:
+        if cur["role"] == "admin":
             others = conn.execute(
                 "SELECT COUNT(*) AS n FROM users "
-                "WHERE role='admin' AND is_active=1 AND username<>?",
+                "WHERE role='admin' AND username<>?",
                 (username,),
             ).fetchone()["n"]
             if others == 0:
                 raise LastAdminError(
-                    "cannot delete the last active admin account"
+                    "cannot delete the last admin account"
                 )
         conn.execute("DELETE FROM users WHERE username=?", (username,))
     return True
 
 
-def count_active_admins() -> int:
+def count_admins() -> int:
     with _connect() as conn:
         return conn.execute(
-            "SELECT COUNT(*) AS n FROM users WHERE role='admin' AND is_active=1"
+            "SELECT COUNT(*) AS n FROM users WHERE role='admin'"
         ).fetchone()["n"]
 
 

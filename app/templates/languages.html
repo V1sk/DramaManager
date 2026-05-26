@@ -48,10 +48,10 @@
         </div>
         <table class="data">
             <thead>
-                <tr><th>代码</th><th>显示名</th><th>状态</th><th>添加时间</th><th>更新时间</th><th class="text-right">操作</th></tr>
+                <tr><th>代码</th><th>显示名</th><th>添加时间</th><th>更新时间</th><th class="text-right">操作</th></tr>
             </thead>
             <tbody id="langs-body">
-                <tr><td colspan="6" class="meta text-center py-6">加载中…</td></tr>
+                <tr><td colspan="5" class="meta text-center py-6">加载中…</td></tr>
             </tbody>
         </table>
     </div>
@@ -66,19 +66,15 @@ const $count = document.getElementById('lang-count');
 function render(rows) {
     $count.textContent = rows.length ? `共 ${rows.length} 个` : '';
     if (!rows.length) {
-        $body.innerHTML = '<tr><td colspan="6" class="meta text-center py-6">暂无语言记录，使用左侧表单添加。</td></tr>';
+        $body.innerHTML = '<tr><td colspan="5" class="meta text-center py-6">暂无语言记录，使用左侧表单添加。</td></tr>';
         return;
     }
     $body.innerHTML = rows.map(r => `<tr>
         <td class="mono text-secondary-fixed-dim">${escapeHtml(r.code)}</td>
         <td>${escapeHtml(r.display_label)}</td>
-        <td>${r.is_active ? '<span class="badge active">active</span>' : '<span class="badge inactive">inactive</span>'}</td>
         <td class="meta">${fmtTime(r.created_at)}</td>
         <td class="meta">${fmtTime(r.updated_at)}</td>
         <td class="actions-col text-right">
-            <button class="btn btn-sm btn-ghost" data-action="toggle" data-code="${escapeHtml(r.code)}" data-active="${r.is_active ? 1 : 0}" title="${r.is_active ? '停用' : '启用'}">
-                <span class="material-symbols-outlined text-[16px]">${r.is_active ? 'toggle_on' : 'toggle_off'}</span>
-            </button>
             <button class="btn btn-sm btn-ghost" data-action="delete" data-code="${escapeHtml(r.code)}" title="删除">
                 <span class="material-symbols-outlined text-[16px]">delete</span>
             </button>
@@ -91,7 +87,7 @@ async function refresh() {
         const res = await fetch('/admin/languages.json');
         render(await res.json());
     } catch (e) {
-        $body.innerHTML = `<tr><td colspan="6" class="meta text-center py-6">加载失败：${escapeHtml(e)}</td></tr>`;
+        $body.innerHTML = `<tr><td colspan="5" class="meta text-center py-6">加载失败：${escapeHtml(e)}</td></tr>`;
     }
 }
 
@@ -99,18 +95,7 @@ $body.addEventListener('click', async (ev) => {
     const btn = ev.target.closest('[data-action]');
     if (!btn) return;
     const code = btn.dataset.code;
-    if (btn.dataset.action === 'toggle') {
-        const newActive = btn.dataset.active !== '1';
-        btn.disabled = true;
-        try {
-            const res = await fetch(`/admin/languages/${encodeURIComponent(code)}`, {
-                method: 'PATCH', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ is_active: newActive }),
-            });
-            if (!res.ok) { flash(`切换失败 (${res.status}): ${await res.text()}`, 'error'); btn.disabled = false; return; }
-            await refresh();
-        } catch (e) { flash('切换出错: ' + e, 'error'); btn.disabled = false; }
-    } else if (btn.dataset.action === 'delete') {
+    if (btn.dataset.action === 'delete') {
         if (!confirm(`确定删除语言 "${code}"？`)) return;
         btn.disabled = true;
         try {

@@ -85,11 +85,7 @@ async def login_submit(
         return _fail(f"账号暂时锁定，请 {locked} 秒后重试。", action="login_locked")
 
     user = db.get_user(username)
-    if (
-        user is None
-        or not user["is_active"]
-        or not auth.verify_password(password, user["password_hash"])
-    ):
+    if user is None or not auth.verify_password(password, user["password_hash"]):
         auth.record_login_failure(username)
         return _fail("用户名或密码错误。")
 

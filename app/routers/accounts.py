@@ -30,7 +30,7 @@ _TEMPLATES = Jinja2Templates(
 )
 
 _MIN_PASSWORD_LEN = 6
-_PATCH_FIELDS = {"role", "is_active", "can_delete", "can_sync"}
+_PATCH_FIELDS = {"role", "can_delete", "can_sync"}
 _AUDIT_PAGE_SIZE = 50
 
 
@@ -102,7 +102,6 @@ async def accounts_patch(
         row = db.update_user(
             username,
             role=payload.get("role"),
-            is_active=payload.get("is_active"),
             can_delete=payload.get("can_delete"),
             can_sync=payload.get("can_sync"),
         )
@@ -116,7 +115,6 @@ async def accounts_patch(
     return JSONResponse({
         "username": row["username"],
         "role": row["role"],
-        "is_active": bool(row["is_active"]),
         "can_delete": bool(row["can_delete"]),
         "can_sync": bool(row["can_sync"]),
         "must_change_pw": bool(row["must_change_pw"]),

@@ -171,8 +171,6 @@ async def admin_create_drama(
         raise HTTPException(status_code=400, detail=f"{e.field}: {e}")
     except db.LanguageNotFoundError as e:
         raise HTTPException(status_code=400, detail=f"default_lang: {e}")
-    except db.LanguageInactiveError as e:
-        raise HTTPException(status_code=400, detail=f"default_lang: {e}")
     except db.DramaExistsError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except RuntimeError as e:
@@ -800,8 +798,6 @@ async def admin_patch_drama(
             updated = db.update_drama_default_lang(drama_slug, new_default)
         except db.LanguageNotFoundError as e:
             raise HTTPException(status_code=400, detail=f"default_lang: {e}")
-        except db.LanguageInactiveError as e:
-            raise HTTPException(status_code=400, detail=f"default_lang: {e}")
         except db.DramaDefaultLangNotCoveredError as e:
             raise HTTPException(status_code=400, detail=str(e))
         if updated is None:
@@ -877,8 +873,6 @@ async def admin_upsert_drama_translation(
         raise HTTPException(status_code=400, detail=str(e))
     except db.LanguageNotFoundError as e:
         raise HTTPException(status_code=400, detail=f"lang_code: {e}")
-    except db.LanguageInactiveError as e:
-        raise HTTPException(status_code=400, detail=f"lang_code: {e}")
     db.mark_drama_dirty(drama_slug)
     log.info("upserted drama translation slug=%s lang=%s fields=%s",
              drama_slug, lang_code,
@@ -915,14 +909,10 @@ async def admin_upload_drama_poster(
     if db.get_drama(drama_slug) is None:
         await file.close()
         raise HTTPException(status_code=404, detail=f"drama '{drama_slug}' not found")
-    # Lang must reference an active language
     lang_row = db.get_language(lang)
     if lang_row is None:
         await file.close()
         raise HTTPException(status_code=400, detail=f"lang '{lang}' is not a registered language")
-    if not lang_row["is_active"]:
-        await file.close()
-        raise HTTPException(status_code=400, detail=f"lang '{lang}' is inactive")
     # Drama must already have a name translation in this lang
     if db.get_drama_name_translation(drama_slug, lang) is None:
         await file.close()
@@ -1053,14 +1043,10 @@ async def admin_upload_subtitle(
         await file.close()
         raise HTTPException(status_code=404, detail=f"episode '{drama_slug}/{ep_number}' not found")
 
-    # Lang must be active
     lang_row = db.get_language(lang)
     if lang_row is None:
         await file.close()
         raise HTTPException(status_code=400, detail=f"lang '{lang}' is not a registered language")
-    if not lang_row["is_active"]:
-        await file.close()
-        raise HTTPException(status_code=400, detail=f"lang '{lang}' is inactive")
 
     # MIME gate
     content_type = (file.content_type or "").lower()
@@ -1251,7 +1237,7 @@ async def admin_batch_upload_subtitles(
             await f.close()
         raise HTTPException(status_code=404, detail=f"drama '{drama_slug}' not found")
 
-    active_langs = [r["code"] for r in db.list_languages(active_only=True)]
+    active_langs = [r["code"] for r in db.list_languages()]
     results: list[dict] = []
     seen: dict[tuple[int, str], str] = {}  # (ep, lang) -> filename, dedupe within the batch
 

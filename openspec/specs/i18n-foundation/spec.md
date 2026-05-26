@@ -6,12 +6,20 @@
 
 ### Requirement: languages table schema
 
-The service SHALL persist a `languages` table with columns: `code` (TEXT, PRIMARY KEY, matches `^[a-z]{2,3}(-[A-Za-z0-9]{2,8})?$`), `display_label` (TEXT NOT NULL, non-empty after trim), `is_active` (INTEGER NOT NULL DEFAULT 1, value 0 or 1), `created_at` (TEXT NOT NULL, ISO 8601 UTC), `updated_at` (TEXT NOT NULL, ISO 8601 UTC).
+The service SHALL persist a `languages` table with columns: `code` (TEXT, PRIMARY KEY, matches `^[a-z]{2,3}(-[A-Za-z0-9]{2,8})?$`), `display_label` (TEXT NOT NULL, non-empty after trim), `created_at` (TEXT NOT NULL, ISO 8601 UTC), `updated_at` (TEXT NOT NULL, ISO 8601 UTC).
+
+`is_active` was removed (originally part of this spec): operators delete unwanted language rows instead of toggling them off. `init_db()` performs an idempotent `ALTER TABLE ... DROP COLUMN` on existing deployments.
 
 #### Scenario: schema is created on init
 - **WHEN** the service starts with an empty DB and `init_db()` runs
-- **THEN** `PRAGMA table_info(languages)` lists exactly the columns `code`, `display_label`, `is_active`, `created_at`, `updated_at`
+- **THEN** `PRAGMA table_info(languages)` lists exactly the columns `code`, `display_label`, `created_at`, `updated_at`
 - **AND** `code` is the primary key
+
+#### Scenario: legacy is_active column is dropped on migration
+- **GIVEN** an existing `hls.db` whose `languages` table still has an `is_active` column
+- **WHEN** `init_db()` runs
+- **THEN** `PRAGMA table_info(languages)` no longer includes `is_active`
+- **AND** existing rows are preserved
 
 #### Scenario: invalid code is rejected by the regex
 - **WHEN** the application attempts `INSERT INTO languages(code, display_label, ...) VALUES ('Bad Lang!', '...', ...)`
@@ -45,11 +53,11 @@ The table SHALL be created and FK-enforced even though no consumer writes to it 
 
 The service SHALL provide `POST /admin/languages` accepting form fields `code` (required) and `display_label` (required). It SHALL validate `code` against `^[a-z]{2,3}(-[A-Za-z0-9]{2,8})?$` and `display_label` non-empty after trim. Either failure SHALL respond 400 naming the offending field; no row SHALL be inserted.
 
-If a row with that code already exists the service SHALL respond 409 Conflict. Otherwise it SHALL insert a new row with `is_active=1`, `created_at = updated_at = now`, and respond HTTP 302 to `/admin/languages` (browser-form posture).
+If a row with that code already exists the service SHALL respond 409 Conflict. Otherwise it SHALL insert a new row with `created_at = updated_at = now`, and respond HTTP 302 to `/admin/languages` (browser-form posture).
 
 #### Scenario: valid creation succeeds
 - **WHEN** a client posts `code=zh-rCN`, `display_label=简体中文` to `POST /admin/languages`
-- **THEN** a row exists with `(code='zh-rCN', display_label='简体中文', is_active=1)`
+- **THEN** a row exists with `(code='zh-rCN', display_label='简体中文')`
 - **AND** the response is 302 to `/admin/languages`
 
 #### Scenario: duplicate code is rejected
@@ -65,28 +73,23 @@ If a row with that code already exists the service SHALL respond 409 Conflict. O
 
 ### Requirement: language listing endpoint (admin)
 
-The service SHALL provide `GET /admin/languages` returning a JSON array of every row in the `languages` table — including rows with `is_active=0`. Each element SHALL include `code`, `display_label`, `is_active`, `created_at`, `updated_at`. Ordering SHALL be `code ASC`.
+The service SHALL provide `GET /admin/languages.json` returning a JSON array of every row in the `languages` table. Each element SHALL include `code`, `display_label`, `created_at`, `updated_at`. Ordering SHALL be `code ASC`.
 
-#### Scenario: list returns active and inactive rows
-- **GIVEN** `languages` has rows `('en', 'English', 1)` and `('ja', 'Japanese', 0)`
-- **WHEN** the client requests `GET /admin/languages`
+#### Scenario: list returns every row
+- **GIVEN** `languages` has rows `('en', 'English')` and `('ja', 'Japanese')`
+- **WHEN** the client requests `GET /admin/languages.json`
 - **THEN** the response is 200 JSON containing both rows
 - **AND** ordering is `[en, ja]` (alphabetical)
 
 ### Requirement: language update endpoint
 
-The service SHALL provide `PATCH /admin/languages/{code}` accepting a JSON body with optional fields `display_label` and `is_active`. Unknown fields SHALL be rejected with 400. Both fields, when present, SHALL be validated (`display_label` non-empty after trim, `is_active` is `true`/`false`/`1`/`0`).
-
-The `code` itself SHALL NOT be updatable — the path parameter identifies the row and is the immutable key. Any payload field named `code` SHALL be rejected with 400.
+The service SHALL provide `PATCH /admin/languages/{code}` accepting a JSON body with the optional field `display_label`. Unknown fields (including `is_active`, which no longer exists, and `code`, which is immutable) SHALL be rejected with 400. `display_label`, when present, SHALL be validated non-empty after trim.
 
 If no row matches `{code}`, the service SHALL respond 404. Otherwise the row SHALL be updated, `updated_at` refreshed, and the response is 200 with the new row body.
 
-#### Scenario: toggling is_active off
-- **GIVEN** `languages` has `code='ja', is_active=1`
+#### Scenario: unknown field is rejected
 - **WHEN** the client sends `PATCH /admin/languages/ja` with body `{"is_active": false}`
-- **THEN** the response is 200
-- **AND** the row now has `is_active=0`
-- **AND** `display_label` is unchanged
+- **THEN** the response is 400 (the field is no longer accepted)
 
 #### Scenario: updating display_label
 - **GIVEN** `languages` has `code='zh-rCN', display_label='中文'`
@@ -135,14 +138,14 @@ Otherwise the row SHALL be deleted; the response is 204 No Content.
 
 ### Requirement: SDK languages endpoint
 
-The service SHALL provide `GET /api/languages` returning a JSON array of `{code, display_label}` objects for every row in `languages` with `is_active=1`. Inactive languages SHALL NOT appear. Ordering SHALL be `code ASC`. An empty registry SHALL return `200 []`.
+The service SHALL provide `GET /api/languages` returning a JSON array of `{code, display_label}` objects for every row in `languages`. Ordering SHALL be `code ASC`. An empty registry SHALL return `200 []`.
 
 The endpoint SHALL NOT require authentication (consistent with other `/api/*` endpoints) and SHALL set `Access-Control-Allow-Origin: *` (consistent with other `/api/*` endpoints, served by FastAPI's CORS middleware).
 
-#### Scenario: only active rows are returned
-- **GIVEN** `languages` has rows `('en', 'English', 1)` and `('ja', 'Japanese', 0)`
+#### Scenario: every registered language is returned
+- **GIVEN** `languages` has rows `('en', 'English')` and `('ja', 'Japanese')`
 - **WHEN** the client requests `GET /api/languages`
-- **THEN** the response is 200 with body `[{"code": "en", "display_label": "English"}]`
+- **THEN** the response is 200 with body `[{"code":"en","display_label":"English"}, {"code":"ja","display_label":"Japanese"}]`
 
 #### Scenario: empty registry returns []
 - **GIVEN** the `languages` table is empty
@@ -153,7 +156,7 @@ The endpoint SHALL NOT require authentication (consistent with other `/api/*` en
 
 The service SHALL serve `GET /admin/languages.html` (or extend `GET /admin` with a navigation link) returning an HTML page that contains:
 1. A create form with fields `code` and `display_label` posting to `/admin/languages`.
-2. A table listing every language (including `is_active=0` rows), each row showing `code`, `display_label`, the active flag, and two action buttons: toggle `is_active` (PATCH) and delete (DELETE).
+2. A table listing every language, each row showing `code`, `display_label`, and a delete (DELETE) button.
 
 The page MAY be unstyled or minimally styled; full polish is the responsibility of `admin-redesign` (step 4).
 

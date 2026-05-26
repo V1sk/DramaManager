@@ -37,7 +37,7 @@ The `episodes` table SHALL have a foreign key constraint `FOREIGN KEY (drama_slu
 
 The service SHALL provide `POST /admin/dramas` accepting `application/x-www-form-urlencoded` or `multipart/form-data` with fields: `drama_slug` (required), `drama_name` (required), `default_lang` (required).
 
-The service SHALL validate `drama_slug` against `^[a-z0-9][a-z0-9-]*$`, `drama_name` is non-empty after trim, and `default_lang` is the `code` of an existing `languages` row whose `is_active=1`. Any failure SHALL respond 400 with a message naming the offending field, and no row SHALL be inserted in either `dramas` or `translations`.
+The service SHALL validate `drama_slug` against `^[a-z0-9][a-z0-9-]*$`, `drama_name` is non-empty after trim, and `default_lang` is the `code` of an existing `languages` row. Any failure SHALL respond 400 with a message naming the offending field, and no row SHALL be inserted in either `dramas` or `translations`.
 
 If a drama with the given slug already exists, the service SHALL respond 409 Conflict.
 

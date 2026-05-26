@@ -63,7 +63,7 @@
         <table class="data">
             <thead>
                 <tr>
-                    <th>用户名</th><th>角色</th><th>状态</th>
+                    <th>用户名</th><th>角色</th>
                     <th>删除</th><th>同步</th><th class="text-right">操作</th>
                 </tr>
             </thead>
@@ -80,10 +80,6 @@
                             <option value="admin" {% if u.role == 'admin' %}selected{% endif %}>admin</option>
                         </select>
                     </td>
-                    <td>
-                        {% if u.is_active %}<span class="badge active">启用</span>
-                        {% else %}<span class="badge inactive">停用</span>{% endif %}
-                    </td>
                     {% if u.role == 'admin' %}
                     <td class="meta">全部</td>
                     <td class="meta">全部</td>
@@ -92,10 +88,6 @@
                     <td><input type="checkbox" data-field="can_sync" {% if u.can_sync %}checked{% endif %}></td>
                     {% endif %}
                     <td class="actions-col text-right whitespace-nowrap">
-                        <button class="btn btn-sm btn-ghost" data-action="toggle-active" data-active="{{ 1 if u.is_active else 0 }}"
-                                title="{{ '停用' if u.is_active else '启用' }}">
-                            <span class="material-symbols-outlined text-[16px]">{{ 'toggle_on' if u.is_active else 'toggle_off' }}</span>
-                        </button>
                         <button class="btn btn-sm btn-ghost" data-action="reset-pw" title="重置密码">
                             <span class="material-symbols-outlined text-[16px]">key</span>
                         </button>
@@ -163,11 +155,7 @@ document.querySelector('table.data tbody').addEventListener('click', async (ev) 
     const tr = btn.closest('tr');
     const username = tr.dataset.username;
     const action = btn.dataset.action;
-    if (action === 'toggle-active') {
-        btn.disabled = true;
-        const ok = await patchUser(username, { is_active: btn.dataset.active !== '1' });
-        if (ok) { location.reload(); } else { btn.disabled = false; }
-    } else if (action === 'reset-pw') {
+    if (action === 'reset-pw') {
         const pw = prompt(`为账号 "${username}" 设置新密码（至少 6 位，该账号下次登录须改密）`);
         if (pw === null) return;
         btn.disabled = true;

@@ -49,8 +49,6 @@ async def tags_create(
         raise HTTPException(status_code=400, detail=f"{e.field}: {e}")
     except db.LanguageNotFoundError as e:
         raise HTTPException(status_code=400, detail=f"default_lang: {e}")
-    except db.LanguageInactiveError as e:
-        raise HTTPException(status_code=400, detail=f"default_lang: {e}")
     except db.TagExistsError as e:
         raise HTTPException(status_code=409, detail=str(e))
     log.info("created tag slug=%s default_lang=%s", slug, default_lang)
@@ -76,8 +74,6 @@ async def tags_patch(
     try:
         row = db.update_tag_default_lang(slug, new_default)
     except db.LanguageNotFoundError as e:
-        raise HTTPException(status_code=400, detail=f"default_lang: {e}")
-    except db.LanguageInactiveError as e:
         raise HTTPException(status_code=400, detail=f"default_lang: {e}")
     except db.TagDefaultLangNotCoveredError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -115,8 +111,6 @@ async def tags_translation_upsert(
     except db.TagValidationError as e:
         raise HTTPException(status_code=400, detail=f"{e.field}: {e}")
     except db.LanguageNotFoundError as e:
-        raise HTTPException(status_code=400, detail=f"lang_code: {e}")
-    except db.LanguageInactiveError as e:
         raise HTTPException(status_code=400, detail=f"lang_code: {e}")
     db.cascade_dirty_dramas_via_tag(slug)
     log.info("upserted tag translation slug=%s lang=%s", slug, lang_code)

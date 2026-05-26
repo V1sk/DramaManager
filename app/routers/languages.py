@@ -36,12 +36,11 @@ async def languages_page(request: Request) -> HTMLResponse:
 
 @router.get("/admin/languages.json")
 async def languages_list_json() -> JSONResponse:
-    rows = db.list_languages(active_only=False)
+    rows = db.list_languages()
     return JSONResponse([
         {
             "code": r["code"],
             "display_label": r["display_label"],
-            "is_active": bool(r["is_active"]),
             "created_at": r["created_at"],
             "updated_at": r["updated_at"],
         }
@@ -64,7 +63,7 @@ async def languages_create(
     return RedirectResponse(url="/admin/languages", status_code=302)
 
 
-_ALLOWED_PATCH_FIELDS = {"display_label", "is_active"}
+_ALLOWED_PATCH_FIELDS = {"display_label"}
 
 
 @router.patch("/admin/languages/{code}")
@@ -87,7 +86,6 @@ async def languages_patch(
         row = db.update_language(
             code,
             display_label=payload.get("display_label"),
-            is_active=payload.get("is_active"),
         )
     except db.LanguageValidationError as e:
         raise HTTPException(status_code=400, detail=f"{e.field}: {e}")
@@ -95,15 +93,12 @@ async def languages_patch(
     if row is None:
         raise HTTPException(status_code=404, detail=f"language '{code}' not found")
     # display_label change → cascade dirty (subtitle pickers show this label).
-    # is_active toggle → no cascade (existing payloads are unchanged; the
-    # business server keeps serving the same label).
     if "display_label" in payload:
         db.cascade_dirty_dramas_via_language(code)
     log.info("updated language code=%s payload=%s", code, payload)
     return JSONResponse({
         "code": row["code"],
         "display_label": row["display_label"],
-        "is_active": bool(row["is_active"]),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     })

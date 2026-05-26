@@ -238,12 +238,12 @@ async def list_tags_for_sdk() -> JSONResponse:
 
 
 @router.get("/languages")
-async def list_active_languages() -> JSONResponse:
-    """SDK-facing list of active languages. Inactive rows excluded; ordering is
-    `code ASC`. Empty registry → `[]`. Used by SDK to enumerate available
-    locales for subtitle pickers / drama-name resolution.
+async def list_languages() -> JSONResponse:
+    """SDK-facing list of every registered language. Ordering is `code ASC`;
+    empty registry → `[]`. Used by SDK to enumerate available locales for
+    subtitle pickers / drama-name resolution.
     """
-    rows = db.list_languages(active_only=True)
+    rows = db.list_languages()
     return JSONResponse([
         {"code": r["code"], "display_label": r["display_label"]}
         for r in rows

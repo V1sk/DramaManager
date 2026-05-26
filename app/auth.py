@@ -58,17 +58,17 @@ def logout_session(request: Request) -> None:
 
 
 def resolve_current_user(request: Request) -> dict | None:
-    """Resolve the session cookie to a fresh, active `users` row, or None.
+    """Resolve the session cookie to a fresh `users` row, or None.
 
     The cookie is only an identity claim; the row is re-read every call so a
-    deactivated account or a permission change takes effect on the next
-    request. A stale / invalid session is cleared as a side effect.
+    deleted account or a permission change takes effect on the next request.
+    A stale / invalid session is cleared as a side effect.
     """
     username = request.session.get("username")
     if not username:
         return None
     user = db.get_user(username)
-    if user is None or not user["is_active"]:
+    if user is None:
         request.session.clear()
         return None
     return user

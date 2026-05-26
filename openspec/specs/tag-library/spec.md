@@ -32,7 +32,7 @@ The service SHALL provide `POST /admin/tags` accepting form fields `slug` (requi
 
 On success the service SHALL atomically: insert the `tags` row with `created_at = updated_at = now`; insert a row in `translations` with `(entity_type='tag', entity_id=slug, lang_code=default_lang, field='label', value=label)`. If either insert fails the operation SHALL roll back so no partial state remains.
 
-If the slug already exists the response SHALL be 409. If `default_lang` is missing or inactive the response SHALL be 400 naming that field. If `label` is empty after trim the response SHALL be 400 naming `label`.
+If the slug already exists the response SHALL be 409. If `default_lang` is missing the response SHALL be 400 naming that field. If `label` is empty after trim the response SHALL be 400 naming `label`.
 
 #### Scenario: valid creation succeeds with default-lang label
 - **GIVEN** `languages` has active row `('zh-rCN', '简体中文', 1)`

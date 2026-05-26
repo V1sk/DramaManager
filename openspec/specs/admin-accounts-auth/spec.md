@@ -18,9 +18,9 @@ The system SHALL require a valid authenticated session to access any `/admin` ro
 - **WHEN** an operator submits a username with an incorrect password
 - **THEN** the system re-renders the login page with an error and does NOT establish a session
 
-#### Scenario: Unknown or disabled account
+#### Scenario: Unknown account
 
-- **WHEN** an operator submits credentials for a username that does not exist or whose `is_active` is `0`
+- **WHEN** an operator submits credentials for a username that does not exist
 - **THEN** the system rejects the login with the same generic error and does NOT establish a session
 
 #### Scenario: Logout
@@ -49,11 +49,11 @@ The system SHALL reject any request to a `/admin` route that lacks a valid sessi
 
 ### Requirement: Session reflects current account state on every request
 
-The system SHALL treat the session cookie as an identity claim only, re-reading the user's row on every request so that account deactivation and permission changes take effect immediately.
+The system SHALL treat the session cookie as an identity claim only, re-reading the user's row on every request so that account deletion and permission changes take effect immediately.
 
-#### Scenario: Account disabled while logged in
+#### Scenario: Account deleted while logged in
 
-- **WHEN** the admin sets a staff account's `is_active` to `0` while that staff member holds a valid session cookie
+- **WHEN** the admin deletes a staff account while that staff member holds a valid session cookie
 - **THEN** the staff member's next `/admin` request is rejected as unauthenticated
 
 #### Scenario: Permission revoked while logged in
@@ -92,7 +92,7 @@ Each account SHALL have a `role` of `admin` or `staff`. An `admin` account SHALL
 
 ### Requirement: Admin account management
 
-An `admin` account SHALL be able to create accounts, set and reset passwords, toggle `is_active`, toggle `role` and the permission flags, and delete accounts. Account-management routes SHALL be inaccessible to `staff` accounts.
+An `admin` account SHALL be able to create accounts, set and reset passwords, toggle `role` and the permission flags, and delete accounts. Accounts have no enabled/disabled state — to revoke access, the admin deletes the row. Account-management routes SHALL be inaccessible to `staff` accounts.
 
 #### Scenario: Admin creates a staff account
 
@@ -109,9 +109,9 @@ An `admin` account SHALL be able to create accounts, set and reset passwords, to
 - **WHEN** an admin submits a new password for an existing account via `POST /admin/accounts/{username}/password`
 - **THEN** the system stores the new hash and sets that account's `must_change_pw` to `1`
 
-#### Scenario: Admin updates permissions and status
+#### Scenario: Admin updates role or permissions
 
-- **WHEN** an admin submits `PATCH /admin/accounts/{username}` changing `role`, `is_active`, `can_delete`, or `can_sync`
+- **WHEN** an admin submits `PATCH /admin/accounts/{username}` changing `role`, `can_delete`, or `can_sync`
 - **THEN** the system persists the changes and they apply on the account's next request
 
 #### Scenario: Admin deletes an account
@@ -126,8 +126,8 @@ An `admin` account SHALL be able to create accounts, set and reset passwords, to
 
 #### Scenario: Admin cannot lock everyone out
 
-- **WHEN** an admin attempts to delete, deactivate, or demote the last remaining active `admin` account
-- **THEN** the system rejects the request and keeps at least one active admin
+- **WHEN** an admin attempts to delete or demote the last remaining `admin` account
+- **THEN** the system rejects the request and keeps at least one admin
 
 ### Requirement: Forced password change
 

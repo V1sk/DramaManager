@@ -65,13 +65,13 @@ The page's submit handler SHALL execute, in order, against the existing endpoint
 Failures in steps 2–5 SHALL NOT block the navigation in step 6; instead the destination page SHALL display a flash message describing which step failed and prompting the operator to retry from the detail page. Step 1's failure halts the flow and re-renders the form.
 
 #### Scenario: empty registry blocks create form
-- **GIVEN** `languages` has zero `is_active=1` rows
+- **GIVEN** `languages` has zero rows
 - **WHEN** the client requests `GET /admin/dramas/new`
 - **THEN** the response HTML disables the submit button
 - **AND** displays a message linking to `/admin/languages`
 
 #### Scenario: full-flow creation succeeds and navigates to detail
-- **GIVEN** at least one active language; a tag `urban`, an actor `zhang-san`
+- **GIVEN** at least one language; a tag `urban`, an actor `zhang-san`
 - **WHEN** the client submits the form with slug=ly, default_lang=zh-rCN, name=琅琊榜, synopsis="...", poster file, tags=[urban], actors=[zhang-san]
 - **THEN** all five POST/PUT calls succeed
 - **AND** the browser navigates to `/admin/dramas/ly`

@@ -47,7 +47,7 @@ Environment variables:
 Drama / language lifecycle (introduced by `drama-as-entity` + `i18n-foundation`):
 
 ```
-POST /admin/languages  →  language row (e.g. zh-rCN) exists, is_active=1
+POST /admin/languages  →  language row (e.g. zh-rCN) exists
        ↓
 POST /admin/dramas     →  drama row exists; FK on default_lang → languages.code
        ↓
@@ -58,9 +58,9 @@ DELETE /admin/dramas/{slug}         →  only allowed when 0 episodes; drama row
 DELETE /admin/languages/{code}      →  only allowed when no drama or translation references the code (FK + pre-check guards both ways)
 ```
 
-Tables: `languages` (code PK + display_label + is_active flag), `dramas` (slug PK + name + default_lang FK to languages), `translations` (entity_type, entity_id, lang_code FK to languages, field, value — the generic store for tag / actor / drama / subtitle translations once steps 3a–3d land), `episodes` (FK to dramas; same DRM / playlist columns as before).
+Tables: `languages` (code PK + display_label), `dramas` (slug PK + name + default_lang FK to languages), `translations` (entity_type, entity_id, lang_code FK to languages, field, value — the generic store for tag / actor / drama / subtitle translations once steps 3a–3d land), `episodes` (FK to dramas; same DRM / playlist columns as before).
 
-`is_active=0` keeps a language hidden from new drama creation and from `/api/languages` (the SDK list) while preserving any rows that already reference it. The first thing operators must do on a fresh deploy is seed at least one language via `/admin/languages`.
+There is no "active / inactive" state on languages or accounts — to remove either, delete the row. Languages are protected by FK (delete returns 409 if any drama / translation / subtitle still references the code; operator must clean up references first). The first thing operators must do on a fresh deploy is seed at least one language via `/admin/languages`.
 
 `init_db()` runs a one-shot self-test on startup: it tries an INSERT into `translations` with a non-existent `lang_code`; the FK MUST raise `IntegrityError`. If it doesn't, startup fails fast — the whole i18n / drama integrity story collapses without enforced FKs.
 
@@ -76,22 +76,22 @@ URL map:
 | `POST /logout` | 清会话，303 → `/login` |
 | `GET /admin/accounts` | HTML：账号管理页（建号 + 列表 + 每行角色/状态/权限/重置密码/删除）。`[gate]` admin |
 | `POST /admin/accounts` | form: `username`, `password`, `role`, `can_delete`, `can_sync`. 新号 `must_change_pw=1`。303 / 400 / 409 (重名)。`[gate]` admin |
-| `PATCH /admin/accounts/{username}` | JSON：可选 `role` / `is_active` / `can_delete` / `can_sync`。200 / 400 / 404 / 409 (最后一个 admin 不能停用/降级)。`[gate]` admin |
+| `PATCH /admin/accounts/{username}` | JSON：可选 `role` / `can_delete` / `can_sync`。200 / 400 / 404 / 409 (最后一个 admin 不能降级)。`[gate]` admin |
 | `POST /admin/accounts/{username}/password` | JSON `{password}`：管理员重置密码，置 `must_change_pw=1`。200 / 404。`[gate]` admin |
 | `DELETE /admin/accounts/{username}` | 204 / 404 / 409 (最后一个 admin 不能删)。`[gate]` admin |
 | `GET/POST /admin/account/password` | 自助改密页 + 提交（任意已登录账号）。提交校验当前密码，成功清 `must_change_pw` 并 303 → `/admin` |
 | `GET /admin/audit` | HTML：操作记录页，`?page=N` 分页（每页 50，最新在前）。`[gate]` admin |
 | `GET /admin` | management HTML: drama-create form (with default_lang dropdown sourced from `/api/languages`) + episode-upload form + episode list (5 s auto-refresh) |
 | `GET /admin/languages` | HTML: language registry (create form + table; toggle / delete per row) |
-| `GET /admin/languages.json` | JSON list of all languages (active + inactive); fields `code, display_label, is_active, created_at, updated_at` |
-| `POST /admin/languages` | form: `code`, `display_label`. 302 / 409 (code taken) / 400 (validation). `is_active=1` on insert. |
-| `PATCH /admin/languages/{code}` | JSON body with optional `display_label` and/or `is_active`. `code` itself is immutable. 200 / 400 / 404. |
+| `GET /admin/languages.json` | JSON list of all languages; fields `code, display_label, created_at, updated_at` |
+| `POST /admin/languages` | form: `code`, `display_label`. 302 / 409 (code taken) / 400 (validation). |
+| `PATCH /admin/languages/{code}` | JSON body with optional `display_label`. `code` itself is immutable. 200 / 400 / 404. |
 | `DELETE /admin/languages/{code}` | 204 / 404 / 409 with `{"error": ..., "dramas": n, "translations": m}` if referenced. `[gate]` can_delete |
 | `GET /admin/dramas/new` | HTML: drama-create form (slug + default_lang + name + synopsis + poster + tags multi-select + actors multi-select). Browser orchestrates 5 endpoints in sequence. |
 | `GET /admin/dramas/{slug}` | HTML: drama detail page (translations editor, tags / actors editors, episodes table with auto-increment upload, embedded poster strip). |
 | `GET /admin/dramas/{slug}/full` | JSON: aggregate read — drama row + per-language translations + tags + actors + episodes. Used by server render and client refresh. |
 | `GET /admin/dramas/{slug}/episodes/{ep}` | HTML: episode detail page with embedded hls.js player, subtitle list, cover / video re-upload, delete. |
-| `POST /admin/dramas` | multipart: `drama_slug`, `drama_name`, `default_lang`. `default_lang` MUST exist in `languages` AND be `is_active=1`. 302 / 400 (incl. inactive lang) / 409. |
+| `POST /admin/dramas` | multipart: `drama_slug`, `drama_name`, `default_lang`. `default_lang` MUST exist in `languages`. 302 / 400 / 409. |
 | `GET /admin/dramas` | JSON list of all dramas (`created_at DESC`); fields `slug, name, default_lang, ep_count, created_at, updated_at` |
 | `DELETE /admin/dramas/{slug}` | Removes drama row + translations + `OUT_DIR/{slug}/`; 409 if any episodes attached; 404 if unknown. `[gate]` can_delete |
 | `POST /admin/dramas/{slug}/episodes` | multipart `video`. Auto-increment `ep_number = MAX+1`. UNIQUE-collision retry up to 3×; persistent collision → 503. 404 if drama missing. |
@@ -99,7 +99,7 @@ URL map:
 | `POST /admin/dramas/{slug}/episodes/batch` | multipart `videos` (多文件). 每个文件名须以 `EP<n>` 开头（大小写不敏感）→ 集号。已存在的集走重传语义覆盖；`status=encoding` 的集跳过。返回逐文件结果 `{ok_count, error_count, results[]}`，部分失败不致命。**路由声明在 `episodes/{ep}` 之前**，否则 `batch` 字面段会被 `{ep}` 的 `^[0-9]+$` 捕获并 422。 |
 | `POST /admin/dramas/{slug}/subtitles/batch` | multipart `files` (多文件). 文件名须形如 `EP<n>-<lang>-说明.vtt\|.srt`（EP 大小写不敏感）；`<lang>` 按最长匹配解析自启用语言注册表（兼容 `zh-rCN` 这类带连字符的 code）。`.srt` 自动转 WebVTT。已存在的 (集, 语言) 字幕覆盖。返回逐文件结果，部分失败不致命。 |
 | `GET /admin/episodes` | JSON list of all episode rows (`created_at DESC`); each row carries `drama_name` via JOIN |
-| `GET /api/languages` | SDK: array of `{code, display_label}` for `is_active=1` rows; ordered by `code ASC`; empty registry → `[]` |
+| `GET /api/languages` | SDK: array of `{code, display_label}` for every registered language; ordered by `code ASC`; empty registry → `[]` |
 | `GET /api/episodes/{slug}/{ep}` | SDK endpoint; strict `EpisodeInfo` JSON; 404 unless `status=ready` |
 | `GET /api/dramas` | SDK drama catalog; `DramaSummary[]` ordered by `lastUpdatedAt DESC`; empty → `[]`; only dramas with ≥1 `ready` episode; `dramaName` sourced from `dramas.name` |
 | `GET /api/dramas/{slug}/episodes` | SDK per-drama episode list; full `EpisodeInfo[]` (with `drm` embedded) ordered by `ep_number ASC`; empty → `[]`; 422 on malformed slug |
@@ -288,7 +288,7 @@ pending_delete ─→ syncing ─→ (row 物理删除 + prod OSS 清理)
 - 新建 drama / 上传集 → `dirty`。
 - 编辑 drama 翻译 / 海报 / 标签 / 演员 → 该 drama 行 `dirty`（不影响其下集）。
 - 上传字幕 / 替换封面 / 重传视频 → 该集行 `dirty`（不影响 drama 行）。
-- Library 级联：tag PATCH / translation upsert/delete → 引用该 tag 的全部 drama 翻 dirty；actor 同；语言 `display_label` 改 → 该语言下有字幕的全部 drama 翻 dirty（`is_active` 切换不级联）。
+- Library 级联：tag PATCH / translation upsert/delete → 引用该 tag 的全部 drama 翻 dirty；actor 同；语言 `display_label` 改 → 该语言下有字幕的全部 drama 翻 dirty。
 - 进程崩溃后启动期 reap：`sync_status='syncing'` 的行被翻成 `sync_failed` + 错误 `"orphaned by restart"`。
 
 ### 双阶段删除
