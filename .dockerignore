@@ -1,0 +1,24 @@
+# Dev / IDE / OS noise
+.git
+.gitignore
+.idea
+.codex
+.claude
+.DS_Store
+.pytest_cache
+
+# Bytecode + venv
+__pycache__
+**/__pycache__
+*.pyc
+venv
+
+# Local state — bind-mounted into the container, never baked into the image
+out
+tmp
+hls.db
+hls.db-shm
+hls.db-wal
+
+# Secrets — provided via volume / build context per-host
+app/storage/credentials.py

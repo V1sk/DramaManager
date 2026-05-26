@@ -19,6 +19,26 @@ python3 -m venv venv
 ./venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
+**Docker 部署**（推荐部署方式，避免 ffmpeg / openssl / xxd 版本漂移）：
+
+```bash
+# one-time
+cp .env.example .env                              # 填 SESSION_SECRET_KEY + ADMIN_INITIAL_PASSWORD
+# 启用 OSS/TOS 时再 cp app/storage/credentials.example.py app/storage/credentials.py 填密钥
+                                                  # 并在 docker-compose.yml 取消那行 bind mount 注释
+
+docker compose up -d --build                      # 起服务，监听 0.0.0.0:8000
+docker compose logs -f hls                        # 看日志
+docker compose restart hls                        # 改 env / 改代码后重启
+docker compose down                               # 停服务
+```
+
+**volumes**：所有持久化在 `./data/`（`./data/out` 切片、`./data/hls.db`、`./data/tmp` 上传暂存）。备份只需 tar `./data/`。`./app/storage/credentials.py` 通过只读 bind mount 注入（启用桶时），不进镜像。
+
+**升级**：`git pull && docker compose up -d --build`。`init_db()` 的 `_migrate_add_columns` / `_migrate_drop_columns` 在启动期自动跑增量 schema 改动，不需要手动 migrate。
+
+**单进程约束**：Dockerfile 跑单 uvicorn 进程；并发编码靠 `PIPELINE_CONCURRENCY`（asyncio worker pool + per-episode lock 都在进程内）。**不要**改成 `uvicorn --workers > 1`，会让 in-process 队列 + 锁失效。
+
 URL 归属（HLS 自家 SDK 端点，本地审片预览用）：
 
 - **永远是业务 host 相对路径** (`/videos/...`, `/drm/...`): `videoTracks[].url` / `coverUrl` / `drm.keyUri` / `DramaSummary.posterUrl` 全部如此。m3u8 里的 `#EXT-X-MAP:URI` 与 segment 行也是相对文件名（`init-720p.mp4` / `seg-720p-0.m4s`），播放器按 m3u8 自身 host 通过 `/videos/` 静态挂载读本地切片。

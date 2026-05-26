@@ -8,3 +8,8 @@ app/oss_upload.py
 
 # Per-developer object-storage credentials (copy credentials.example.py).
 app/storage/credentials.py
+
+# Docker Compose: per-host secrets (`.env`, copy from .env.example) and the
+# bind-mounted persistent volume (`./data/`: OUT_DIR, hls.db, tmp).
+.env
+data/
