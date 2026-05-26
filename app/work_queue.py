@@ -17,6 +17,12 @@ class Job:
     drama_slug: str
     ep_number: int
     tmp_path: Path
+    # reupload-versioning: captured at enqueue time (NOT re-read from the DB
+    # in the worker). Routers compute the version when they call
+    # `upsert_pending` and plumb it here; that way a second re-upload that
+    # arrives while this job is still queued can't bump the row's version
+    # and silently retarget this job's output to the wrong path.
+    upload_version: int = 1
 
 
 _queue: asyncio.Queue[Job] | None = None
@@ -67,9 +73,11 @@ async def _handle_job(job: Job) -> bool:
     """
     slug = job.drama_slug
     ep_id = job.episode_id              # DB 里的完整 episode_id："{slug}-ep-{n}"（SDK 契约）
-    ep_dir = f"ep-{job.ep_number}"      # 目录名 / URL 段 / key 文件名前缀 —— 必须与 admin.py
-                                        # 里 ep_dir_name 一致，且与 /drm router 的 pattern
-                                        # `^ep-[0-9]+$` 对齐。
+    # 目录名 / URL 段 / key 文件名前缀。reupload-versioning：v1 仍是 `ep-{n}`，
+    # v2+ 变成 `ep-{n}-v{V}`，让客户端缓存（按 URL 命中）跟着 m3u8 的新路径走
+    # ——避免新 key + 旧 segments 静默乱码。/drm router 的 pattern
+    # `^[a-z0-9][a-z0-9-]*$` 已能匹配两种形态。
+    ep_dir = db.episode_ep_dir(job.ep_number, job.upload_version)
     out_dir = settings.out_dir / slug
     # 相对路径：写进 m3u8 的 #EXT-X-KEY:URI 是同一个字符串，播放器按 playlist 自身的
     # host 补全；SDK 主动调用也基于同一个 host，和 m3u8 里 verbatim 一致。

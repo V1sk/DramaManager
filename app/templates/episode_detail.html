@@ -16,6 +16,7 @@
             <h1 class="text-headline-lg text-on-surface">EP{{ episode.ep_number }}</h1>
             <span id="ep-status-badge" class="badge {{ episode.status }}">{{ episode.status }}</span>
             <span id="ep-sync-badge" class="sync-badge {{ episode.sync_status or 'dirty' }}" title="{{ episode.sync_error or '' }}">{{ episode.sync_status or 'dirty' }}</span>
+            {% if (episode.upload_version or 1) > 1 %}<span class="badge active" title="第 {{ episode.upload_version }} 次上传；旧版本仍在原路径保留">v{{ episode.upload_version }}</span>{% endif %}
             <span id="ep-progress-text" class="progress-text">{% if episode.status in ['encoding', 'pending'] and episode.progress %}{{ episode.progress }}{% endif %}</span>
         </div>
         <div class="mt-1 text-body-sm text-on-surface-variant flex items-center gap-2 flex-wrap">
@@ -158,7 +159,7 @@
                     重传视频
                 </button>
                 <input type="file" id="reupload-file" accept="video/*" class="hidden">
-                <p class="text-[11px] text-on-surface-variant/70 -mt-1">重传会清掉当前视频 + DRM key，并重新编码</p>
+                <p class="text-[11px] text-on-surface-variant/70 -mt-1">每次重传走新版本 (v2 / v3 / …)：新路径 + 新 DRM key 上传到 OSS / TOS，旧路径仍保留给已缓存该集的客户端使用，避免出现「拿到新 key 解旧 segments」的乱码。</p>
                 <button class="btn btn-danger w-full mt-2" id="delete-ep-btn">
                     <span class="material-symbols-outlined text-[16px]">delete</span>
                     删除本集
@@ -169,6 +170,34 @@
                 </button>
             </div>
         </div>
+
+        <!-- Upload history (reupload-versioning) -->
+        {% if upload_history %}
+        <div class="bg-surface-container-high border border-outline-variant rounded-lg p-5">
+            <h3 class="text-headline-sm mb-3 flex items-center gap-2">
+                <span class="material-symbols-outlined text-secondary-fixed-dim text-[18px]">history</span>
+                上传记录
+            </h3>
+            <ul class="flex flex-col gap-2 text-body-sm">
+                {% for u in upload_history %}
+                <li class="flex items-start justify-between gap-3 px-2 py-1.5 rounded bg-surface-container border border-outline-variant/60">
+                    <div class="min-w-0">
+                        <div class="flex items-center gap-2">
+                            <span class="badge {% if u.version == (episode.upload_version or 1) %}active{% else %}inactive{% endif %}">v{{ u.version }}</span>
+                            {% if u.version == (episode.upload_version or 1) %}<span class="text-[11px] text-on-surface-variant">当前版本</span>{% endif %}
+                        </div>
+                        <div class="text-[11px] text-on-surface-variant/70 mt-1 truncate" title="{{ u.source_filename or '' }}">{{ u.source_filename or '—' }}</div>
+                    </div>
+                    <div class="text-[11px] text-on-surface-variant text-right whitespace-nowrap">
+                        <div class="mono">{{ u.uploaded_at }}</div>
+                        <div>by {{ u.uploaded_by or '—' }}</div>
+                    </div>
+                </li>
+                {% endfor %}
+            </ul>
+            <p class="text-[11px] text-on-surface-variant/70 mt-3">旧版本对应路径 (本地目录 + 桶前缀 + DRM key) 不会自动清理；如要清空,删除整集会一次性扫掉所有版本。</p>
+        </div>
+        {% endif %}
     </aside>
 </div>
 

@@ -114,10 +114,30 @@ CREATE TABLE IF NOT EXISTS episodes (
   sync_status      TEXT    NOT NULL DEFAULT 'dirty',
   sync_error       TEXT,
   last_synced_at   TEXT,
+  -- reupload-versioning: bumped on every re-upload (POST .../episodes/{ep}).
+  -- v1 keeps the legacy `ep-{n}` path; v2+ uses `ep-{n}-v{V}` for the local
+  -- directory, key-file name, bucket prefix, and `#EXT-X-KEY:URI`. Stale
+  -- client caches that pinned the old path keep working off the old version's
+  -- artifacts; the new EpisodeInfo points at the new version.
+  upload_version   INTEGER NOT NULL DEFAULT 1,
   created_at       TEXT    NOT NULL,
   updated_at       TEXT    NOT NULL,
   UNIQUE(drama_slug, ep_number),
   FOREIGN KEY (drama_slug) REFERENCES dramas(slug) ON DELETE RESTRICT
+);
+
+-- reupload-versioning: append-only history of episode uploads. Each
+-- (episode_id, version) recorded with timestamp, source filename, and the
+-- operator who triggered it. Cascades on episode deletion.
+CREATE TABLE IF NOT EXISTS episode_uploads (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  episode_id       TEXT    NOT NULL,
+  version          INTEGER NOT NULL,
+  source_filename  TEXT,
+  uploaded_by      TEXT,
+  uploaded_at      TEXT    NOT NULL,
+  UNIQUE(episode_id, version),
+  FOREIGN KEY (episode_id) REFERENCES episodes(episode_id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS subtitles (
@@ -366,6 +386,10 @@ def _migrate_add_columns(conn: sqlite3.Connection) -> None:
         "episodes": [
             ("progress", "TEXT"),
             ("source_path", "TEXT"),
+            # reupload-versioning: every existing episode is treated as v1 (its
+            # files live in the unsuffixed `ep-{n}` path). v2+ get the
+            # `ep-{n}-v{V}` suffix on re-upload.
+            ("upload_version", "INTEGER NOT NULL DEFAULT 1"),
         ],
         # `free_episodes` was added after the dramas table shipped; existing
         # rows must back-fill to the default value (3) so the column is
@@ -432,6 +456,18 @@ def _verify_fk_enforcement() -> None:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def episode_ep_dir(ep_number: int, upload_version: int) -> str:
+    """Episode directory / URL segment / key-file name for a given version.
+
+    v1 keeps the legacy `ep-{n}` path so existing dramas are untouched. v2+
+    add the `-v{V}` suffix; that way every re-upload writes to a *fresh* path,
+    and any client (or CDN) that cached the old m3u8 / segments / DRM key
+    keeps fetching the old version's still-on-disk artifacts instead of
+    silently mixing new key bytes with old encrypted segments.
+    """
+    return f"ep-{ep_number}" if upload_version <= 1 else f"ep-{ep_number}-v{upload_version}"
 
 
 # ---------------------------------------------------------------------------
@@ -1107,15 +1143,20 @@ def upsert_pending(
     width: int | None = None,
     height: int | None = None,
     source_path: str | None = None,
-) -> str | None:
+) -> tuple[str | None, int]:
     """Insert a new pending row, or overwrite an existing (drama_slug, ep_number) row
-    in place. On overwrite, created_at is preserved, error_message is cleared, DRM
-    fields are cleared, and updated_at is refreshed.
+    in place.
 
-    `source_path` is the temp upload file the pipeline will consume; it is kept
-    on the row so a failed episode can be retried without a re-upload. On
-    overwrite the *previous* `source_path` is returned (when it differs) so the
-    caller can delete the now-orphaned file from a prior failed attempt.
+    Returns `(old_source_path_or_None, upload_version)`:
+      - `old_source_path_or_None`: on overwrite, the previous `source_path` (if
+        different) so the caller can delete the now-orphaned temp file.
+      - `upload_version`: 1 on insert, `previous + 1` on overwrite. The caller
+        uses this to derive the per-version `ep_dir` (see `episode_ep_dir`)
+        and to plumb the version through the pipeline job so cached clients
+        don't end up decrypting old segments with the new key.
+
+    On overwrite, created_at is preserved, error_message is cleared, DRM
+    fields are cleared, and updated_at is refreshed.
 
     The drama row keyed by `drama_slug` MUST already exist (FK enforces this);
     the upload handler is responsible for the precondition check.
@@ -1123,8 +1164,8 @@ def upsert_pending(
     now = _now_iso()
     with _connect() as conn:
         existing = conn.execute(
-            "SELECT id, created_at, source_path FROM episodes "
-            "WHERE drama_slug=? AND ep_number=?",
+            "SELECT id, created_at, source_path, upload_version "
+            "FROM episodes WHERE drama_slug=? AND ep_number=?",
             (drama_slug, ep_number),
         ).fetchone()
         if existing is None:
@@ -1133,9 +1174,9 @@ def upsert_pending(
                 INSERT INTO episodes (
                   drama_slug, ep_number, episode_id, status,
                   duration_ms, cover_url, width, height, source_filename,
-                  source_path, progress, sync_status,
+                  source_path, progress, sync_status, upload_version,
                   created_at, updated_at
-                ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, NULL, 'dirty', ?, ?)
+                ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, NULL, 'dirty', 1, ?, ?)
                 """,
                 (
                     drama_slug, ep_number, episode_id,
@@ -1143,44 +1184,47 @@ def upsert_pending(
                     source_path, now, now,
                 ),
             )
-            return None
-        else:
-            # Re-upload: keep last_synced_at intact (the row's prior sync history
-            # remains meaningful — operators may want "last synced 2 days ago,
-            # then re-encoded today" visible). sync_status flips back to dirty
-            # because the new content has not yet been pushed to prod.
-            conn.execute(
-                """
-                UPDATE episodes SET
-                  episode_id = ?,
-                  status = 'pending',
-                  duration_ms = ?,
-                  cover_url = ?,
-                  width = ?,
-                  height = ?,
-                  source_filename = ?,
-                  source_path = ?,
-                  progress = NULL,
-                  play_url = NULL,
-                  key_uri = NULL,
-                  key_b64 = NULL,
-                  iv_hex = NULL,
-                  error_message = NULL,
-                  sync_status = 'dirty',
-                  sync_error = NULL,
-                  updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    episode_id, duration_ms, cover_url,
-                    width, height, source_filename, source_path,
-                    now, existing["id"],
-                ),
-            )
+            return None, 1
+
+        # Re-upload: keep last_synced_at intact (the row's prior sync history
+        # remains meaningful — operators may want "last synced 2 days ago,
+        # then re-encoded today" visible). sync_status flips back to dirty
+        # because the new content has not yet been pushed to prod.
+        new_version = (existing["upload_version"] or 1) + 1
+        conn.execute(
+            """
+            UPDATE episodes SET
+              episode_id = ?,
+              status = 'pending',
+              duration_ms = ?,
+              cover_url = ?,
+              width = ?,
+              height = ?,
+              source_filename = ?,
+              source_path = ?,
+              progress = NULL,
+              play_url = NULL,
+              key_uri = NULL,
+              key_b64 = NULL,
+              iv_hex = NULL,
+              error_message = NULL,
+              sync_status = 'dirty',
+              sync_error = NULL,
+              upload_version = ?,
+              updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                episode_id, duration_ms, cover_url,
+                width, height, source_filename, source_path,
+                new_version, now, existing["id"],
+            ),
+        )
         old_source = existing["source_path"]
-        if old_source and old_source != source_path:
-            return old_source
-        return None
+        old_source_to_delete = (
+            old_source if (old_source and old_source != source_path) else None
+        )
+        return old_source_to_delete, new_version
 
 
 def set_status(
@@ -2532,3 +2576,43 @@ def count_audit_entries() -> int:
         return conn.execute(
             "SELECT COUNT(*) AS n FROM audit_log"
         ).fetchone()["n"]
+
+
+# ---------------------------------------------------------------------------
+# episode upload history (reupload-versioning)
+# ---------------------------------------------------------------------------
+
+
+def record_episode_upload(
+    *,
+    episode_id: str,
+    version: int,
+    source_filename: str | None,
+    uploaded_by: str | None,
+) -> None:
+    """Append one row to `episode_uploads`. Called by the upload routes right
+    after `upsert_pending` succeeds, before the worker starts.
+
+    Idempotent on (episode_id, version) — a retry of the same version (the
+    `/retry` route) silently no-ops via INSERT OR IGNORE rather than blowing
+    up on the UNIQUE constraint.
+    """
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO episode_uploads"
+            "(episode_id, version, source_filename, uploaded_by, uploaded_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (episode_id, version, source_filename, uploaded_by, _now_iso()),
+        )
+
+
+def list_episode_uploads(episode_id: str) -> list[dict]:
+    """Upload history for one episode, newest version first. Used by the
+    episode detail page."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT version, source_filename, uploaded_by, uploaded_at "
+            "FROM episode_uploads WHERE episode_id=? ORDER BY version DESC",
+            (episode_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]

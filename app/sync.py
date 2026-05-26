@@ -319,22 +319,30 @@ async def _execute_episode_delete_sync(slug: str, ep_number: int) -> None:
         return
 
     if settings.storage_enabled:
-        ep_dir = f"ep-{ep_number}"
-        # assets-to-oss: single prefix sweep covers all ladders + cover + subtitles.
-        try:
-            await asyncio.to_thread(
-                publish.unpublish_episode_from_prod, slug, ep_dir,
-            )
-        except Exception as e:  # noqa: BLE001
-            log.warning(
-                "unpublish_episode_from_prod failed slug=%s ep=%s: %s",
-                slug, ep_number, e,
-            )
-            db.set_episode_sync_status(
-                slug, ep_number, "sync_failed",
-                error=f"business DELETE ok but prod OSS cleanup failed: {e}",
-            )
-            return
+        # reupload-versioning: clean every version from prod, not just v1.
+        # The current row's `upload_version` plus every recorded upload row.
+        row = db.get_by_slug_ep(slug, ep_number)
+        versions: set[int] = {
+            u["version"] for u in db.list_episode_uploads(row["episode_id"])
+        } if row else set()
+        if row:
+            versions.add(int(row["upload_version"] or 1))
+        for v in (versions or {1}):
+            ep_dir = db.episode_ep_dir(ep_number, v)
+            try:
+                await asyncio.to_thread(
+                    publish.unpublish_episode_from_prod, slug, ep_dir,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "unpublish_episode_from_prod failed slug=%s ep=%s v=%d: %s",
+                    slug, ep_number, v, e,
+                )
+                db.set_episode_sync_status(
+                    slug, ep_number, "sync_failed",
+                    error=f"business DELETE ok but prod OSS cleanup failed (v{v}): {e}",
+                )
+                return
 
     try:
         db.physical_delete_episode(slug, ep_number)
@@ -457,7 +465,10 @@ async def handle_episode_sync(slug: str, ep_number: int) -> None:
 
     db.set_episode_sync_status(slug, ep_number, "syncing")
     try:
-        ep_dir = f"ep-{ep_number}"
+        # Sync the CURRENT version's artifacts to prod. Older versions left
+        # behind by reupload-versioning stay in their own prod prefix
+        # (`ep-{n}-v{V}/`) so any client that pinned them keeps playing.
+        ep_dir = db.episode_ep_dir(ep_number, int(row["upload_version"] or 1))
         playlists: dict[str, str] = {}
         cover_prod_key: str | None = None
         subtitles_prod: list[dict] | None = None

@@ -116,11 +116,18 @@ Upload → pipeline lifecycle (all synchronous work happens in the request handl
 1. Validate path (`drama_slug ~ ^[a-z0-9][a-z0-9-]*$`; for re-upload, `ep` numeric). Drama must already exist (404 otherwise). For auto-increment (`POST /admin/dramas/{slug}/episodes`), the server computes `ep_number = MAX(ep_number)+1`. For re-upload (`POST /admin/dramas/{slug}/episodes/{ep}`), the episode must exist and not be in `status=encoding` (409 otherwise).
 2. Stream upload to `UPLOAD_TMP_DIR/upload-<uuid>.mp4`.
 3. `ffprobe` → `duration_ms` + `width` + `height`（源视频 codec dimension；用于推导 `EpisodeInfo.videoTracks` 每档的 width / height）。
-4. `ffmpeg -ss 0 -vframes 1 -vf scale=-2:720` → `OUT_DIR/{slug}/ep-{n}/cover.jpg`.
-5. Upsert `episodes` row: `status=pending`, `episode_id="{slug}-ep-{n}"`, cover URL set.
+4. `ffmpeg -ss 0 -vframes 1 -vf scale=-2:720` → `OUT_DIR/{slug}/ep-{n}/cover.jpg`（cover 不随版本变，始终写 v1 目录）。
+5. Upsert `episodes` row: `status=pending`, `episode_id="{slug}-ep-{n}"`, cover URL set. **reupload-versioning**: 新集 `upload_version=1`；重传时该列自增（v2 / v3 …），upsert 返回 `(old_source, new_version)`，路由把版本号塞进 `Job.upload_version` 并写一条 `episode_uploads` 记录（含上传者、源文件名、时间戳）。
 6. Enqueue job on the global `asyncio.Queue` and 302 back to `/admin`.
-7. A pool of `PIPELINE_CONCURRENCY` worker coroutines (default 2) pulls from the queue; jobs for different episodes run in parallel, jobs for the same `episode_id` are serialized by a per-episode `asyncio.Lock` in `queue.py` (they share `ep-{n}/` + `keys/` and would clobber each other). Each worker flips `status=encoding`, runs `pipeline.sh <tmp> {OUT_DIR}/{slug} ep-{n} /drm/{slug}/ep-{n}/key` (the 4th arg is the host-relative key URI that ends up verbatim in `#EXT-X-KEY:URI`), reads `{OUT_DIR}/{slug}/keys/ep-{n}.key.b64` + `.iv`, sets `status=ready` with all DRM / play URL fields. On non-zero exit: `status=failed` with the last 4 KiB of stderr in `error_message` (artifacts under `OUT_DIR` are NOT auto-cleaned — kept for post-mortem). Temp upload file is always removed.
+7. A pool of `PIPELINE_CONCURRENCY` worker coroutines (default 2) pulls from the queue; jobs for different episodes run in parallel, jobs for the same `episode_id` are serialized by a per-episode `asyncio.Lock` in `queue.py`. Each worker computes `ep_dir = db.episode_ep_dir(ep_number, job.upload_version)`（v1 → `ep-{n}`，v2+ → `ep-{n}-v{V}`），flips `status=encoding`，runs `pipeline.sh <tmp> {OUT_DIR}/{slug} {ep_dir} /drm/{slug}/{ep_dir}/key`（第 4 个参数是写进 `#EXT-X-KEY:URI` 的相对路径，verbatim），reads `{OUT_DIR}/{slug}/keys/{ep_dir}.key.b64` + `.iv`, sets `status=ready` 同时把 `play_url` / `key_uri` 写成本次版本的路径。On non-zero exit: `status=failed` with the last 4 KiB of stderr in `error_message` (artifacts under `OUT_DIR` are NOT auto-cleaned — kept for post-mortem). Temp upload file is always removed.
 8. On process restart any row left in `status=encoding` is flipped to `failed` with `error_message="orphaned by restart"`.
+
+**reupload-versioning（重传路径版本化）**：客户端 AES-128-CBC 解密用错 key 不会冒一个干净的「key mismatch」错——会拿新 key 解旧 segments，静默乱码。所以每次重传必须落到一组新路径上，让客户端缓存按 URL 自然 miss、回源拿新版本，老缓存仍能拿到老路径上还在的老切片+老 key 把这集播完。落地方式：
+- `episodes.upload_version` 自增；`episode_uploads(episode_id, version, source_filename, uploaded_by, uploaded_at)` 表记录每次重传，episode 删除时 CASCADE 清掉。
+- 路径派生用 `db.episode_ep_dir(ep_number, version)` 唯一来源：v1 = `ep-{n}`（不打扰存量数据）；v2+ = `ep-{n}-v{V}`。本地目录、桶 staging/prod 前缀、`#EXT-X-KEY:URI`、`videoTracks[].url`、`drm.keyUri` 全部带这个后缀；DRM router 的段 pattern (`^[a-z0-9][a-z0-9-]*$`) 已能匹配两种形态，无需改动。
+- Cover.jpg + subtitles 不版本化，固定在 v1 目录下（不加密，无 key-mismatch 风险）。
+- 旧版本**不会自动清理**：留在本地 + staging/prod 桶里，等过渡期老客户端用完。删除整集 (`DELETE /admin/episodes/...`) 会一次性扫掉所有版本的本地目录 / 密钥 / staging 前缀；prod 由 sync 触发 `unpublish_episode_from_prod` 按版本列表挨个清。后续如需 GC 仅留最近 N 版,需另写脚本（目前没有）。
+- 同一集的并发重传(队列里堆了 v2 + v3 两个 Job 时)由 `_episode_locks` 串行化；Job 自己捕获了版本号,不会被后入队的 upsert 反向改写。
 
 Schema changes are destructive across the `drama-as-entity` deploy: delete `hls.db` before redeploy. There is no production data to preserve. See `openspec/specs/drama-entity/` (after archival) or `openspec/changes/drama-as-entity/` (in flight) for the spec.
 
@@ -230,7 +237,7 @@ Drama/prod/zhetian/ep-1/720p/seg-720p-1.m4s
 
 - **桶 CORS** 必须允许 GET 来自业务 host 的 Origin，否则 hls.js / 浏览器播放会被 CORS 拒（ExoPlayer / iOS 原生 HLS 不走 CORS，不受影响）。两个前缀共用一套 CORS；切到 TOS 时记得在 TOS 控制台也配同样规则。
 - **AK/SK 走 gitignore 的 `app/storage/credentials.py`**（4 个常量 `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET` / `TOS_ACCESS_KEY` / `TOS_SECRET_KEY`），该文件不进 git——fresh clone 后 `cp app/storage/credentials.example.py app/storage/credentials.py` 再填自己的密钥（按人分配）。文件缺失时 provider import 抛带提示的 `RuntimeError`。endpoint / bucket（OSS `photobundle` / TOS `coocent-drama`）不是密钥，仍硬编码在各自 provider。前缀常量 (`Drama/staging` / `Drama/prod`) 在两个 provider 里独立写，两边保持一致。
-- **本地切片不会被自动删**：上传到桶成功后 `OUT_DIR/{slug}/ep-{n}/` 仍保留。`DELETE /admin/episodes/{slug}/{ep}` 现在会同步清 staging 桶对象（warnings 收集失败项）；prod 桶对象由后续 sync 触发的 `unpublish_*_from_prod` 清掉。
+- **本地切片不会被自动删**：上传到桶成功后 `OUT_DIR/{slug}/ep-{n}/`（及 `ep-{n}-v{V}/`）仍保留。`DELETE /admin/episodes/{slug}/{ep}` 会按 `episode_uploads` 列出的所有版本一并清掉本地目录 + staging 桶对象（warnings 收集失败项）；prod 桶对象由后续 sync 触发的 `unpublish_episode_from_prod` 按版本列表挨个清。重传产生的旧版本本身不会自动 GC,要靠 episode 删除统一回收。
 - **切换 provider 时桶内已有的对象不会自动迁移**。从 OSS 切到 TOS（或反向）要先手工把旧桶里 `Drama/staging` + `Drama/prod` 全量复制到新桶，或者跑 `scripts/migrate_to_oss.py` 重新发布（脚本现在跟随 `STORAGE_PROVIDER` 走，会向当前选中的桶写）。
 
 ### Manual sync — staging→prod 拷贝原语（`app/publish.py`）

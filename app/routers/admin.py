@@ -99,6 +99,7 @@ async def admin_episode_detail_page(
         raise HTTPException(status_code=404, detail=f"episode '{drama_slug}/{ep_number}' not found")
     drama = db.get_drama(drama_slug)
     subtitles = db.list_subtitles_for_slug_ep(drama_slug, ep_number)
+    upload_history = db.list_episode_uploads(episode["episode_id"])
     return _TEMPLATES.TemplateResponse(
         request,
         "episode_detail.html",
@@ -106,6 +107,7 @@ async def admin_episode_detail_page(
             "drama": drama,
             "episode": episode,
             "subtitles": subtitles,
+            "upload_history": upload_history,
             "nav_active": "home",
         },
     )
@@ -245,16 +247,25 @@ def _process_episode_upload(
     drama_slug: str,
     ep_number: int,
     video: UploadFile,
-) -> Path:
-    """Shared upload pipeline used by both the auto-increment and the
-    re-upload endpoints. Streams the upload to UPLOAD_TMP_DIR, runs ffprobe
+) -> tuple[Path, int]:
+    """Shared upload pipeline used by both the batch route and the single
+    re-upload route. Streams the upload to UPLOAD_TMP_DIR, runs ffprobe
     (duration + dimensions), extracts the cover, and persists the row via
-    `upsert_pending`. Returns the temp path for the queue job.
+    `upsert_pending`. Returns `(tmp_path, upload_version)` — the caller
+    plumbs `upload_version` through to the queue job.
+
+    Cover.jpg always lives in the v1 directory `ep-{n}/` regardless of the
+    current upload_version: it's metadata, not encrypted content, so cached
+    clients won't be silently broken by an in-place overwrite. Segments and
+    keys get the version suffix; cover does not.
 
     Raises HTTPException on validation/IO failure (with the temp file already
     cleaned up).
     """
     episode_id = f"{drama_slug}-ep-{ep_number}"
+    # Cover.jpg lives in the v1 directory regardless of upload_version (see
+    # docstring). Encrypted segments / m3u8 / key go under the versioned dir,
+    # which the worker computes from `upload_version` returned below.
     ep_dir_name = f"ep-{ep_number}"
     episode_dir = settings.out_dir / drama_slug / ep_dir_name
 
@@ -306,7 +317,7 @@ def _process_episode_upload(
 
     cover_url = f"/videos/{drama_slug}/{ep_dir_name}/cover.jpg"
 
-    old_source = db.upsert_pending(
+    old_source, upload_version = db.upsert_pending(
         drama_slug=drama_slug,
         ep_number=ep_number,
         episode_id=episode_id,
@@ -325,7 +336,7 @@ def _process_episode_upload(
             Path(old_source).unlink(missing_ok=True)
         except OSError as e:
             log.warning("failed to remove orphaned source %s: %s", old_source, e)
-    return tmp_path
+    return tmp_path, upload_version
 
 
 def _next_ep_number(drama_slug: str) -> int:
@@ -341,6 +352,7 @@ def _next_ep_number(drama_slug: str) -> int:
 
 @router.post("/admin/dramas/{drama_slug}/episodes")
 async def admin_upload_next_episode(
+    request: Request,
     drama_slug: str = PathParam(..., pattern=r"^[a-z0-9][a-z0-9-]*$"),
     video: UploadFile = File(...),
 ) -> RedirectResponse:
@@ -410,7 +422,7 @@ async def admin_upload_next_episode(
 
         cover_url = f"/videos/{drama_slug}/{ep_dir_name}/cover.jpg"
         try:
-            db.upsert_pending(
+            _, upload_version = db.upsert_pending(
                 drama_slug=drama_slug,
                 ep_number=next_ep,
                 episode_id=episode_id,
@@ -426,13 +438,23 @@ async def admin_upload_next_episode(
             last_err = e
             continue  # retry with a freshly-computed next_ep
 
+        db.record_episode_upload(
+            episode_id=episode_id,
+            version=upload_version,
+            source_filename=video.filename or "",
+            uploaded_by=request.session.get("username"),
+        )
         await enqueue(Job(
             episode_id=episode_id,
             drama_slug=drama_slug,
             ep_number=next_ep,
             tmp_path=tmp_path,
+            upload_version=upload_version,
         ))
-        log.info("enqueued auto-increment slug=%s ep=%s", drama_slug, episode_id)
+        log.info(
+            "enqueued auto-increment slug=%s ep=%s v=%d",
+            drama_slug, episode_id, upload_version,
+        )
         return RedirectResponse(url=f"/admin/dramas/{drama_slug}", status_code=302)
 
     raise HTTPException(
@@ -446,6 +468,7 @@ _EP_PREFIX_RE = re.compile(r"^EP(\d+)", re.IGNORECASE)
 
 @router.post("/admin/dramas/{drama_slug}/episodes/batch")
 async def admin_batch_upload_episodes(
+    request: Request,
     drama_slug: str = PathParam(..., pattern=r"^[a-z0-9][a-z0-9-]*$"),
     videos: list[UploadFile] = File(...),
 ) -> JSONResponse:
@@ -506,7 +529,7 @@ async def admin_batch_upload_episodes(
             continue
 
         try:
-            tmp_path = _process_episode_upload(drama_slug, ep_number, video)
+            tmp_path, upload_version = _process_episode_upload(drama_slug, ep_number, video)
         except HTTPException as e:
             await video.close()
             results.append({
@@ -517,13 +540,23 @@ async def admin_batch_upload_episodes(
         await video.close()
 
         episode_id = f"{drama_slug}-ep-{ep_number}"
+        db.record_episode_upload(
+            episode_id=episode_id,
+            version=upload_version,
+            source_filename=filename,
+            uploaded_by=request.session.get("username"),
+        )
         await enqueue(Job(
             episode_id=episode_id,
             drama_slug=drama_slug,
             ep_number=ep_number,
             tmp_path=tmp_path,
+            upload_version=upload_version,
         ))
-        log.info("enqueued batch slug=%s ep=%s file=%s", drama_slug, episode_id, filename)
+        log.info(
+            "enqueued batch slug=%s ep=%s v=%d file=%s",
+            drama_slug, episode_id, upload_version, filename,
+        )
         results.append({
             "filename": filename, "ep_number": ep_number, "ok": True,
             "detail": "已入队",
@@ -539,6 +572,7 @@ async def admin_batch_upload_episodes(
 
 @router.post("/admin/dramas/{drama_slug}/episodes/{ep}")
 async def admin_reupload_episode(
+    request: Request,
     drama_slug: str = PathParam(..., pattern=r"^[a-z0-9][a-z0-9-]*$"),
     ep: str = PathParam(..., pattern=r"^[0-9]+$"),
     video: UploadFile = File(...),
@@ -566,17 +600,27 @@ async def admin_reupload_episode(
     if video is None or not video.filename:
         raise HTTPException(status_code=400, detail="video file is required")
 
-    tmp_path = _process_episode_upload(drama_slug, ep_number, video)
+    tmp_path, upload_version = _process_episode_upload(drama_slug, ep_number, video)
     await video.close()
 
     episode_id = f"{drama_slug}-ep-{ep_number}"
+    db.record_episode_upload(
+        episode_id=episode_id,
+        version=upload_version,
+        source_filename=video.filename or "",
+        uploaded_by=request.session.get("username"),
+    )
     await enqueue(Job(
         episode_id=episode_id,
         drama_slug=drama_slug,
         ep_number=ep_number,
         tmp_path=tmp_path,
+        upload_version=upload_version,
     ))
-    log.info("enqueued re-upload slug=%s ep=%s", drama_slug, episode_id)
+    log.info(
+        "enqueued re-upload slug=%s ep=%s v=%d",
+        drama_slug, episode_id, upload_version,
+    )
     return RedirectResponse(
         url=f"/admin/dramas/{drama_slug}/episodes/{ep_number}",
         status_code=302,
@@ -616,13 +660,18 @@ async def admin_retry_episode(
 
     episode_id = row["episode_id"]
     db.set_status(episode_id, "pending")
+    # Retry reuses the existing upload_version — same source file, same paths.
     await enqueue(Job(
         episode_id=episode_id,
         drama_slug=drama_slug,
         ep_number=ep_number,
         tmp_path=Path(source_path),
+        upload_version=int(row.get("upload_version") or 1),
     ))
-    log.info("enqueued retry slug=%s ep=%s", drama_slug, episode_id)
+    log.info(
+        "enqueued retry slug=%s ep=%s v=%d",
+        drama_slug, episode_id, int(row.get("upload_version") or 1),
+    )
     return JSONResponse({"ok": True})
 
 
@@ -644,26 +693,32 @@ async def admin_delete_episode(
             detail="can't delete while encoding; wait until status is ready/failed",
         )
 
-    ep_dir_name = f"ep-{ep_number}"
-    ep_dir_path = settings.out_dir / drama_slug / ep_dir_name
+    # reupload-versioning: collect every version this episode ever produced so
+    # we sweep all of them (v1 `ep-{n}/` + v2+ `ep-{n}-v{V}/`). Legacy rows
+    # without an episode_uploads entry fall back to the row's upload_version.
+    upload_versions = {u["version"] for u in db.list_episode_uploads(row["episode_id"])}
+    upload_versions.add(int(row.get("upload_version") or 1))
+    ep_dir_names = [db.episode_ep_dir(ep_number, v) for v in sorted(upload_versions)]
     keys_dir_path = settings.out_dir / drama_slug / "keys"
     warnings: list[str] = []
 
-    try:
-        shutil.rmtree(ep_dir_path)
-    except FileNotFoundError:
-        pass
-    except OSError as e:
-        log.warning("failed to remove ep dir %s: %s", ep_dir_path, e)
-        warnings.append(str(ep_dir_path))
-
-    for ext in ("key", "iv", "key.b64"):
-        key_file = keys_dir_path / f"{ep_dir_name}.{ext}"
+    for ep_dir_name in ep_dir_names:
+        ep_dir_path = settings.out_dir / drama_slug / ep_dir_name
         try:
-            key_file.unlink(missing_ok=True)
+            shutil.rmtree(ep_dir_path)
+        except FileNotFoundError:
+            pass
         except OSError as e:
-            log.warning("failed to remove key file %s: %s", key_file, e)
-            warnings.append(str(key_file))
+            log.warning("failed to remove ep dir %s: %s", ep_dir_path, e)
+            warnings.append(str(ep_dir_path))
+
+        for ext in ("key", "iv", "key.b64"):
+            key_file = keys_dir_path / f"{ep_dir_name}.{ext}"
+            try:
+                key_file.unlink(missing_ok=True)
+            except OSError as e:
+                log.warning("failed to remove key file %s: %s", key_file, e)
+                warnings.append(str(key_file))
 
     # If the row was failed with a retained source (for retry), drop the tmp
     # upload file too so a deleted episode never leaves disk leakage behind.
@@ -681,16 +736,17 @@ async def admin_delete_episode(
 
     if settings.storage_enabled:
         from .. import publish
-        try:
-            await asyncio.to_thread(
-                publish.unpublish_episode_from_staging, drama_slug, ep_dir_name,
-            )
-        except Exception as e:  # noqa: BLE001
-            log.warning(
-                "failed to unpublish episode %s/%s from staging OSS: %s",
-                drama_slug, ep_dir_name, e,
-            )
-            warnings.append(f"oss-staging:{drama_slug}/{ep_dir_name}")
+        for ep_dir_name in ep_dir_names:
+            try:
+                await asyncio.to_thread(
+                    publish.unpublish_episode_from_staging, drama_slug, ep_dir_name,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "failed to unpublish episode %s/%s from staging OSS: %s",
+                    drama_slug, ep_dir_name, e,
+                )
+                warnings.append(f"oss-staging:{drama_slug}/{ep_dir_name}")
 
     pending_sync = False
     if row["last_synced_at"] is not None:

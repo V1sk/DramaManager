@@ -49,7 +49,10 @@ def _row_to_episode_info(row: dict) -> EpisodeInfo:
     """
     slug = row["drama_slug"]
     ep_id = row["episode_id"]                 # SDK 契约字段："{slug}-ep-{n}"
-    ep_dir = f"ep-{row['ep_number']}"         # 磁盘目录 / URL 段（必须对齐 admin.py + /drm router）
+    # reupload-versioning: v1 = `ep-{n}`，v2+ = `ep-{n}-v{V}`。drm.keyUri 由
+    # 编码时直接写入 row["key_uri"] 已是版本化值；videoTracks 这里也要走相同
+    # 派生,否则 SDK 拿到老路径 m3u8 + 新版本 key 又会触发 AES 乱码。
+    ep_dir = db.episode_ep_dir(row["ep_number"], int(row.get("upload_version") or 1))
     base = f"/videos/{slug}/{ep_dir}"
 
     drm = None
