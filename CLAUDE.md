@@ -61,7 +61,7 @@ Environment variables:
 | `BUSINESS_SYNC_API_KEY` | required iff base URL set | _unset_ | 业务服务器握手用的共享密钥，作为 `X-API-Key` 头随每个 `/sync/*` 请求发送。`BUSINESS_SYNC_BASE_URL` 设而本变量未设 → 启动期 fail-fast。 |
 | `BUSINESS_SYNC_TIMEOUT` | no | `30` | 单次 `/sync/*` HTTP 请求的超时（秒）。整数；非正值 → 启动期 fail-fast。 |
 | `PIPELINE_CONCURRENCY` | no | `2` | 并发跑的 pipeline job 数（encode + encrypt + bucket publish）。每个 job 是独立 `pipeline.sh` 子进程；ffmpeg 本身已多线程，调高会过度订阅 CPU，有空闲核才往上加。同一集的多个 job 仍由 `work_queue.py` 的 per-episode 锁串行化，绝不并行写同一个 `ep-{n}/` 目录。整数 `>= 1`；非法值 → 启动期 fail-fast。 |
-| `SESSION_SECRET_KEY` | **yes** | _unset_ | 签名 `/admin` 后台会话 cookie 的密钥（`admin-accounts-auth`）。设为一串长随机字符串；**未设 → 启动期 fail-fast**。值要在重启间保持稳定，否则每次重启会让所有操作员掉登录。 |
+| `SESSION_SECRET_KEY` | no | 随机生成 | 签名 `/admin` 后台会话 cookie 的密钥（`admin-accounts-auth`）。**未设时启动期用 `secrets.token_hex(32)` 在内存里随机生成并往 stderr 打 warning** —— 此时所有会话在进程重启后失效（操作员要重登录）。需要重启间保持登录的部署务必显式设一个长随机串（`openssl rand -hex 32`）。 |
 | `ADMIN_INITIAL_PASSWORD` | first boot only | _unset_ | 首次启动引导用：`users` 表为空时 `init_db()` 用它创建 `admin` 账号（`must_change_pw=1`，首次登录强制改密）。`users` 已有行时本变量被忽略。`users` 为空却未设本变量 → 启动期 fail-fast。 |
 
 Drama / language lifecycle (introduced by `drama-as-entity` + `i18n-foundation`):

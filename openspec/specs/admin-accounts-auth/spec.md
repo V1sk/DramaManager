@@ -178,12 +178,18 @@ On startup, when the `users` table contains no rows, the system SHALL create a s
 
 ### Requirement: Session secret configuration
 
-The system SHALL require a `SESSION_SECRET_KEY` environment variable to sign session cookies and SHALL fail fast at startup when it is unset.
+The system SHALL accept a `SESSION_SECRET_KEY` environment variable to sign session cookies. When set to a non-empty value, that value SHALL be used so sessions survive restarts. When unset or empty, the system SHALL generate a random secret in process memory at startup and emit a warning that sessions will not survive a restart.
 
-#### Scenario: Missing session secret fails fast
+#### Scenario: Operator-provided secret persists sessions across restart
 
-- **WHEN** the server starts with `SESSION_SECRET_KEY` unset
-- **THEN** startup fails with a clear error
+- **WHEN** the server starts with `SESSION_SECRET_KEY` set to a non-empty value
+- **THEN** the system uses that value to sign session cookies, and sessions established before a restart remain valid after the restart
+
+#### Scenario: Missing secret falls back to ephemeral, with warning
+
+- **WHEN** the server starts with `SESSION_SECRET_KEY` unset or empty
+- **THEN** the system generates a random secret in memory, emits a warning, and continues startup
+- **AND** sessions established in this run are invalidated after the process restarts
 
 ### Requirement: Audit log of operator actions
 

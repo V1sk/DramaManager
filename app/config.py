@@ -1,4 +1,6 @@
 import os
+import secrets
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -127,12 +129,18 @@ def load_settings() -> Settings:
             f"PIPELINE_CONCURRENCY must be >= 1, got {pipeline_concurrency}"
         )
 
-    session_secret_key = os.environ.get("SESSION_SECRET_KEY", "Implementation complete.").strip()
+    session_secret_key = os.environ.get("SESSION_SECRET_KEY", "").strip()
     if not session_secret_key:
-        raise RuntimeError(
-            "SESSION_SECRET_KEY is required (used to sign the /admin session "
-            "cookie). Set it to a long random string — a stable value across "
-            "restarts keeps operators logged in."
+        session_secret_key = secrets.token_hex(32)
+        # logging isn't configured yet at this point (basicConfig runs in
+        # app/main.py); write directly to stderr so the warning still surfaces.
+        print(
+            "WARNING [admin-accounts-auth]: SESSION_SECRET_KEY 未设置 → "
+            "已在内存里随机生成一个 key，进程重启后所有已登录会话失效。"
+            "需要重启间保持登录的部署请显式设一个长随机串 "
+            "(openssl rand -hex 32) 写到 env。",
+            file=sys.stderr,
+            flush=True,
         )
     admin_initial_password = (
         os.environ.get("ADMIN_INITIAL_PASSWORD", "123456").strip() or None
