@@ -24,8 +24,8 @@ python3 -m venv venv
 ```bash
 # one-time
 cp .env.example .env                              # 填 SESSION_SECRET_KEY + ADMIN_INITIAL_PASSWORD
-# 启用 OSS/TOS 时再 cp app/storage/credentials.example.py app/storage/credentials.py 填密钥
-                                                  # 并在 docker-compose.yml 取消那行 bind mount 注释
+# OSS/TOS: cp app/storage/credentials.example.py app/storage/credentials.py 填密钥
+#         → 直接打进镜像（内部部署，AK/SK 不外发）；轮换密钥后重新 build
 
 docker compose up -d --build                      # 起服务，监听 0.0.0.0:8000
 docker compose logs -f hls                        # 看日志
@@ -33,7 +33,7 @@ docker compose restart hls                        # 改 env / 改代码后重启
 docker compose down                               # 停服务
 ```
 
-**volumes**：所有持久化在 `./data/`（`./data/out` 切片、`./data/hls.db`、`./data/tmp` 上传暂存）。备份只需 tar `./data/`。`./app/storage/credentials.py` 通过只读 bind mount 注入（启用桶时），不进镜像。
+**volumes**：所有持久化在 `./data/`（`./data/out` 切片、`./data/hls.db`、`./data/tmp` 上传暂存）。备份只需 tar `./data/`。`app/storage/credentials.py` 在 build 时被 COPY 进镜像（**不在 `.dockerignore` 里**）——内部部署，镜像不外推。轮换 AK/SK 后跑 `docker compose up -d --build` 重新打包。
 
 **升级**：`git pull && docker compose up -d --build`。`init_db()` 的 `_migrate_add_columns` / `_migrate_drop_columns` 在启动期自动跑增量 schema 改动，不需要手动 migrate。
 

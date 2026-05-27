@@ -20,5 +20,6 @@ hls.db
 hls.db-shm
 hls.db-wal
 
-# Secrets — provided via volume / build context per-host
-app/storage/credentials.py
+# Note: app/storage/credentials.py IS baked into the image. Internal-only
+# deployment; the image is not pushed to a public registry. Operators
+# rebuild after rotating keys.

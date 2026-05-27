@@ -7,9 +7,10 @@ FROM python:3.11-slim
 #   xxd              — key file (hex/base64) conversions in pipeline.sh
 #   bash, awk        — pipeline.sh / encode-clear.sh / encrypt-segments.sh
 # bash + awk ship with debian-slim; the other three are explicit installs.
-# Debian 12 (python:3.11-slim base) bundles ffmpeg 5.x — the pipeline was
-# written against ffmpeg 5/6 and the `-hls_key_info_file` workaround
-# documented in CLAUDE.md is still required at this version.
+# ffmpeg version comes from the Debian repo (whatever the base image ships).
+# Local dev runs on ffmpeg 8.x; the pipeline is not bound to a specific
+# version — the `-hls_key_info_file` workaround documented in CLAUDE.md is
+# an upstream bug class, not version-specific.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ffmpeg \
       openssl \

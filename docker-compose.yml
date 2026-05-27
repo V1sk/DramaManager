@@ -12,11 +12,6 @@ services:
       # env (set in the Dockerfile) points OUT_DIR / DB_PATH / UPLOAD_TMP_DIR
       # at /data/... — first `docker compose up` creates the dirs on demand.
       - ./data:/data
-      # OSS / TOS credentials (only needed when STORAGE_PROVIDER != none).
-      # Workflow:
-      #   1) cp app/storage/credentials.example.py app/storage/credentials.py
-      #   2) fill in your AK / SK
-      #   3) uncomment the line below + restart
-      # The file is gitignored and excluded from the image build context, so
-      # the only way it reaches the container is this bind mount.
-      # - ./app/storage/credentials.py:/app/app/storage/credentials.py:ro
+      # OSS / TOS credentials are baked into the image at build time
+      # (app/storage/credentials.py is NOT in .dockerignore). Internal-only
+      # deployment; after rotating keys run `docker compose up -d --build`.
