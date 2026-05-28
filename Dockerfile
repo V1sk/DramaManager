@@ -1,5 +1,8 @@
-# syntax=docker/dockerfile:1
 FROM python:3.11-slim
+# 不写 `# syntax=docker/dockerfile:1` —— 那个指令会让 BuildKit 每次构建都去
+# docker.io/docker/dockerfile:1 拉 frontend 镜像，国内网络下容易卡 auth.docker.io。
+# 这份 Dockerfile 没用到任何需要新版 frontend 的语法（heredoc / RUN --mount 等），
+# BuildKit 内置 frontend 就够。
 
 # Pipeline native deps (NOT pip-installable):
 #   ffmpeg / ffprobe — encoding + probing source video
