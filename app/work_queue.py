@@ -64,6 +64,58 @@ def _cleanup_tmp(tmp_path: Path) -> None:
         log.warning("failed to remove tmp upload %s: %s", tmp_path, e)
 
 
+def _ladder_encode_complete(rung_dir: Path, ladder: str) -> bool:
+    """True iff this rung's clear→encrypted artifacts are fully on disk: the
+    media playlist exists and carries the `#EXT-X-KEY` line (so the encrypt
+    stage finished), the init segment exists, and every segment the playlist
+    references is present. A truncated encode (some segments missing, or the
+    key line never injected) returns False so the caller re-runs the full
+    pipeline rather than reusing a half-baked rung."""
+    m3u8 = rung_dir / f"media-{ladder}.m3u8"
+    init = rung_dir / f"init-{ladder}.mp4"
+    if not m3u8.is_file() or not init.is_file():
+        return False
+    try:
+        text = m3u8.read_text()
+    except OSError:
+        return False
+    if "#EXT-X-KEY" not in text:
+        return False  # encrypt-segments.sh injects this last; absence = unfinished
+    seg_count = 0
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        seg_count += 1
+        # Local m3u8 keeps relative filenames; take the basename defensively.
+        if not (rung_dir / Path(line).name).is_file():
+            return False
+    return seg_count > 0
+
+
+def _encode_artifacts_complete(out_dir: Path, ep_dir: str) -> bool:
+    """True iff a prior pipeline run already produced every artifact this job
+    would otherwise re-encode: the DRM key material (`.key.b64` + `.iv`) plus
+    all three ladder rungs, each with all of its segments on disk. Lets the
+    worker skip an expensive full re-encode on a retry whose encode succeeded
+    and only the OSS publish failed.
+
+    Safe-by-construction: the DRM key is generated only inside `run_pipeline`,
+    so a *reused* (skipped) encode means the key — and therefore the ciphertext
+    of every already-uploaded segment — is unchanged. That's exactly the
+    precondition for `publish_ladder(skip_existing=True)` to safely keep the
+    bucket objects from the earlier partial publish."""
+    keys_dir = out_dir / "keys"
+    if not (keys_dir / f"{ep_dir}.key.b64").is_file():
+        return False
+    if not (keys_dir / f"{ep_dir}.iv").is_file():
+        return False
+    for ladder in ("540p", "720p", "1080p"):
+        if not _ladder_encode_complete(out_dir / ep_dir / ladder, ladder):
+            return False
+    return True
+
+
 async def _handle_job(job: Job) -> bool:
     """Run one pipeline job. Returns True iff the episode reached `ready`.
 
@@ -90,28 +142,44 @@ async def _handle_job(job: Job) -> bool:
     play_url = f"/videos/{slug}/{ep_dir}/{ladder}/media-{ladder}.m3u8"
 
     db.set_status(ep_id, "encoding")
-    db.set_episode_progress(ep_id, "准备编码…")
     log.info("encoding start slug=%s ep=%s", slug, ep_id)
 
-    def _on_stage(label: str) -> None:
-        # Invoked from inside run_pipeline's stdout drain. Cheap sync write.
-        db.set_episode_progress(ep_id, label)
-
-    rc, stderr_tail = await run_pipeline(
-        source=job.tmp_path,
-        out_dir=out_dir,
-        episode_id=ep_dir,
-        key_uri=key_uri,
-        on_progress=_on_stage,
-    )
-
-    if rc != 0:
-        db.set_status(ep_id, "failed", error_message=stderr_tail)
-        log.error(
-            "encoding failed slug=%s ep=%s rc=%s",
-            slug, ep_id, rc,
+    # Resume optimization (retry after a publish failure): if a prior run already
+    # produced a complete set of encode artifacts for this ep_dir, skip the
+    # expensive re-encode and go straight to (resumable) publish. Re-encoding all
+    # three rungs from 540p just because one 1080p segment failed to upload is
+    # pure waste. The DRM key is regenerated only inside run_pipeline, so reusing
+    # the encode keeps the key stable — which is what makes the partial-publish
+    # resume below safe (already-uploaded segments stay valid).
+    encode_reused = _encode_artifacts_complete(out_dir, ep_dir)
+    if encode_reused:
+        db.set_episode_progress(ep_id, "复用已编码切片…")
+        log.info(
+            "encode artifacts complete slug=%s ep=%s; skipping re-encode",
+            slug, ep_id,
         )
-        return False
+    else:
+        db.set_episode_progress(ep_id, "准备编码…")
+
+        def _on_stage(label: str) -> None:
+            # Invoked from inside run_pipeline's stdout drain. Cheap sync write.
+            db.set_episode_progress(ep_id, label)
+
+        rc, stderr_tail = await run_pipeline(
+            source=job.tmp_path,
+            out_dir=out_dir,
+            episode_id=ep_dir,
+            key_uri=key_uri,
+            on_progress=_on_stage,
+        )
+
+        if rc != 0:
+            db.set_status(ep_id, "failed", error_message=stderr_tail)
+            log.error(
+                "encoding failed slug=%s ep=%s rc=%s",
+                slug, ep_id, rc,
+            )
+            return False
 
     key_b64_path = out_dir / "keys" / f"{ep_dir}.key.b64"
     iv_path = out_dir / "keys" / f"{ep_dir}.iv"
@@ -132,7 +200,13 @@ async def _handle_job(job: Job) -> bool:
         for ladder_name in ("540p", "720p", "1080p"):
             db.set_episode_progress(ep_id, f"上传 OSS · {ladder_name}")
             try:
-                await asyncio.to_thread(publish_ladder, slug, ep_dir, ladder_name)
+                # skip_existing=encode_reused: on a retry that reused the encode,
+                # only re-send the segments that never made it to the bucket; on a
+                # fresh encode, upload everything (overwrite).
+                uploaded, skipped = await asyncio.to_thread(
+                    publish_ladder, slug, ep_dir, ladder_name,
+                    skip_existing=encode_reused,
+                )
             except PublishError as e:
                 db.set_status(ep_id, "failed", error_message=str(e))
                 log.error(
@@ -150,6 +224,11 @@ async def _handle_job(job: Job) -> bool:
                     slug, ep_id, ladder_name,
                 )
                 return False
+            if skipped:
+                log.info(
+                    "publish slug=%s ep=%s ladder=%s resumed: uploaded=%d skipped=%d",
+                    slug, ep_id, ladder_name, uploaded, skipped,
+                )
 
     db.set_status(
         ep_id, "ready",

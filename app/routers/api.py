@@ -6,32 +6,13 @@ from fastapi.responses import JSONResponse
 
 from .. import db
 from ..config import settings
+from ..ladder import LADDER_TRACKS, rung_dimensions
 from ..models import DramaSummary, DrmInfo, EpisodeInfo, Subtitle, VideoTrack
 
 router = APIRouter(prefix="/api")
 
 _SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]*$"
 _EP_PATTERN = r"^[0-9]+$"
-
-
-# Ladder rungs (must mirror LADDERS in pipeline.sh) mapped to the SDK
-# `videoTracks` id. Ordered high → low so the SDK gets descending quality.
-_LADDER_TRACKS = (
-    ("high", "1080p", 1080),
-    ("mid", "720p", 720),
-    ("low", "540p", 540),
-)
-
-
-def _rung_dimensions(src_w, src_h, rung_height):
-    """Encoded (width, height) of one ladder rung. `encode-clear.sh` runs
-    `scale=-2:HEIGHT`, so the rung height is fixed and the width follows the
-    source aspect ratio rounded to an even integer. Returns (None, None) when
-    the source dimensions are unknown (legacy rows)."""
-    if not src_w or not src_h:
-        return None, None
-    width = int(src_w * rung_height / src_h / 2 + 0.5) * 2
-    return max(width, 2), rung_height
 
 
 def _row_to_episode_info(row: dict) -> EpisodeInfo:
@@ -66,8 +47,8 @@ def _row_to_episode_info(row: dict) -> EpisodeInfo:
     src_w = row.get("width")
     src_h = row.get("height")
     video_tracks = []
-    for track_id, ladder, rung_height in _LADDER_TRACKS:
-        w, h = _rung_dimensions(src_w, src_h, rung_height)
+    for track_id, ladder, rung_height in LADDER_TRACKS:
+        w, h = rung_dimensions(src_w, src_h, rung_height)
         video_tracks.append(VideoTrack(
             id=track_id,
             url=f"{base}/{ladder}/media-{ladder}.m3u8",

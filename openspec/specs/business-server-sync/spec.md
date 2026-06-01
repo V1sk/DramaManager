@@ -186,30 +186,34 @@ The business server MUST: validate the API key; pull every non-null `poster_url`
   "episode_id": str,                           // "{drama_slug}-ep-{ep_number}"
   "client_updated_at": str,
   "duration_ms": int,
-  "width": int | null,
-  "height": int | null,
   "drm": {
     "key_uri": str,                            // verbatim "/drm/{slug}/ep-{n}/key"
     "key_base64": str,                         // 24-char base64 of 16-byte AES key
     "iv_hex": str | null                       // 32 hex chars
   },
-  "playlists": {
-    "540p": str,                               // full m3u8 text with prod URLs
-    "720p": str,
-    "1080p": str
-  },
-  "cover_url": str,                            // staging URL
+  "video_tracks": [                            // mirrors EpisodeInfo.videoTracks, ordered high → mid → low
+    {
+      "id": str,                               // "high" | "mid" | "low"
+      "ladder": str,                           // "1080p" | "720p" | "540p"
+      "width": int | null,                     // this rung's encoded width (null on legacy rows)
+      "height": int | null,                    // this rung's encoded height
+      "playlist": str                          // full prod m3u8 text for this rung
+    }
+  ],
+  "cover_key": str,                            // prod object key (storage on) or staging /videos URL (storage off)
   "subtitles": [
     {
       "lang_code": str,
       "label": str,                            // languages.display_label snapshot
-      "url": str                               // staging URL
+      "key": str                               // prod object key (storage on) or /videos URL (storage off)
     }
   ]
 }
 ```
 
-The business server MUST: validate the API key; ensure the drama exists (else 409 "drama not synced"); pull cover and every subtitle URL synchronously (any failure → 502); decode `drm.key_base64` and write 16 bytes to its own keys directory; write each playlist text to its own `.m3u8` file; persist cover and subtitle bytes locally; upsert the episode row. On success → 200. Old `client_updated_at` → 409.
+The business server MUST: validate the API key; ensure the drama exists (else 409 "drama not synced"); resolve `cover_key` and every subtitle `key` (prefix with `MEDIA_BASE_URL` when storage is on, else pull from the staging URL) — any failure → 502; decode `drm.key_base64` and write 16 bytes to its own keys directory; write each `video_tracks[].playlist` text to its own `.m3u8` file; assemble the SDK's `videoTracks` directly from each entry's `id` / `width` / `height` (no per-rung dimension re-derivation); persist cover and subtitle bytes locally; upsert the episode row. On success → 200. Old `client_updated_at` → 409.
+
+> **Wire-protocol change** (per-rung `video_tracks` replaces the old single top-level `width` / `height` + `playlists` map): the old top-level dimensions described only the *source*, not any rung, so the business server could not build accurate per-rung `videoTracks` from them. The HLS side now ships one entry per rung. The business server's `POST /sync/episodes` parser MUST be updated in lockstep — it can no longer read `payload.playlists.{ladder}` or `payload.width` / `payload.height`.
 
 **`DELETE /sync/episodes/{slug}/{ep}`** — no body. Removes the episode row + on-disk artifacts on the business server. Returns 204 on success or if missing (idempotent). 401 on key mismatch.
 
@@ -220,12 +224,14 @@ The business server MUST: validate the API key; ensure the drama exists (else 40
 - **AND** carries header `X-API-Key: <configured secret>`
 - **AND** `payload.languages` includes `zh-rCN` and `en` (every code referenced by translations / tags / actors)
 
-#### Scenario: episode sync request shape includes prod m3u8
-- **GIVEN** episode `ly-ep-3` ready, with subtitles in `en`
+#### Scenario: episode sync request shape includes per-rung prod m3u8
+- **GIVEN** episode `ly-ep-3` ready (source 720×1280), with subtitles in `en`
 - **WHEN** the HLS sync worker calls `POST /sync/episodes`
-- **THEN** `payload.playlists.720p` is a full m3u8 text whose `#EXT-X-MAP:URI` references `Drama/prod/ly/ep-3/720p/init-720p.mp4`
-- **AND** `payload.playlists.720p` contains `#EXT-X-KEY:METHOD=AES-128,URI="/drm/ly/ep-3/key"...` (verbatim)
-- **AND** `payload.cover_url` is an absolute https URL pointing at the staging server's `/videos/ly/ep-3/cover.jpg`
+- **THEN** `payload.video_tracks` has three entries ordered `high` (1080p), `mid` (720p), `low` (540p)
+- **AND** each entry carries the rung's encoded `width` / `height` (e.g. `mid` → 406×720), derived identically to `EpisodeInfo.videoTracks`
+- **AND** the `mid` entry's `playlist` is a full m3u8 text whose `#EXT-X-MAP:URI` references `Drama/prod/ly/ep-3/720p/init-720p.mp4`
+- **AND** the `mid` entry's `playlist` contains `#EXT-X-KEY:METHOD=AES-128,URI="/drm/ly/ep-3/key"...` (verbatim)
+- **AND** `payload.cover_key` is the prod cover object key (storage on) or the staging `/videos/ly/ep-3/cover.jpg` URL (storage off)
 
 #### Scenario: API key mismatch returns 401
 - **GIVEN** the business server is running with a different `X-API-Key` than the HLS server is sending

@@ -114,7 +114,7 @@ URL map:
 | `POST /admin/dramas` | multipart: `drama_slug`, `drama_name`, `default_lang`. `default_lang` MUST exist in `languages`. 302 / 400 / 409. |
 | `GET /admin/dramas` | JSON list of all dramas (`created_at DESC`); fields `slug, name, default_lang, ep_count, created_at, updated_at` |
 | `DELETE /admin/dramas/{slug}` | Removes drama row + translations + `OUT_DIR/{slug}/`; 409 if any episodes attached; 404 if unknown. `[gate]` can_delete |
-| `POST /admin/dramas/{slug}/episodes` | multipart `video`. Auto-increment `ep_number = MAX+1`. UNIQUE-collision retry up to 3×; persistent collision → 503. 404 if drama missing. |
+| `POST /admin/dramas/{slug}/episodes` | multipart `video`. Auto-increment `ep_number = MAX(ep_number)+1` **over non-`pending_delete` rows**（同步过被删的集是隐藏的 `pending_delete` 行，等 delete-sync 完成才物理删；不排除它就会跳号，删了唯一一集再传会变成 ep2）。落到 `pending_delete` 槽位时 `upsert_pending` 原地 UPDATE 复活该行，不撞 UNIQUE。UNIQUE-collision retry up to 3×; persistent collision → 503. 404 if drama missing. |
 | `POST /admin/dramas/{slug}/episodes/{ep}` | multipart `video`. Re-encode existing episode in place. 404 if episode missing. 409 if `status=encoding`. |
 | `POST /admin/dramas/{slug}/episodes/batch` | multipart `videos` (多文件). 每个文件名须以 `EP<n>` 开头（大小写不敏感）→ 集号。已存在的集走重传语义覆盖；`status=encoding` 的集跳过。返回逐文件结果 `{ok_count, error_count, results[]}`，部分失败不致命。**路由声明在 `episodes/{ep}` 之前**，否则 `batch` 字面段会被 `{ep}` 的 `^[0-9]+$` 捕获并 422。 |
 | `POST /admin/dramas/{slug}/subtitles/batch` | multipart `files` (多文件). 文件名须形如 `EP<n>-<lang>-说明.vtt\|.srt`（EP 大小写不敏感）；`<lang>` 按最长匹配解析自启用语言注册表（兼容 `zh-rCN` 这类带连字符的 code）。`.srt` 自动转 WebVTT。已存在的 (集, 语言) 字幕覆盖。返回逐文件结果，部分失败不致命。 |
@@ -133,13 +133,13 @@ URL map:
 
 Upload → pipeline lifecycle (all synchronous work happens in the request handler so the admin list has data to render immediately):
 
-1. Validate path (`drama_slug ~ ^[a-z0-9][a-z0-9-]*$`; for re-upload, `ep` numeric). Drama must already exist (404 otherwise). For auto-increment (`POST /admin/dramas/{slug}/episodes`), the server computes `ep_number = MAX(ep_number)+1`. For re-upload (`POST /admin/dramas/{slug}/episodes/{ep}`), the episode must exist and not be in `status=encoding` (409 otherwise).
+1. Validate path (`drama_slug ~ ^[a-z0-9][a-z0-9-]*$`; for re-upload, `ep` numeric). Drama must already exist (404 otherwise). For auto-increment (`POST /admin/dramas/{slug}/episodes`), the server computes `ep_number = MAX(ep_number)+1` **excluding `pending_delete` rows**（见 `_next_ep_number`：被删但等同步的隐藏行不占号）. For re-upload (`POST /admin/dramas/{slug}/episodes/{ep}`), the episode must exist and not be in `status=encoding` (409 otherwise).
 2. Stream upload to `UPLOAD_TMP_DIR/upload-<uuid>.mp4`.
 3. `ffprobe` → `duration_ms` + `width` + `height`（源视频 codec dimension；用于推导 `EpisodeInfo.videoTracks` 每档的 width / height）。
 4. `ffmpeg -ss 0 -vframes 1 -vf scale=-2:720` → `OUT_DIR/{slug}/ep-{n}/cover.jpg`（cover 不随版本变，始终写 v1 目录）。
 5. Upsert `episodes` row: `status=pending`, `episode_id="{slug}-ep-{n}"`, cover URL set. **reupload-versioning**: 新集 `upload_version=1`；重传时该列自增（v2 / v3 …），upsert 返回 `(old_source, new_version)`，路由把版本号塞进 `Job.upload_version` 并写一条 `episode_uploads` 记录（含上传者、源文件名、时间戳）。
 6. Enqueue job on the global `asyncio.Queue` and 302 back to `/admin`.
-7. A pool of `PIPELINE_CONCURRENCY` worker coroutines (default 2) pulls from the queue; jobs for different episodes run in parallel, jobs for the same `episode_id` are serialized by a per-episode `asyncio.Lock` in `queue.py`. Each worker computes `ep_dir = db.episode_ep_dir(ep_number, job.upload_version)`（v1 → `ep-{n}`，v2+ → `ep-{n}-v{V}`），flips `status=encoding`，runs `pipeline.sh <tmp> {OUT_DIR}/{slug} {ep_dir} /drm/{slug}/{ep_dir}/key`（第 4 个参数是写进 `#EXT-X-KEY:URI` 的相对路径，verbatim），reads `{OUT_DIR}/{slug}/keys/{ep_dir}.key.b64` + `.iv`, sets `status=ready` 同时把 `play_url` / `key_uri` 写成本次版本的路径。On non-zero exit: `status=failed` with the last 4 KiB of stderr in `error_message` (artifacts under `OUT_DIR` are NOT auto-cleaned — kept for post-mortem). Temp upload file is always removed.
+7. A pool of `PIPELINE_CONCURRENCY` worker coroutines (default 2) pulls from the queue; jobs for different episodes run in parallel, jobs for the same `episode_id` are serialized by a per-episode `asyncio.Lock` in `queue.py`. Each worker computes `ep_dir = db.episode_ep_dir(ep_number, job.upload_version)`（v1 → `ep-{n}`，v2+ → `ep-{n}-v{V}`），flips `status=encoding`，runs `pipeline.sh <tmp> {OUT_DIR}/{slug} {ep_dir} /drm/{slug}/{ep_dir}/key`（第 4 个参数是写进 `#EXT-X-KEY:URI` 的相对路径，verbatim），reads `{OUT_DIR}/{slug}/keys/{ep_dir}.key.b64` + `.iv`, sets `status=ready` 同时把 `play_url` / `key_uri` 写成本次版本的路径。On non-zero exit: `status=failed` with the last 4 KiB of stderr in `error_message` (artifacts under `OUT_DIR` are NOT auto-cleaned — kept for post-mortem). Temp upload file is always removed. **重试续传（resume-on-retry）**：worker 开跑前先用 `_encode_artifacts_complete(out_dir, ep_dir)` 检查这套编码产物是否已齐（DRM key 三件套 + 三档每档 m3u8 含 `#EXT-X-KEY` + init + 全部被引用 segment 都在盘上）。齐了就**跳过整段 `run_pipeline` 重编码**，直奔发布——这正是"编码成功、只是某档 OSS 上传失败"那种重试的常见情形，不必从 540p 重编一遍。DRM key 只在 `run_pipeline` 里（重）生成，所以复用编码 ⇒ key 不变 ⇒ 上一轮已传上去的分片仍然有效；据此 worker 给 `publish_ladder` 传 `skip_existing=True`，**只补传桶里还缺的分片**（单次 PUT 原子，桶里有该 key == 已完整传成，可安全跳过）。编码产物不全（编码本身失败）则照常全量 `run_pipeline` + `skip_existing=False` 覆盖式重传（此时桶里本就没有旧 key 的残留对象，无 stale 风险）。
 8. On process restart any row left in `status=encoding` is flipped to `failed` with `error_message="orphaned by restart"`.
 
 **reupload-versioning（重传路径版本化）**：客户端 AES-128-CBC 解密用错 key 不会冒一个干净的「key mismatch」错——会拿新 key 解旧 segments，静默乱码。所以每次重传必须落到一组新路径上，让客户端缓存按 URL 自然 miss、回源拿新版本，老缓存仍能拿到老路径上还在的老切片+老 key 把这集播完。落地方式：
@@ -347,10 +347,10 @@ pending_delete ─→ syncing ─→ (row 物理删除 + prod OSS 清理)
 |---|---|---|
 | POST | `/sync/dramas` | upsert drama + translations + tags + actors + languages 数组（业务服务器再异步从 staging 拉海报字节）。 |
 | DELETE | `/sync/dramas/{slug}` | 删一部剧的全部数据。 |
-| POST | `/sync/episodes` | upsert 一集；body 含三档 ladder 的 prod-flavored m3u8 文本、DRM key/iv、cover URL、subtitle URL 列表。 |
+| POST | `/sync/episodes` | upsert 一集；body 的 `video_tracks` 是**逐档数组**（对齐 `EpisodeInfo.videoTracks`，high/mid/low 三档，每档带 `id` + 该档编码 `width`/`height` + 该档 prod-flavored m3u8 文本），外加 DRM key/iv、`cover_key`、subtitle 列表。**注意**：不再有顶层单个 `width`/`height`（那只描述源尺寸、对单档不准）和按 ladder 名索引的 `playlists` map —— 业务服务器解析器要同步改，直接从 `video_tracks[].{id,width,height,playlist}` 拼 `videoTracks`。 |
 | DELETE | `/sync/episodes/{slug}/{ep}` | 删一集。 |
 
-详细 payload schema 见 `openspec/changes/business-server-sync/design.md` 的"Decision: POST /sync/dramas payload shape"小节。
+详细 payload schema 见 `openspec/specs/business-server-sync/spec.md` 的 `POST /sync/episodes` 请求体小节（per-rung `video_tracks` 形态为权威）。逐档 rung↔id 映射与宽高推导由 `app/ladder.py` 单一来源提供，SDK `EpisodeInfo.videoTracks`（`app/routers/api.py`）与 sync payload（`app/sync.py`）共用，保证两边逐字节一致。
 
 ### 部署须知
 

@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 
 from . import db, publish, sync_client
 from .config import settings
+from .ladder import LADDER_TRACKS, rung_dimensions
 from .sync_client import SyncError
 
 log = logging.getLogger("hls.sync")
@@ -191,8 +192,20 @@ def build_episode_payload(
 ) -> dict:
     """Assemble the `POST /sync/episodes` body. `playlists` is
     `{ladder: prod_m3u8_text}` produced by `publish.publish_ladder_to_prod`;
-    m3u8 body's `#EXT-X-MAP:URI` and segment lines are object keys
+    each m3u8 body's `#EXT-X-MAP:URI` and segment lines are object keys
     (`Drama/prod/...`, no host), business server prepends `MEDIA_BASE_URL`.
+
+    The payload's `video_tracks` mirrors `EpisodeInfo.videoTracks` (api.py),
+    sharing the `app.ladder` rung table so the two stay byte-identical: one
+    entry per ladder rung, ordered high → mid → low, each carrying the rung
+    `id` (high / mid / low), the `ladder` name (`540p` / `720p` / `1080p`),
+    the rung's **encoded** `width` / `height` (derived from the source codec
+    dimensions via the same `scale=-2:HEIGHT` rule the SDK uses; both null on
+    legacy rows whose source dimensions were never recorded), and the rung's
+    prod-flavored `playlist` m3u8 text. The business server builds its own
+    `videoTracks` straight from this — it no longer has to re-derive per-rung
+    dimensions, and the old single top-level `width` / `height` (which only
+    described the *source*, not any single rung) is gone.
 
     `cover_prod_key` and `subtitles_prod` (storage-to-bucket): when storage
     sync is in effect, `handle_episode_sync` calls `publish_cover_to_prod` /
@@ -228,20 +241,35 @@ def build_episode_payload(
 
     cover_key = cover_prod_key if cover_prod_key is not None else row["cover_url"]
 
+    # Per-rung tracks, mirroring EpisodeInfo.videoTracks. The caller guarantees
+    # `playlists` carries all three ladders (handle_episode_sync populates them
+    # unconditionally); a missing rung here is a real invariant break and surfaces
+    # as a KeyError naming the ladder.
+    src_w = row.get("width")
+    src_h = row.get("height")
+    video_tracks: list[dict] = []
+    for track_id, ladder, rung_height in LADDER_TRACKS:
+        w, h = rung_dimensions(src_w, src_h, rung_height)
+        video_tracks.append({
+            "id": track_id,
+            "ladder": ladder,
+            "width": w,
+            "height": h,
+            "playlist": playlists[ladder],
+        })
+
     return {
         "drama_slug": slug,
         "ep_number": ep_number,
         "episode_id": row["episode_id"],
         "client_updated_at": row["updated_at"],
         "duration_ms": row["duration_ms"],
-        "width": row.get("width"),
-        "height": row.get("height"),
         "drm": {
             "key_uri": row["key_uri"],
             "key_base64": row["key_b64"],
             "iv_hex": row["iv_hex"],
         },
-        "playlists": playlists,
+        "video_tracks": video_tracks,
         "cover_key": cover_key,
         "subtitles": subtitles_payload,
     }

@@ -1,0 +1,195 @@
+"""Regression tests for two fixes:
+
+1. Retry resume: `_encode_artifacts_complete` detects a fully-encoded ep_dir so
+   the worker can skip re-encoding, and `publish_ladder(skip_existing=True)`
+   only re-uploads the segments that never made it to the bucket.
+2. Episode numbering: `_next_ep_number` excludes `pending_delete` rows so a
+   re-upload after deleting the only (synced) episode reuses ep 1 instead of
+   jumping to ep 2.
+"""
+
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+
+def _setup_env(tmp: Path) -> None:
+    os.environ["OUT_DIR"] = str(tmp / "out")
+    os.environ["DB_PATH"] = str(tmp / "hls.db")
+    os.environ["UPLOAD_TMP_DIR"] = str(tmp / "tmp")
+    os.environ.pop("OSS_ENABLED", None)
+    os.environ["STORAGE_PROVIDER"] = "none"
+    os.environ["SESSION_SECRET_KEY"] = "test-secret-key"
+    os.environ["ADMIN_INITIAL_PASSWORD"] = "test-admin-pw"
+
+
+def _reset_app_modules():
+    for mod in [m for m in list(sys.modules) if m.startswith("app")]:
+        del sys.modules[mod]
+
+
+_M3U8 = (
+    "#EXTM3U\n"
+    "#EXT-X-VERSION:7\n"
+    '#EXT-X-MAP:URI="init-{ladder}.mp4"\n'
+    '#EXT-X-KEY:METHOD=AES-128,URI="/drm/x/ep-1/key",IV=0x{iv}\n'
+    "#EXTINF:2.000000,\n"
+    "seg-{ladder}-0.m4s\n"
+    "#EXTINF:2.000000,\n"
+    "seg-{ladder}-1.m4s\n"
+    "#EXT-X-ENDLIST\n"
+)
+
+
+def _build_complete_ep_dir(out_dir: Path, slug: str, ep_dir: str) -> None:
+    keys = out_dir / slug / "keys"
+    keys.mkdir(parents=True, exist_ok=True)
+    (keys / f"{ep_dir}.key.b64").write_text("AAECAwQFBgcICQoLDA0ODw==")
+    (keys / f"{ep_dir}.iv").write_text("abcdef0123456789abcdef0123456789")
+    for ladder in ("540p", "720p", "1080p"):
+        d = out_dir / slug / ep_dir / ladder
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"init-{ladder}.mp4").write_bytes(b"init")
+        (d / f"seg-{ladder}-0.m4s").write_bytes(b"seg0")
+        (d / f"seg-{ladder}-1.m4s").write_bytes(b"seg1")
+        (d / f"media-{ladder}.m3u8").write_text(
+            _M3U8.format(ladder=ladder, iv="0" * 32)
+        )
+
+
+def case_encode_artifacts_complete():
+    with tempfile.TemporaryDirectory() as td:
+        _setup_env(Path(td))
+        _reset_app_modules()
+        from app.config import settings
+        from app.work_queue import _encode_artifacts_complete
+
+        out = settings.out_dir
+        _build_complete_ep_dir(out, "ly", "ep-1")
+        assert _encode_artifacts_complete(out / "ly", "ep-1") is True
+
+        # Missing a segment that the playlist references → incomplete.
+        (out / "ly" / "ep-1" / "1080p" / "seg-1080p-1.m4s").unlink()
+        assert _encode_artifacts_complete(out / "ly", "ep-1") is False
+
+        # Restore that, but drop a key file → incomplete.
+        (out / "ly" / "ep-1" / "1080p" / "seg-1080p-1.m4s").write_bytes(b"seg1")
+        assert _encode_artifacts_complete(out / "ly", "ep-1") is True
+        (out / "ly" / "keys" / "ep-1.iv").unlink()
+        assert _encode_artifacts_complete(out / "ly", "ep-1") is False
+
+        # An un-encrypted playlist (no #EXT-X-KEY) is not "complete".
+        (out / "ly" / "keys" / "ep-1.iv").write_text("abcdef0123456789abcdef0123456789")
+        plain = out / "ly" / "ep-1" / "720p" / "media-720p.m3u8"
+        plain.write_text(plain.read_text().replace(
+            '#EXT-X-KEY:METHOD=AES-128,URI="/drm/x/ep-1/key",IV=0x' + "0" * 32 + "\n",
+            "",
+        ))
+        assert _encode_artifacts_complete(out / "ly", "ep-1") is False
+        print("OK _encode_artifacts_complete: complete/seg-missing/key-missing/unencrypted")
+
+
+class _FakeProvider:
+    staging_prefix = "Drama/staging"
+    prod_prefix = "Drama/prod"
+    staging_base_url = "https://fake/Drama/staging"
+    prod_base_url = "https://fake/Drama/prod"
+
+    def __init__(self, existing=None):
+        self.store = set(existing or [])
+        self.uploaded = []
+
+    def upload_file(self, remote_key, local_file_path):
+        self.uploaded.append(remote_key)
+        self.store.add(remote_key)
+        return {"result": True, "code": 200, "msg": "ok"}
+
+    def list_with_prefix(self, prefix):
+        return [k for k in self.store if k.startswith(prefix)]
+
+    def copy_object(self, s, d):  # pragma: no cover
+        pass
+
+    def batch_delete(self, keys):  # pragma: no cover
+        pass
+
+
+def case_publish_ladder_skip_existing():
+    with tempfile.TemporaryDirectory() as td:
+        _setup_env(Path(td))
+        _reset_app_modules()
+        from app.config import settings
+        import app.storage as storage_mod
+        from app import publish
+
+        _build_complete_ep_dir(settings.out_dir, "ly", "ep-1")
+        prefix = "Drama/staging/ly/ep-1/720p"
+        # Simulate a prior partial publish: init + seg-0 already in the bucket,
+        # seg-1 never made it.
+        existing = [f"{prefix}/init-720p.mp4", f"{prefix}/seg-720p-0.m4s"]
+
+        # skip_existing=True → only the missing seg-1 is uploaded.
+        prov = _FakeProvider(existing=existing)
+        storage_mod.provider = prov
+        uploaded, skipped = publish.publish_ladder(
+            "ly", "ep-1", "720p", skip_existing=True,
+        )
+        assert uploaded == 1, (uploaded, prov.uploaded)
+        assert skipped == 2, skipped
+        assert prov.uploaded == [f"{prefix}/seg-720p-1.m4s"], prov.uploaded
+
+        # skip_existing=False → everything (re-)uploaded, overwriting.
+        prov2 = _FakeProvider(existing=existing)
+        storage_mod.provider = prov2
+        uploaded2, skipped2 = publish.publish_ladder(
+            "ly", "ep-1", "720p", skip_existing=False,
+        )
+        assert uploaded2 == 3, uploaded2   # init + seg-0 + seg-1
+        assert skipped2 == 0, skipped2
+        print("OK publish_ladder skip_existing: resume uploads 1/skips 2; full uploads 3")
+
+
+def case_next_ep_excludes_pending_delete():
+    with tempfile.TemporaryDirectory() as td:
+        _setup_env(Path(td))
+        _reset_app_modules()
+        from app import db
+        from app.routers.admin import _next_ep_number
+
+        db.init_db()
+        db.create_language(code="zh-rCN", display_label="简体中文")
+        db.create_drama(slug="ly", name="测试剧", default_lang="zh-rCN")
+        db.upsert_pending(
+            drama_slug="ly", ep_number=1, episode_id="ly-ep-1",
+            duration_ms=1000, cover_url="/videos/ly/ep-1/cover.jpg",
+            source_filename="x.mp4",
+        )
+        # A live (non-pending) ep1 → next is 2.
+        assert _next_ep_number("ly") == 2
+
+        # Mark it pending_delete (simulating delete of a previously-synced ep).
+        db.set_episode_sync_status("ly", 1, "pending_delete")
+        # Now the only row is hidden/pending_delete → next reuses ep 1.
+        assert _next_ep_number("ly") == 1
+
+        # upsert_pending onto ep 1 must UPDATE the hidden row, not collide.
+        old_source, version = db.upsert_pending(
+            drama_slug="ly", ep_number=1, episode_id="ly-ep-1",
+            duration_ms=2000, cover_url="/videos/ly/ep-1/cover.jpg",
+            source_filename="y.mp4",
+        )
+        assert version == 2, version  # resurrected row bumps upload_version
+        row = db.get_by_slug_ep("ly", 1)
+        assert row["sync_status"] == "dirty", row["sync_status"]
+        print("OK _next_ep_number: live→2, pending_delete→1, upsert resurrects (v2, dirty)")
+
+
+if __name__ == "__main__":
+    case_encode_artifacts_complete()
+    case_publish_ladder_skip_existing()
+    case_next_ep_excludes_pending_delete()
+    print("\nall cases passed")

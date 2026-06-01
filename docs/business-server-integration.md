@@ -180,18 +180,16 @@ HLS 端在收到 2xx 后会**额外**调用 `unpublish_drama_from_prod(slug)` �
   "episode_id": "ly-ep-3",
   "client_updated_at": "2026-05-07T12:34:56Z",
   "duration_ms": 150000,
-  "width": 720,
-  "height": 1280,
   "drm": {
     "key_uri": "/drm/ly/ep-3/key",
     "key_base64": "QUJDREVGR0hJSktMTU5PUA==",
     "iv_hex": "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
   },
-  "playlists": {
-    "540p":  "#EXTM3U\n#EXT-X-VERSION:7\n...",
-    "720p":  "#EXTM3U\n#EXT-X-VERSION:7\n...",
-    "1080p": "#EXTM3U\n#EXT-X-VERSION:7\n..."
-  },
+  "video_tracks": [
+    { "id": "high", "ladder": "1080p", "width": 608, "height": 1080, "playlist": "#EXTM3U\n#EXT-X-VERSION:7\n..." },
+    { "id": "mid",  "ladder": "720p",  "width": 406, "height": 720,  "playlist": "#EXTM3U\n#EXT-X-VERSION:7\n..." },
+    { "id": "low",  "ladder": "540p",  "width": 304, "height": 540,  "playlist": "#EXTM3U\n#EXT-X-VERSION:7\n..." }
+  ],
   "cover_url": "https://photobundle.oss-ap-southeast-1.aliyuncs.com/Drama/prod/ly/ep-3/cover.jpg",
   "subtitles": [
     {
@@ -203,16 +201,21 @@ HLS 端在收到 2xx 后会**额外**调用 `unpublish_drama_from_prod(slug)` �
 }
 ```
 
+> **`video_tracks` 对齐 SDK 的 `EpisodeInfo.videoTracks`**：3 档数组 high(1080p)→mid(720p)→low(540p)，每档自带 `id` + 该档**编码后**的 `width`/`height` + 该档完整 m3u8 文本（`playlist`）。业务端拼 `videoTracks` 时直接搬 `id`/`width`/`height`，不再按源尺寸推导。⚠️ 旧版的顶层单个 `width`/`height`（只是源尺寸）+ 按 ladder 名索引的 `playlists` map 已废弃 —— 解析器改读 `video_tracks[].{playlist,id,width,height,ladder}`。
+
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `drama_slug` / `ep_number` | str / int | 联合定位一集；`episode_id` 是 `"{drama_slug}-ep-{ep_number}"`，由 HLS 端生成，verbatim 透传 |
 | `client_updated_at` | str | 该集 `episodes.updated_at`，乱序保护，规则同 drama |
 | `duration_ms` | int | 视频时长（毫秒），FFmpeg 探测 |
-| `width` / `height` | int ∣ null | 源视频分辨率，与 SDK `Format.width/height` 同口径；老数据可能是 null（升级前已存在的行） |
 | `drm.key_uri` | str | **相对路径** `/drm/{slug}/ep-{n}/key`。业务服务器需要在自己的 host 上**实现这个端点**，返回 16 字节 raw 二进制；播放器按 m3u8 自身 host 解析这条 URI |
 | `drm.key_base64` | str | 16 字节 AES key 的 base64。`base64.b64decode(key_base64)` MUST 得到正好 16 字节 |
 | `drm.iv_hex` | str ∣ null | 32 字符的 hex IV。可空（播放器从 m3u8 的 `#EXT-X-KEY:IV` fallback） |
-| `playlists.{ladder}` | str | **完整的 m3u8 文本**，三档 540p / 720p / 1080p 都有。`#EXT-X-MAP:URI` 和 segment 行是**绝对的 OSS prod URL**（`https://photobundle.oss-ap-southeast-1.aliyuncs.com/Drama/prod/...`）。`#EXT-X-KEY:URI` 是 `/drm/{slug}/ep-{n}/key` 相对路径 |
+| `video_tracks[]` | array | 逐档数组，排序 high → mid → low，对齐 SDK `EpisodeInfo.videoTracks` |
+| `video_tracks[].id` | str | 档位身份 `high`=1080p / `mid`=720p / `low`=540p，透传 SDK `videoTracks[].id` |
+| `video_tracks[].ladder` | str | 该档 ladder 名 `1080p`/`720p`/`540p`，写盘路径段用 |
+| `video_tracks[].width` / `.height` | int ∣ null | 该档**编码后**分辨率（非源尺寸），与 SDK `videoTracks[].width/height` 同口径；老数据可能是 null（升级前已存在的行） |
+| `video_tracks[].playlist` | str | 该档**完整 m3u8 文本**。`#EXT-X-MAP:URI` 和 segment 行是**绝对的 OSS prod URL**（`https://photobundle.oss-ap-southeast-1.aliyuncs.com/Drama/prod/...`）。`#EXT-X-KEY:URI` 是 `/drm/{slug}/ep-{n}/key` 相对路径 |
 | `cover_url` | str | **绝对 prod OSS URL**。业务服务器只记录不拉取；客户端直连 OSS |
 | `subtitles[].url` | str | 同上，每条字幕的绝对 prod OSS URL |
 
@@ -222,8 +225,8 @@ HLS 端在收到 2xx 后会**额外**调用 `unpublish_drama_from_prod(slug)` �
 2. 检查该剧是否已存在（前置同步过）：找不到 → **409** `{"error": "drama not synced first"}`。
 3. 检查 `client_updated_at` 乱序 → 409。
 4. 解码 `drm.key_base64` 得 16 字节，写入业务服务器自己的 keys 目录（推荐 `<biz_OUT_DIR>/{slug}/keys/ep-{n}.key`）。
-5. 把每档 ladder 的 m3u8 文本写到 `<biz_OUT_DIR>/{slug}/ep-{n}/{ladder}/media-{ladder}.m3u8`。
-6. Upsert `episodes` 行（drama_slug, ep_number 联合主键），把 `cover_url` / `subtitles[].url` 的 OSS 绝对 URL 作为 opaque 字符串存进去。
+5. 遍历 `video_tracks`，把每档的 `playlist` 文本写到 `<biz_OUT_DIR>/{slug}/ep-{n}/{ladder}/media-{ladder}.m3u8`（`{ladder}` 取该档的 `video_tracks[].ladder`）。
+6. Upsert `episodes` 行（drama_slug, ep_number 联合主键）：把每档 `video_tracks[].{id,width,height}` 存进 DB（给客户端时直接拼 `videoTracks`），`cover_url` / `subtitles[].url` 的 OSS 绝对 URL 作为 opaque 字符串存。
 
 **注意**：m3u8 里引用的 `init-{ladder}.mp4` 和 `seg-{ladder}-N.m4s`、payload 里的 `cover_url` / `subtitles[].url` 已经由 HLS 端**通过 OSS server-side copy** 放在了 `Drama/prod/{slug}/ep-{n}/...` 下。**你们什么都不用做** —— 客户端按 m3u8 / `EpisodeInfo` 里的绝对 OSS URL 直接走 OSS（CDN）拿。
 

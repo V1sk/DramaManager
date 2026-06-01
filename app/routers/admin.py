@@ -340,11 +340,22 @@ def _process_episode_upload(
 
 
 def _next_ep_number(drama_slug: str) -> int:
-    """Compute MAX(ep_number)+1 for a drama. Connection-fresh each call so it
-    reflects committed concurrent inserts."""
+    """Compute the next episode number for a drama: MAX(ep_number)+1 over rows
+    that are NOT `pending_delete`.
+
+    A synced episode the operator deleted is kept as a hidden `pending_delete`
+    row until the business-server delete-sync removes it (two-phase delete).
+    Counting that row here would reserve its number, so re-uploading after
+    deleting the only episode would jump to ep 2 (with a 1-item list) instead
+    of reusing ep 1. Excluding `pending_delete` rows keeps the number aligned
+    with the visible episode list; `upsert_pending` then UPDATEs (resurrects)
+    the hidden row in place when the new upload lands on its slot, so there is
+    no UNIQUE collision. Connection-fresh each call so it reflects committed
+    concurrent inserts."""
     with sqlite3.connect(settings.db_path) as raw:
         row = raw.execute(
-            "SELECT COALESCE(MAX(ep_number), 0) + 1 FROM episodes WHERE drama_slug=?",
+            "SELECT COALESCE(MAX(ep_number), 0) + 1 FROM episodes "
+            "WHERE drama_slug=? AND sync_status != 'pending_delete'",
             (drama_slug,),
         ).fetchone()
     return int(row[0])

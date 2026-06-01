@@ -96,11 +96,21 @@ def rewrite_playlist(text: str, base_url: str) -> str:
     return "".join(out_lines)
 
 
-def publish_ladder(slug: str, ep_dir: str, ladder: str) -> None:
+def publish_ladder(
+    slug: str, ep_dir: str, ladder: str, *, skip_existing: bool = False,
+) -> tuple[int, int]:
     """把一档 ladder 目录下的 init.mp4 + 全部 .m4s 上传到 bucket。
+    返回 `(uploaded, skipped)` 计数供调用方记日志。
 
     任一上传失败 → raise PublishError，由 worker 把 episode 置为 failed。
     本地产物**保留不删**，便于排错和 follow-up "republish" 操作。
+
+    `skip_existing`：为 True 时先 `list_with_prefix` 列出该档 staging 前缀下已有
+    对象，对 key 已存在的文件**跳过上传**，只补传缺失的。对象存储的单次 PUT 是
+    原子的（失败的 PUT 不会在桶里留半个对象），所以"桶里存在该 key"== 上一次已
+    完整传成，跳过它是安全的。worker 在**重试**（复用已编码产物、DRM key 未变 →
+    已传分片仍有效）时用它，只补传上次没传上去的分片，省掉整档重传。为 False 时
+    无条件（覆盖式）上传每个对象（首次编码 / 迁移脚本 republish）。
 
     **不改写本地 m3u8** —— 本地 m3u8 保持 encode-clear.sh 产出的相对路径
     (`init-720p.mp4` / `seg-720p-0.m4s`)，让 HLS 自家预览页直接走 `/videos/`
@@ -123,9 +133,21 @@ def publish_ladder(slug: str, ep_dir: str, ladder: str) -> None:
         raise PublishError(f"no segments matched seg-{ladder}-*.m4s in {rung_dir}")
 
     remote_dir = f"{prov.staging_prefix}/{slug}/{ep_dir}/{ladder}"  # Drama/staging/...
+    already: set[str] = set()
+    if skip_existing:
+        try:
+            already = set(prov.list_with_prefix(remote_dir + "/"))
+        except Exception:  # noqa: BLE001 — list 失败就退化成全量上传，安全
+            already = set()
+
     files_to_upload: list[Path] = [init_local, *seg_locals]
+    uploaded = 0
+    skipped = 0
     for local in files_to_upload:
         remote_key = f"{remote_dir}/{local.name}"
+        if skip_existing and remote_key in already:
+            skipped += 1
+            continue
         try:
             res = prov.upload_file(remote_key, str(local))
         except Exception as e:  # noqa: BLE001 — SDK 抛的所有异常都视作上传失败
@@ -136,6 +158,8 @@ def publish_ladder(slug: str, ep_dir: str, ladder: str) -> None:
             raise PublishError(
                 f"storage upload failed for {ladder} {local.name}: {res}"
             )
+        uploaded += 1
+    return uploaded, skipped
 
 
 def publish_ladder_to_prod(slug: str, ep_dir: str, ladder: str) -> str:

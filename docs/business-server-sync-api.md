@@ -136,18 +136,34 @@ HLS 管理服务器（staging）通过 4 个 HTTP 接口把剧 / 集 / 翻译 / 
   "episode_id": "ly-ep-3",
   "client_updated_at": "2026-05-19T01:23:45Z",
   "duration_ms": 150000,
-  "width": 720,
-  "height": 1280,
   "drm": {
     "key_uri": "/drm/ly/ep-3/key",
     "key_base64": "QUJDREVGR0hJSktMTU5PUA==",
     "iv_hex": "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
   },
-  "playlists": {
-    "540p":  "#EXTM3U\n#EXT-X-VERSION:7\n...",
-    "720p":  "#EXTM3U\n#EXT-X-VERSION:7\n...",
-    "1080p": "#EXTM3U\n#EXT-X-VERSION:7\n..."
-  },
+  "video_tracks": [
+    {
+      "id": "high",
+      "ladder": "1080p",
+      "width": 608,
+      "height": 1080,
+      "playlist": "#EXTM3U\n#EXT-X-VERSION:7\n..."
+    },
+    {
+      "id": "mid",
+      "ladder": "720p",
+      "width": 406,
+      "height": 720,
+      "playlist": "#EXTM3U\n#EXT-X-VERSION:7\n..."
+    },
+    {
+      "id": "low",
+      "ladder": "540p",
+      "width": 304,
+      "height": 540,
+      "playlist": "#EXTM3U\n#EXT-X-VERSION:7\n..."
+    }
+  ],
   "cover_key": "Drama/prod/ly/ep-3/cover.jpg",
   "subtitles": [
     {
@@ -159,7 +175,11 @@ HLS 管理服务器（staging）通过 4 个 HTTP 接口把剧 / 集 / 翻译 / 
 }
 ```
 
-m3u8 文本举例（三档同构，这里贴 720p）：
+> **`video_tracks` 直接对齐 SDK 的 `EpisodeInfo.videoTracks`**：3 档数组，排序 `high`(1080p) → `mid`(720p) → `low`(540p)，每档自带 `id` + 该档**编码后**的 `width`/`height` + 该档的完整 m3u8 文本（`playlist`）。业务端给客户端拼 `videoTracks` 时**直接搬** `id`/`width`/`height`，不需要自己按源尺寸再推导逐档宽高。
+>
+> ⚠️ **协议变更**：旧版用顶层单个 `width`/`height`（只是**源视频**尺寸，对单档不准）+ 按 ladder 名索引的 `playlists` map。现已改成逐档 `video_tracks`。业务端解析器**必须同步改**：不能再读 `payload.playlists.{ladder}` / `payload.width` / `payload.height`，改读 `payload.video_tracks[].{playlist,id,width,height,ladder}`。`width`/`height` 在老剧集（升级前没记源尺寸）三档均为 `null`。
+
+每档 `video_tracks[].playlist` 的 m3u8 文本举例（三档同构，这里贴 `mid`/720p）：
 
 ```m3u8
 #EXTM3U
@@ -227,11 +247,14 @@ def rewrite_m3u8(text: str, media_base: str) -> str:
 | `episode_id` | str | `"{drama_slug}-ep-{ep_number}"`，HLS 端生成，verbatim 透传给 SDK |
 | `client_updated_at` | str | `episodes.updated_at`，乱序保护 |
 | `duration_ms` | int | FFmpeg 探测的视频时长 |
-| `width` / `height` | int ∣ null | 源视频 codec 分辨率；老数据可能为 null |
 | `drm.key_uri` | str | **相对路径** `/drm/{slug}/ep-{n}/key`；与 SDK `EpisodeInfo.drm.keyUri` verbatim 一致 |
 | `drm.key_base64` | str | base64 编码的 16 字节 AES key；`base64.b64decode` 后 MUST 恰好 16 字节 |
 | `drm.iv_hex` | str ∣ null | 32 字符 hex IV；可空（播放器从 m3u8 `#EXT-X-KEY:IV` fallback） |
-| `playlists.{ladder}` | str | 三档 540p / 720p / 1080p 完整 m3u8 文本；`#EXT-X-MAP:URI` + segment 行是**对象 key**（`Drama/prod/...`，无 host），`#EXT-X-KEY:URI` 是 `/drm/...` 相对路径 |
+| `video_tracks[]` | array | 逐档数组，排序 high → mid → low，对齐 SDK `EpisodeInfo.videoTracks` |
+| `video_tracks[].id` | str | 档位身份：`high` = 1080p / `mid` = 720p / `low` = 540p（透传给 SDK `videoTracks[].id`） |
+| `video_tracks[].ladder` | str | 该档 ladder 名 `1080p` / `720p` / `540p`（写盘路径段用） |
+| `video_tracks[].width` / `.height` | int ∣ null | 该档**编码后**分辨率（非源尺寸）；老数据为 null。直接搬给 SDK `videoTracks[].width/height` |
+| `video_tracks[].playlist` | str | 该档完整 m3u8 文本；`#EXT-X-MAP:URI` + segment 行是**对象 key**（`Drama/prod/...`，无 host），`#EXT-X-KEY:URI` 是 `/drm/...` 相对路径 |
 | `cover_key` | str | TOS prod 对象 key |
 | `subtitles[].key` | str | TOS prod 对象 key |
 
@@ -239,8 +262,8 @@ def rewrite_m3u8(text: str, media_base: str) -> str:
 1. 验证该剧已 upsert 过 → 否则 409。
 2. 检查 `client_updated_at` 乱序 → 否则 409。
 3. base64 解码 `drm.key_base64` 写到 keys 目录（建议 `<biz_out>/{slug}/keys/ep-{n}.key`）。
-4. 三档 m3u8 文本**原样**写到 `<biz_out>/{slug}/ep-{n}/{ladder}/media-{ladder}.m3u8`（不要在写盘时 rewrite，rewrite 推迟到给客户端时做，方便 `MEDIA_BASE_URL` 切 CDN 不用回填）。
-5. Upsert `episodes` 行，把 `cover_key` / `subtitles[].key` 作为 opaque 字符串存进 DB。
+4. 遍历 `video_tracks`，把每档的 `playlist` 文本**原样**写到 `<biz_out>/{slug}/ep-{n}/{ladder}/media-{ladder}.m3u8`（`{ladder}` 取该档的 `video_tracks[].ladder`；不要在写盘时 rewrite，rewrite 推迟到给客户端时做，方便 `MEDIA_BASE_URL` 切 CDN 不用回填）。
+5. Upsert `episodes` 行：把每档 `video_tracks[].{id,width,height}` 存进 DB（给客户端时直接拼成 `videoTracks`），`cover_key` / `subtitles[].key` 作为 opaque 字符串存。
 
 > m3u8 引用的 `init-*.mp4` / `seg-*.m4s`、payload 里的 `cover_key` / `subtitles[].key` 对应的 TOS 对象已经由 HLS 端通过 server-side copy 放在 prod 前缀；**业务端不需要任何 TOS 出站**。客户端按 `MEDIA_BASE_URL` 拼好的 URL（或解析 m3u8 行 rewrite 后的绝对 URL）直接拿数据，CDN 命中走 CDN，回源到 TOS。
 
