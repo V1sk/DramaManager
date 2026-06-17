@@ -145,6 +145,29 @@
                     <button type="button" class="btn btn-ghost btn-sm" id="add-sub-cancel">取消</button>
                 </div>
             </form>
+            {% if ai_translate_enabled %}
+            <div class="mt-4 pt-4 border-t border-dashed border-outline-variant">
+                <div class="flex items-center gap-2 mb-2">
+                    <span class="material-symbols-outlined text-[16px] text-secondary-fixed-dim">auto_awesome</span>
+                    <span class="text-body-sm font-semibold">AI 翻译字幕</span>
+                </div>
+                <div id="ai-sub-empty" class="meta hidden">先上传至少一条字幕作为翻译源。</div>
+                <div id="ai-sub-controls" class="flex flex-col gap-2">
+                    <div class="flex flex-col gap-1">
+                        <label class="text-body-sm text-on-surface-variant">源语言（已有字幕）</label>
+                        <select id="ai-sub-source"></select>
+                    </div>
+                    <div class="flex flex-col gap-1">
+                        <label class="text-body-sm text-on-surface-variant">目标语言</label>
+                        <select id="ai-sub-target"></select>
+                    </div>
+                    <button class="btn btn-secondary btn-sm" id="ai-sub-run">
+                        <span class="material-symbols-outlined text-[14px]">translate</span>开始翻译
+                    </button>
+                    <p class="text-[11px] text-on-surface-variant/70">逐 cue 翻译、保留时间轴；目标语言已有字幕会被覆盖。长字幕可能要等十几秒到一分钟。</p>
+                </div>
+            </div>
+            {% endif %}
         </div>
 
         <!-- Danger Zone -->
@@ -344,7 +367,76 @@ function renderSubs() {
         .filter(l => !used.has(l.code))
         .map(l => `<option value="${l.code}">${escapeHtml(l.display_label)} (${l.code})</option>`)
         .join('');
+    renderAiSub();
 }
+
+// --- AI subtitle translation (source = an existing subtitle, target = one lang) ---
+function renderAiSub() {
+    const srcSel = document.getElementById('ai-sub-source');
+    if (!srcSel) return;  // AI translation disabled (control not rendered)
+    const empty = document.getElementById('ai-sub-empty');
+    const controls = document.getElementById('ai-sub-controls');
+    if (!SUBS.length) {
+        empty.classList.remove('hidden');
+        controls.classList.add('hidden');
+        return;
+    }
+    empty.classList.add('hidden');
+    controls.classList.remove('hidden');
+    const prev = srcSel.value;
+    srcSel.innerHTML = SUBS.map(s => `<option value="${escapeHtml(s.lang_code)}">${escapeHtml(s.label)} (${escapeHtml(s.lang_code)})</option>`).join('');
+    if (prev && SUBS.some(s => s.lang_code === prev)) srcSel.value = prev;
+    renderAiSubTargets();
+}
+
+function renderAiSubTargets() {
+    const srcSel = document.getElementById('ai-sub-source');
+    const tgtSel = document.getElementById('ai-sub-target');
+    if (!srcSel || !tgtSel) return;
+    const src = srcSel.value;
+    const others = LANGS.filter(l => l.code !== src);
+    tgtSel.innerHTML = ['<option value="__all__">全部其它语言</option>']
+        .concat(others.map(l => `<option value="${escapeHtml(l.code)}">${escapeHtml(l.display_label)} (${escapeHtml(l.code)})</option>`))
+        .join('');
+}
+
+(function () {
+    const srcSel = document.getElementById('ai-sub-source');
+    if (srcSel) srcSel.addEventListener('change', renderAiSubTargets);
+    const runBtn = document.getElementById('ai-sub-run');
+    if (!runBtn) return;
+    runBtn.addEventListener('click', async () => {
+        const source = document.getElementById('ai-sub-source').value;
+        const targetVal = document.getElementById('ai-sub-target').value;
+        if (!source) { flash('请选择源语言', 'warn'); return; }
+        const targets = targetVal === '__all__'
+            ? LANGS.map(l => l.code).filter(c => c !== source)
+            : [targetVal];
+        if (!targets.length) { flash('没有可翻译的目标语言', 'warn'); return; }
+        if (!confirm(`用 AI 把字幕从 "${source}" 翻译到：${targets.join('、')}？\n目标语言已有字幕会被覆盖。`)) return;
+        const orig = runBtn.innerHTML;
+        runBtn.disabled = true;
+        let ok = 0, fail = 0;
+        for (const t of targets) {
+            runBtn.innerHTML = `<span class="material-symbols-outlined text-[14px]">hourglass_empty</span>翻译 ${t}…`;
+            try {
+                const res = await fetch(`/admin/episodes/${encodeURIComponent(SLUG)}/${EP}/subtitles/translate`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ source_lang: source, target_lang: t }),
+                });
+                const body = await res.json().catch(() => ({}));
+                if (res.status === 503) { flash('AI 翻译未启用', 'warn'); break; }
+                if (!res.ok) { flash(`字幕翻译失败 ${t} (${res.status}): ${body.detail || ''}`, 'error'); fail++; continue; }
+                ok++;
+                flash(`字幕 ${t} 已翻译（${body.cues} 条 cue）`, 'info');
+                await refreshSubs();
+            } catch (e) { flash(`字幕翻译出错 ${t}: ${e}`, 'error'); fail++; }
+        }
+        runBtn.disabled = false; runBtn.innerHTML = orig;
+        flash(`AI 字幕翻译完成：成功 ${ok}，失败 ${fail}`, fail ? 'warn' : 'info');
+    });
+})();
 
 (async function () {
     try { const r = await fetch('/api/languages'); LANGS = await r.json(); }

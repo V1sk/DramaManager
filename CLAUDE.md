@@ -63,7 +63,7 @@ Environment variables:
 | `PIPELINE_CONCURRENCY` | no | `2` | 并发跑的 pipeline job 数（encode + encrypt + bucket publish）。每个 job 是独立 `pipeline.sh` 子进程；ffmpeg 本身已多线程，调高会过度订阅 CPU，有空闲核才往上加。同一集的多个 job 仍由 `work_queue.py` 的 per-episode 锁串行化，绝不并行写同一个 `ep-{n}/` 目录。整数 `>= 1`；非法值 → 启动期 fail-fast。 |
 | `SESSION_SECRET_KEY` | no | 随机生成 | 签名 `/admin` 后台会话 cookie 的密钥（`admin-accounts-auth`）。**未设时启动期用 `secrets.token_hex(32)` 在内存里随机生成并往 stderr 打 warning** —— 此时所有会话在进程重启后失效（操作员要重登录）。需要重启间保持登录的部署务必显式设一个长随机串（`openssl rand -hex 32`）。 |
 | `ADMIN_INITIAL_PASSWORD` | first boot only | _unset_ | 首次启动引导用：`users` 表为空时 `init_db()` 用它创建 `admin` 账号（`must_change_pw=1`，首次登录强制改密）。`users` 已有行时本变量被忽略。`users` 为空却未设本变量 → 启动期 fail-fast。 |
-| `AI_TRANSLATE_API_KEY` | no | _unset_ | AI 短文本翻译总开关（kie.ai 风格 OpenAI 兼容 chat-completions，Bearer token）。**未设时功能整体禁用**：`POST /admin/{dramas,tags,actors}/.../translate` 返回 503，剧详情 / 标签库 / 演员库的「AI 翻译」按钮隐藏（`settings.ai_translate_enabled` 据此判定）。设了即把剧名/简介、标签 label、演员 name 从各自 `default_lang` 一键翻译并**直接覆盖**到其余全部已注册语言，落库走现有 `upsert_*_translation` + `mark_*_dirty`，天然进入 staging→手动同步流。**这是除业务同步外唯一的公网出站**（kie.ai），需确认部署网络放行且接受文本发往第三方。HTTP 层在 `app/ai_translate_client.py`（mirror `sync_client.py`），端点在 `app/routers/ai_translate.py`。字幕翻译不在本期范围。 |
+| `AI_TRANSLATE_API_KEY` | no | _unset_ | AI 短文本翻译总开关（kie.ai 风格 OpenAI 兼容 chat-completions，Bearer token）。**未设时功能整体禁用**：`POST /admin/{dramas,tags,actors}/.../translate` 返回 503，剧详情 / 标签库 / 演员库的「AI 翻译」按钮隐藏（`settings.ai_translate_enabled` 据此判定）。设了即把剧名/简介、标签 label、演员 name 从各自 `default_lang` 一键翻译并**直接覆盖**到其余全部已注册语言，落库走现有 `upsert_*_translation` + `mark_*_dirty`，天然进入 staging→手动同步流。**这是除业务同步外唯一的公网出站**（kie.ai），需确认部署网络放行且接受文本发往第三方。HTTP 层在 `app/ai_translate_client.py`（mirror `sync_client.py`），端点在 `app/routers/ai_translate.py`。**字幕**亦支持：集详情页从某条已有字幕逐 cue 翻译到目标语言（保留时间轴，分块 + 等长校验，VTT 解析在 `app/vtt.py`），见 `POST /admin/episodes/{slug}/{ep}/subtitles/translate`。 |
 | `AI_TRANSLATE_BASE_URL` | no | `https://api.kie.ai` | AI 翻译端点 base（无尾部 `/`）。请求打到 `{base}/{model}/v1/chat/completions`。 |
 | `AI_TRANSLATE_MODEL` | no | `gpt-5-2` | 选 kie.ai market 的 model path 段。 |
 | `AI_TRANSLATE_TIMEOUT` | no | `60` | 单次翻译 HTTP 请求超时（秒）。整数；非正值 → 启动期 fail-fast。一次调用会把多字段 × 多语言一并翻完，故比 sync 默认更宽。 |
@@ -131,6 +131,7 @@ URL map:
 | `POST /admin/dramas/{slug}/translate` | AI 翻译：把剧名（+ 简介若有）从 `default_lang` 翻到其余全部已注册语言并覆盖，落 `translations` + 标 drama dirty。503 当 `AI_TRANSLATE_API_KEY` 未设；404 / 400（默认语言无剧名）/ 502（AI 服务失败）/ 200 `{translated_langs, errors}`。 |
 | `POST /admin/tags/{slug}/translate` | AI 翻译标签 label（同上语义），cascade dirty 引用该 tag 的剧。503 / 404 / 400 / 502 / 200。 |
 | `POST /admin/actors/{slug}/translate` | AI 翻译演员 name（同上语义），cascade dirty 引用该 actor 的剧。503 / 404 / 400 / 502 / 200。 |
+| `POST /admin/episodes/{slug}/{ep}/subtitles/translate` | AI 字幕翻译：body `{source_lang, target_lang}`，从源字幕逐 cue 翻到目标语言（保留时间轴，分块 + 等长校验），落盘 + staging + `upsert_subtitle` + 标该集 dirty，覆盖目标语言已有字幕。503 / 404 / 400 / 502 / 200 `{lang_code,label,url,cues}`。 |
 | `POST /admin/dramas/{slug}/sync` | 业务同步：剧入队（含其下全部 dirty / pending_delete 集）。503 当 `BUSINESS_SYNC_BASE_URL` 未设；404 / 200 (no-op) / 202。`[gate]` can_sync |
 | `POST /admin/episodes/{slug}/{ep}/sync` | 业务同步：单集入队。503 / 404 / 200 (no-op) / 409 (剧从未同步) / 202。`[gate]` can_sync |
 | `GET /admin/sync` | HTML 总览页：列出全部非 clean 的剧 + 集 |

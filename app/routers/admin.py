@@ -113,6 +113,7 @@ async def admin_episode_detail_page(
             "subtitles": subtitles,
             "upload_history": upload_history,
             "nav_active": "home",
+            "ai_translate_enabled": settings.ai_translate_enabled,
         },
     )
 
