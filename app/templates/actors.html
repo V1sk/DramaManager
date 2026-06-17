@@ -239,18 +239,29 @@ $body.addEventListener('click', async (ev) => {
         const orig = btn.innerHTML;
         btn.disabled = true;
         btn.innerHTML = '<span class="material-symbols-outlined text-[14px]">hourglass_empty</span>入队中…';
+        let body;
         try {
             const res = await fetch(`/admin/actors/${encodeURIComponent(slug)}/translate`, { method: 'POST' });
-            const body = await res.json().catch(() => ({}));
-            if (res.status === 503) flash('AI 翻译未启用', 'warn');
-            else if (!res.ok) flash(`入队失败 (${res.status}): ${body.detail || ''}`, 'error');
-            else if (body.noop) flash('没有需要翻译的语言（其它语言都已完成）', 'info');
-            else {
-                const n = (body.enqueued || []).length, sk = (body.skipped || []).length;
-                flash(`已入队 ${n} 个语言任务${sk ? `，${sk} 个已在队列` : ''} · 进度见「翻译任务」`, 'info');
-            }
-        } catch (e) { flash('入队出错: ' + e, 'error'); }
-        finally { btn.disabled = false; btn.innerHTML = orig; }
+            body = await res.json().catch(() => ({}));
+            if (res.status === 503) { flash('AI 翻译未启用', 'warn'); btn.disabled = false; btn.innerHTML = orig; return; }
+            if (!res.ok) { flash(`入队失败 (${res.status}): ${body.detail || ''}`, 'error'); btn.disabled = false; btn.innerHTML = orig; return; }
+            if (body.noop) { flash('没有需要翻译的语言（其它语言都已完成）', 'info'); btn.disabled = false; btn.innerHTML = orig; return; }
+        } catch (e) { flash('入队出错: ' + e, 'error'); btn.disabled = false; btn.innerHTML = orig; return; }
+        const n = (body.enqueued || []).length, sk = (body.skipped || []).length;
+        flash(`已入队 ${n} 个语言任务${sk ? `，${sk} 个已在队列` : ''} · 后台翻译中，完成后自动刷新`, 'info');
+        // While in flight only tick a counter on the (still-mounted) button — no
+        // table rebuild → no flicker. Refresh + reopen the panel once, at the end.
+        pollTranslation('actor', slug, null, {
+            onTick: (p) => { btn.innerHTML = `<span class="material-symbols-outlined text-[14px]">hourglass_empty</span>翻译中…剩 ${p.queued + p.running}`; },
+            onDone: async (p, reason) => {
+                await refresh();
+                const row = $body.querySelector(`tr.panel-row[data-slug="${slug}"]`);
+                const cache = CACHE.find(r => r.slug === slug);
+                if (row && cache) { renderPanel(slug, cache); row.style.display = ''; }
+                if (reason === 'timeout') flash('翻译仍在进行，已停止自动刷新；详见「翻译任务」', 'warn');
+                else flash(`演员 "${slug}" 翻译完成${p.failed ? `（${p.failed} 个失败）` : ''}`, p.failed ? 'warn' : 'info');
+            },
+        });
     }
 });
 

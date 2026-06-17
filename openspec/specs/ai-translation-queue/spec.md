@@ -55,13 +55,17 @@ A worker SHALL retry a job a bounded number of times with backoff when the provi
 - **WHEN** the provider returns a non-retryable error envelope (e.g. insufficient credits)
 - **THEN** the job is marked `failed` and `error` contains the provider's `code`/`msg`, not an opaque message
 
-### Requirement: Resumable fan-out, per-language failure isolation
+### Requirement: Overwrite-by-design fan-out, per-language failure isolation
 
-Re-triggering "translate to all languages" SHALL enqueue only languages that are not already `done`, leaving completed translations untouched. A failure in one language's job SHALL NOT affect other languages' jobs.
+One-click "translate to all languages" SHALL (re)enqueue EVERY target language (every registered language except the source), overwriting existing translations. It SHALL NOT skip languages based on prior job history (`done` records), because that history goes stale the moment a translation is edited or deleted out of band and would silently drop languages that still need (re)translating. A failure in one language's job SHALL NOT affect other languages' jobs. Genuinely in-flight (`queued`/`running`) duplicates SHALL still be suppressed (reported as skipped), so double-clicking does not double-enqueue.
 
-#### Scenario: Re-run only enqueues missing languages
-- **WHEN** an operator re-triggers translate-to-all after 30 of 40 languages are `done`
-- **THEN** only the 10 not-`done` languages are enqueued
+#### Scenario: Re-run after a manual deletion re-translates everything
+- **WHEN** an operator deletes some languages' translations and then re-triggers translate-to-all
+- **THEN** ALL target languages are enqueued (not a no-op), regardless of prior `done` records, and existing translations are overwritten
+
+#### Scenario: Double-click does not double-enqueue
+- **WHEN** an operator triggers translate-to-all twice before the first batch finishes
+- **THEN** the second trigger enqueues nothing new; the still-in-flight languages are reported as skipped
 
 #### Scenario: One language failing does not block others
 - **WHEN** one target language's job fails

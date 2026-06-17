@@ -155,4 +155,43 @@
     }
     refreshTranslateZone();
     setInterval(refreshTranslateZone, 5000);
+
+    // --- per-entity translation progress poller (ai-translation-queue) ---
+    // After enqueueing translation jobs, poll this entity's progress and let the
+    // caller repaint the panel as jobs land. `onTick(p)` fires every poll while
+    // work is in flight; `onDone(p, reason)` fires once when active===0 (reason
+    // 'complete') or the poller gives up ('timeout'). Returns a stop() fn.
+    window.pollTranslation = function (kind, entityRef, epNumber, opts) {
+        opts = opts || {};
+        const intervalMs = opts.intervalMs || 3000;
+        const maxMs = opts.maxMs || 900000;  // 15 min ceiling
+        const start = Date.now();
+        let stopped = false;
+        async function tick() {
+            if (stopped) return;
+            let p = null;
+            try {
+                const qs = new URLSearchParams({ kind: kind, entity_ref: entityRef });
+                if (epNumber != null) qs.set('ep_number', epNumber);
+                const r = await fetch('/admin/translations/progress?' + qs.toString(), { cache: 'no-store' });
+                if (r.ok) p = await r.json();
+            } catch (_) { /* transient — try again next tick */ }
+            if (p) {
+                try { if (opts.onTick) await opts.onTick(p); } catch (_) {}
+                if (((p.queued || 0) + (p.running || 0)) === 0) {
+                    stopped = true;
+                    try { if (opts.onDone) await opts.onDone(p, 'complete'); } catch (_) {}
+                    return;
+                }
+            }
+            if (Date.now() - start > maxMs) {
+                stopped = true;
+                try { if (opts.onDone) await opts.onDone(p || {}, 'timeout'); } catch (_) {}
+                return;
+            }
+            setTimeout(tick, intervalMs);
+        }
+        setTimeout(tick, intervalMs);
+        return function () { stopped = true; };
+    };
 })();

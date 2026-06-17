@@ -163,7 +163,7 @@
     </div>
 </main>
 
-<script src="/static/admin.js"></script>
+<script src="/static/admin.js?v={{ request.app.state.static_version | default('') }}"></script>
 {% block scripts %}{% endblock %}
 </body>
 </html>

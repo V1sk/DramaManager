@@ -5,8 +5,9 @@
 （每语言一 job）。落库仍走现有 `upsert_*_translation` / 字幕写盘 + `mark_*_dirty`，
 天然进入 staging → 手动同步流程。
 
-粒度：每目标语言一个 job。默认**跳过已 done 的语言**（可续传）；`force` 忽略 done
-重翻。dedupe 索引保证同一单元不会有重复 in-flight job。
+粒度：每目标语言一个 job。一键翻译是**覆盖式**——每次都重翻全部目标语言，**不按 job
+历史跳过**（历史会在译文被手动删改后过期，跳过会漏翻）。入队前清掉这些语言的旧
+terminal job 记录；dedupe 唯一索引保证同一单元不会有重复 in-flight job（双击→skipped）。
 
 仅当 `settings.ai_translate_enabled` 时可用，否则 503。鉴权沿用 `/admin` 的
 `require_user`（与手工编辑翻译同级）。
@@ -52,6 +53,10 @@ async def _fanout(
     """Insert one queued job per target language and push it onto the worker
     queue. Returns `(enqueued, skipped)` where `skipped` were deduped against an
     already in-flight job."""
+    # Overwrite run: drop prior terminal (done/failed) records for these langs so
+    # per-entity progress reflects this run and the table stays bounded. In-flight
+    # rows survive → still deduped below.
+    db.clear_terminal_translation_jobs(kind, entity_ref, target_codes, ep_number=ep_number)
     enqueued: list[str] = []
     skipped: list[str] = []
     for code in target_codes:
@@ -66,20 +71,23 @@ async def _fanout(
     return enqueued, skipped
 
 
-def _targets_for(default_lang: str, *, force: bool, kind: str, entity_ref: str,
-                 ep_number: int | None = None) -> list[str]:
-    """Registered languages minus the source, minus already-`done` (unless force)."""
-    done = set() if force else db.done_translation_target_langs(kind, entity_ref, ep_number)
-    return [c for c in _lang_codes() if c != default_lang and c not in done]
+def _other_lang_codes(default_lang: str) -> list[str]:
+    """Every registered language except the source. One-click translate is
+    overwrite-by-design, so we ALWAYS (re)translate all of them — never skip
+    based on prior `done` jobs: that job history goes stale the moment a
+    translation is edited or deleted out of band, which would wrongly skip
+    languages that actually need (re)translating. In-flight duplicates are still
+    deduped by the unique index in `enqueue_translation_job` (reported as
+    `skipped`), so double-clicking won't double-enqueue."""
+    return [c for c in _lang_codes() if c != default_lang]
 
 
 @router.post("/admin/dramas/{drama_slug}/translate")
 async def ai_translate_drama(
     drama_slug: str = PathParam(..., pattern=_SLUG_PATTERN),
-    force: bool = Query(False),
 ) -> JSONResponse:
     """Enqueue per-language jobs to translate the drama's name (+ synopsis) from
-    its default_lang into every other registered language."""
+    its default_lang into every other registered language (overwrite)."""
     _require_enabled()
     drama = db.get_drama(drama_slug)
     if drama is None:
@@ -88,7 +96,7 @@ async def ai_translate_drama(
     src = (db.list_drama_translations(drama_slug) or {}).get(default_lang) or {}
     if not (src.get("name") or "").strip():
         raise HTTPException(status_code=400, detail=f"默认语言 '{default_lang}' 还没有剧名，无法翻译")
-    targets = _targets_for(default_lang, force=force, kind="drama", entity_ref=drama_slug)
+    targets = _other_lang_codes(default_lang)
     if not targets:
         return JSONResponse({"ok": True, "noop": True, "enqueued": [], "skipped": []})
     enqueued, skipped = await _fanout("drama", drama_slug, targets, source_lang=default_lang)
@@ -99,7 +107,6 @@ async def ai_translate_drama(
 @router.post("/admin/tags/{slug}/translate")
 async def ai_translate_tag(
     slug: str = PathParam(..., pattern=_SLUG_PATTERN),
-    force: bool = Query(False),
 ) -> JSONResponse:
     _require_enabled()
     tag = db.get_tag(slug)
@@ -108,7 +115,7 @@ async def ai_translate_tag(
     default_lang = tag["default_lang"]
     if not (db.list_translations_for_entity("tag", slug, "label").get(default_lang) or "").strip():
         raise HTTPException(status_code=400, detail=f"默认语言 '{default_lang}' 还没有 label，无法翻译")
-    targets = _targets_for(default_lang, force=force, kind="tag", entity_ref=slug)
+    targets = _other_lang_codes(default_lang)
     if not targets:
         return JSONResponse({"ok": True, "noop": True, "enqueued": [], "skipped": []})
     enqueued, skipped = await _fanout("tag", slug, targets, source_lang=default_lang)
@@ -119,7 +126,6 @@ async def ai_translate_tag(
 @router.post("/admin/actors/{slug}/translate")
 async def ai_translate_actor(
     slug: str = PathParam(..., pattern=_SLUG_PATTERN),
-    force: bool = Query(False),
 ) -> JSONResponse:
     _require_enabled()
     actor = db.get_actor(slug)
@@ -128,7 +134,7 @@ async def ai_translate_actor(
     default_lang = actor["default_lang"]
     if not (db.list_translations_for_entity("actor", slug, "name").get(default_lang) or "").strip():
         raise HTTPException(status_code=400, detail=f"默认语言 '{default_lang}' 还没有 name，无法翻译")
-    targets = _targets_for(default_lang, force=force, kind="actor", entity_ref=slug)
+    targets = _other_lang_codes(default_lang)
     if not targets:
         return JSONResponse({"ok": True, "noop": True, "enqueued": [], "skipped": []})
     enqueued, skipped = await _fanout("actor", slug, targets, source_lang=default_lang)
@@ -159,7 +165,6 @@ async def ai_translate_subtitle(
         raise HTTPException(status_code=400, detail=f"源语言 '{source_lang}' 的字幕不存在")
 
     all_codes = _lang_codes()
-    force = bool(payload.get("force"))
     requested = payload.get("targets")
     if requested is not None:
         if not isinstance(requested, list) or not all(isinstance(c, str) for c in requested):
@@ -167,12 +172,11 @@ async def ai_translate_subtitle(
         bad = [c for c in requested if c not in all_codes]
         if bad:
             raise HTTPException(status_code=400, detail=f"未注册的目标语言: {bad}")
-        candidates = [c for c in requested if c != source_lang]
+        targets = [c for c in requested if c != source_lang]
     else:
-        candidates = [c for c in all_codes if c != source_lang]
-
-    done = set() if force else db.done_translation_target_langs("subtitle", drama_slug, ep_number)
-    targets = [c for c in candidates if c not in done]
+        targets = [c for c in all_codes if c != source_lang]
+    # Overwrite-by-design: always (re)translate all requested targets; no
+    # skip-done (stale job history must not silently drop languages).
     if not targets:
         return JSONResponse({"ok": True, "noop": True, "enqueued": [], "skipped": []})
     enqueued, skipped = await _fanout(
@@ -201,6 +205,18 @@ async def translations_overview(request: Request) -> HTMLResponse:
             "nav_active": "translations",
         },
     )
+
+
+@router.get("/admin/translations/progress")
+async def translation_progress(
+    kind: str = Query(..., pattern=r"^(drama|tag|actor|subtitle)$"),
+    entity_ref: str = Query(..., pattern=_SLUG_PATTERN),
+    ep_number: int | None = Query(None),
+) -> JSONResponse:
+    """Per-entity job counts `{queued, running, done, failed}` — polled by the
+    entity pages after enqueue so they can refresh the panel as jobs complete.
+    `active = queued + running == 0` means this entity's batch has settled."""
+    return JSONResponse(db.entity_translation_progress(kind, entity_ref, ep_number))
 
 
 @router.get("/admin/translations/summary")

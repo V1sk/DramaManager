@@ -2804,3 +2804,24 @@ def entity_translation_progress(
     for r in rows:
         out[r["status"]] = r["n"]
     return out
+
+
+def clear_terminal_translation_jobs(
+    kind: str, entity_ref: str, target_langs: list[str], ep_number: int | None = None
+) -> int:
+    """Delete `done`/`failed` job rows for the given (entity, target_langs) before
+    a fresh overwrite-translate run, so per-entity progress reflects the current
+    run (not stale history) and the table doesn't grow unbounded across re-runs.
+    In-flight (`queued`/`running`) rows are left untouched, so the dedupe index
+    still suppresses double-enqueue. Returns the number of rows deleted."""
+    if not target_langs:
+        return 0
+    placeholders = ",".join("?" for _ in target_langs)
+    with _connect() as conn:
+        cur = conn.execute(
+            f"DELETE FROM translation_jobs WHERE kind=? AND entity_ref=? "
+            f"AND IFNULL(ep_number,-1)=IFNULL(?,-1) AND target_lang IN ({placeholders}) "
+            f"AND status IN ('done','failed')",
+            (kind, entity_ref, ep_number, *target_langs),
+        )
+    return cur.rowcount or 0

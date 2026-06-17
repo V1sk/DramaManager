@@ -259,6 +259,16 @@ app.mount(
     name="static",
 )
 
+# Cache-bust admin.js by its mtime so a redeploy that changes the JS can never
+# be shadowed by a browser-cached copy (templates reference
+# `/static/admin.js?v={{ request.app.state.static_version }}`). Without this,
+# a stale admin.js silently breaks features the freshly-served HTML expects
+# (e.g. window.pollTranslation undefined → translate handlers throw).
+try:
+    app.state.static_version = str(int((_STATIC_DIR / "admin.js").stat().st_mtime))
+except OSError:
+    app.state.static_version = "1"
+
 
 @app.get("/")
 async def root() -> RedirectResponse:
