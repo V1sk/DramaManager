@@ -112,10 +112,11 @@
     </div>
     <nav class="hidden md:flex items-center gap-1 h-full text-body-md">
         {% set nav_items = [
-            ('/admin',           'home',      '首页'),
-            ('/admin/tags',      'tags',      '标签'),
-            ('/admin/actors',    'actors',    '演员'),
-            ('/admin/languages', 'languages', '语言'),
+            ('/admin',             'home',         '首页'),
+            ('/admin/tags',        'tags',         '标签'),
+            ('/admin/actors',      'actors',       '演员'),
+            ('/admin/languages',   'languages',    '语言'),
+            ('/admin/translations','translations', '翻译任务'),
         ] %}
         {% for href, key, label in nav_items %}
         <a href="{{ href }}" class="h-full flex items-center px-3 transition-colors {% if nav_active == key %}text-secondary border-b-2 border-secondary font-semibold{% else %}text-on-surface-variant border-b-2 border-transparent hover:text-on-surface{% endif %}">
@@ -131,6 +132,7 @@
         {% endif %}
     </nav>
     <div class="ml-auto flex items-center gap-3 text-on-surface-variant">
+        <div id="translate-zone" class="text-body-sm"></div>
         <div id="sync-zone" class="text-body-sm"></div>
         {% if current_user %}
         <span class="text-body-sm hidden sm:flex items-center gap-1">

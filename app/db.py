@@ -181,6 +181,33 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_log_id ON audit_log(id DESC);
+
+-- ai-translation-queue: durable per-target-language AI translation jobs.
+-- Standalone (no FK into the drama/i18n graph, like users/audit_log) so it is
+-- purely additive — created by CREATE TABLE IF NOT EXISTS on next init_db(),
+-- no hls.db reset. The worker tolerates an entity that was deleted between
+-- enqueue and run (job fails gracefully). `entity_ref` = drama/tag/actor slug
+-- (and the drama slug for subtitles); `ep_number`/`source_lang` are subtitle-only.
+CREATE TABLE IF NOT EXISTS translation_jobs (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind        TEXT    NOT NULL CHECK(kind IN ('drama','tag','actor','subtitle')),
+  entity_ref  TEXT    NOT NULL,
+  ep_number   INTEGER,
+  source_lang TEXT,
+  target_lang TEXT    NOT NULL,
+  status      TEXT    NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','done','failed')),
+  attempts    INTEGER NOT NULL DEFAULT 0,
+  error       TEXT,
+  created_at  TEXT    NOT NULL,
+  updated_at  TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tjobs_status ON translation_jobs(status, id);
+-- Dedupe in-flight jobs for the same unit of work: at most one queued|running
+-- job per (kind, entity, episode, target_lang). Terminal rows (done/failed)
+-- are excluded so history accumulates and re-runs are allowed.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tjobs_inflight
+  ON translation_jobs(kind, entity_ref, IFNULL(ep_number, -1), target_lang)
+  WHERE status IN ('queued','running');
 """
 
 
@@ -2636,3 +2663,144 @@ def list_episode_uploads(episode_id: str) -> list[dict]:
             (episode_id,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# ai-translation-queue: durable per-target-language translation jobs
+# ---------------------------------------------------------------------------
+
+# Terminal statuses never block a fresh in-flight job (see idx_tjobs_inflight).
+_TJOB_TERMINAL = ("done", "failed")
+
+
+def enqueue_translation_job(
+    kind: str,
+    entity_ref: str,
+    target_lang: str,
+    *,
+    ep_number: int | None = None,
+    source_lang: str | None = None,
+) -> int | None:
+    """Insert a queued job for one (entity, target_lang) unit. Idempotent against
+    an already in-flight (queued|running) job for the same unit via the partial
+    unique index. Returns the new row id, or None if a duplicate was suppressed.
+    """
+    now = _now_iso()
+    with _connect() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO translation_jobs"
+            "(kind, entity_ref, ep_number, source_lang, target_lang, status, attempts, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, 'queued', 0, ?, ?)",
+            (kind, entity_ref, ep_number, source_lang, target_lang, now, now),
+        )
+        # rowcount 0 → IGNORE'd (an in-flight dup already exists).
+        return cur.lastrowid if (cur.rowcount or 0) > 0 else None
+
+
+def get_translation_job(job_id: int) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM translation_jobs WHERE id=?", (job_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def set_translation_job_status(
+    job_id: int,
+    status: str,
+    *,
+    error: str | None = None,
+    bump_attempts: bool = False,
+) -> None:
+    now = _now_iso()
+    with _connect() as conn:
+        if bump_attempts:
+            conn.execute(
+                "UPDATE translation_jobs SET status=?, error=?, attempts=attempts+1, updated_at=? WHERE id=?",
+                (status, error, now, job_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE translation_jobs SET status=?, error=?, updated_at=? WHERE id=?",
+                (status, error, now, job_id),
+            )
+
+
+def list_queued_translation_job_ids() -> list[int]:
+    """Every `queued` job id, oldest first — used to seed the in-memory queue at
+    startup (DB is the source of truth)."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id FROM translation_jobs WHERE status='queued' ORDER BY id ASC"
+        ).fetchall()
+    return [r["id"] for r in rows]
+
+
+def reap_orphaned_translation_jobs() -> int:
+    """Flip jobs stuck in `running` (orphaned by a process restart) back to
+    `queued` so they are retried. Mirrors `reap_orphaned_syncing`. Returns count.
+    """
+    now = _now_iso()
+    with _connect() as conn:
+        cur = conn.execute(
+            "UPDATE translation_jobs SET status='queued', updated_at=? WHERE status='running'",
+            (now,),
+        )
+    return cur.rowcount or 0
+
+
+def done_translation_target_langs(
+    kind: str, entity_ref: str, ep_number: int | None
+) -> set[str]:
+    """Target langs already `done` for this unit — excluded at fan-out time so a
+    re-run only enqueues what's missing (resumability)."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT target_lang FROM translation_jobs "
+            "WHERE kind=? AND entity_ref=? AND IFNULL(ep_number,-1)=IFNULL(?,-1) AND status='done'",
+            (kind, entity_ref, ep_number),
+        ).fetchall()
+    return {r["target_lang"] for r in rows}
+
+
+def count_translation_jobs_by_status() -> dict[str, int]:
+    """`{status: count}` over all jobs (missing statuses default to 0)."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT status, COUNT(*) AS n FROM translation_jobs GROUP BY status"
+        ).fetchall()
+    out = {"queued": 0, "running": 0, "done": 0, "failed": 0}
+    for r in rows:
+        out[r["status"]] = r["n"]
+    return out
+
+
+def list_translation_jobs(statuses: tuple[str, ...] | None = None, limit: int = 500) -> list[dict]:
+    """Jobs filtered by status (default: non-`done`), newest first. For the
+    operator overview page."""
+    statuses = statuses or ("queued", "running", "failed")
+    placeholders = ",".join("?" for _ in statuses)
+    with _connect() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM translation_jobs WHERE status IN ({placeholders}) "
+            f"ORDER BY id DESC LIMIT ?",
+            (*statuses, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def entity_translation_progress(
+    kind: str, entity_ref: str, ep_number: int | None = None
+) -> dict[str, int]:
+    """`{status: count}` for one entity's jobs — drives inline "12/40" progress."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT status, COUNT(*) AS n FROM translation_jobs "
+            "WHERE kind=? AND entity_ref=? AND IFNULL(ep_number,-1)=IFNULL(?,-1) "
+            "GROUP BY status",
+            (kind, entity_ref, ep_number),
+        ).fetchall()
+    out = {"queued": 0, "running": 0, "done": 0, "failed": 0}
+    for r in rows:
+        out[r["status"]] = r["n"]
+    return out

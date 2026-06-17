@@ -652,23 +652,20 @@ document.getElementById('translations-panel').addEventListener('click', async (e
     const aiBtn = document.getElementById('ai-translate-drama-btn');
     if (!aiBtn) return;
     aiBtn.addEventListener('click', async () => {
-        if (!confirm('用 AI 把默认语言的剧名 + 简介翻译到其它全部已注册语言？\n这会覆盖这些语言已有的剧名 / 简介。')) return;
+        if (!confirm('用 AI 把默认语言的剧名 + 简介翻译到其它全部已注册语言？\n后台逐语言执行，会覆盖这些语言已有的剧名 / 简介。')) return;
         const orig = aiBtn.innerHTML;
         aiBtn.disabled = true;
-        aiBtn.innerHTML = '<span class="material-symbols-outlined text-[16px]">hourglass_empty</span>翻译中…';
+        aiBtn.innerHTML = '<span class="material-symbols-outlined text-[16px]">hourglass_empty</span>入队中…';
         try {
             const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/translate`, { method: 'POST' });
             const body = await res.json().catch(() => ({}));
             if (res.status === 503) { flash('AI 翻译未启用', 'warn'); return; }
-            if (!res.ok) { flash(`AI 翻译失败 (${res.status}): ${body.detail || ''}`, 'error'); return; }
-            if (body.noop) { flash('没有其它已注册语言可翻译', 'info'); return; }
-            const n = (body.translated_langs || []).length;
-            const errs = body.errors || [];
-            flash(`AI 已翻译 ${n} 种语言${errs.length ? `，${errs.length} 个有问题` : ''}`, errs.length ? 'warn' : 'info');
-            for (const er of errs) flash(er, 'warn');
-            await refreshDrama();
-            await renderTranslationsPanel();
-        } catch (e) { flash('AI 翻译出错: ' + e, 'error'); }
+            if (!res.ok) { flash(`入队失败 (${res.status}): ${body.detail || ''}`, 'error'); return; }
+            if (body.noop) { flash('没有需要翻译的语言（其它语言都已完成）', 'info'); return; }
+            const n = (body.enqueued || []).length;
+            const sk = (body.skipped || []).length;
+            flash(`已入队 ${n} 个语言任务${sk ? `，${sk} 个已在队列` : ''} · 进度见「翻译任务」`, 'info');
+        } catch (e) { flash('入队出错: ' + e, 'error'); }
         finally { aiBtn.disabled = false; aiBtn.innerHTML = orig; }
     });
 })();

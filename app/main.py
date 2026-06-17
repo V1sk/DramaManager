@@ -64,12 +64,25 @@ async def lifespan(app: FastAPI):
     else:
         log.info("lifespan up: business-sync disabled (BUSINESS_SYNC_BASE_URL unset)")
 
+    ai_job_tasks: list = []
     if settings.ai_translate_enabled:
-        from . import ai_translate_client
+        from . import ai_translate_client, ai_jobs
         await ai_translate_client.startup()
+        # ai-translation-queue: reap orphaned 'running' jobs (restart), start the
+        # worker pool, then re-seed the in-memory queue from DB so pre-restart
+        # jobs resume.
+        tjob_reaped = db.reap_orphaned_translation_jobs()
+        if tjob_reaped:
+            log.warning("startup: requeued %d orphaned translation job(s)", tjob_reaped)
+        ai_job_tasks = [
+            asyncio.create_task(ai_jobs.worker_loop(i), name=f"ai-translate-worker-{i}")
+            for i in range(settings.ai_translate_concurrency)
+        ]
+        seeded = await ai_jobs.seed_from_db()
         log.info(
-            "lifespan up: ai-translate enabled; base=%s model=%s",
+            "lifespan up: ai-translate enabled; base=%s model=%s workers=%d seeded=%d",
             settings.ai_translate_base_url, settings.ai_translate_model,
+            settings.ai_translate_concurrency, seeded,
         )
     else:
         log.info("lifespan up: ai-translate disabled (AI_TRANSLATE_API_KEY unset)")
@@ -105,6 +118,13 @@ async def lifespan(app: FastAPI):
                 pass
             from . import sync_client
             await sync_client.shutdown()
+        for t in ai_job_tasks:
+            t.cancel()
+        for t in ai_job_tasks:
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         if settings.ai_translate_enabled:
             from . import ai_translate_client
             await ai_translate_client.shutdown()

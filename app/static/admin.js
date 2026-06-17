@@ -127,4 +127,32 @@
     }
     refreshSyncZone();
     setInterval(refreshSyncZone, 5000);
+
+    // --- nav-bar translate zone polling (ai-translation-queue) ---
+    // Polls /admin/translations/summary every 5s, renders "翻译 N" → /admin/translations.
+    // Hidden when AI translation is disabled.
+    async function refreshTranslateZone() {
+        const zone = document.getElementById('translate-zone');
+        if (!zone) return;
+        try {
+            const r = await fetch('/admin/translations/summary', {cache: 'no-store'});
+            if (!r.ok) return;
+            const j = await r.json();
+            if (!j.enabled) { zone.innerHTML = ''; return; }
+            const n = j.outstanding || 0;
+            if (n === 0) {
+                zone.innerHTML = '';
+                return;
+            }
+            const active = (j.queued || 0) + (j.running || 0);
+            const cls = (j.failed && active === 0) ? 'text-status-danger' : 'text-status-warn';
+            const icon = (active > 0) ? 'translate' : 'error';
+            const title = '翻译任务 queued ' + (j.queued||0) + ' / running ' + (j.running||0) + ' / failed ' + (j.failed||0);
+            zone.innerHTML = '<a href="/admin/translations" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md ' + cls + ' hover:bg-surface-container-highest transition-colors" title="' + title + '"><span class="material-symbols-outlined text-[16px]">' + icon + '</span><span>翻译 <strong>' + n + '</strong></span></a>';
+        } catch (_) {
+            // network / parse error — ignore, try again next tick
+        }
+    }
+    refreshTranslateZone();
+    setInterval(refreshTranslateZone, 5000);
 })();

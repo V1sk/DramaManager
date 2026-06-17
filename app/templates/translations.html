@@ -1,0 +1,94 @@
+{% extends "_base.html" %}
+{% block title %}翻译任务 · HLS 管理{% endblock %}
+
+{% block content %}
+<header class="flex items-end justify-between gap-4 mb-6 pb-4 border-b border-outline-variant">
+    <div>
+        <h1 class="text-headline-lg text-on-surface flex items-center gap-2">
+            <span class="material-symbols-outlined text-secondary-fixed-dim">translate</span>
+            翻译任务
+        </h1>
+        <p class="text-body-md text-on-surface-variant mt-1">
+            AI 翻译在后台逐语言执行。本页列出全部 <strong class="text-on-surface">未完成</strong>（queued / running / failed）任务。
+            <span class="meta">queued {{ counts.queued }} · running {{ counts.running }} · failed {{ counts.failed }} · done {{ counts.done }}</span>
+        </p>
+    </div>
+    <button id="btn-retry-failed" class="btn btn-primary" {% if not ai_enabled or counts.failed == 0 %}disabled{% endif %}>
+        <span class="material-symbols-outlined text-[18px]">refresh</span>
+        重试全部失败（{{ counts.failed }}）
+    </button>
+</header>
+
+{% if not ai_enabled %}
+<div class="flash warn mb-6">
+    AI 翻译未启用。请设置 <code class="mono">AI_TRANSLATE_API_KEY</code> 后重启服务。
+</div>
+{% endif %}
+
+{% if not jobs %}
+<div class="bg-surface-container border border-dashed border-outline-variant rounded-lg p-16 text-center">
+    <span class="material-symbols-outlined text-[48px] text-status-ready">task_alt</span>
+    <p class="mt-4 text-body-lg text-on-surface">没有未完成的翻译任务</p>
+    <p class="mt-1 text-body-sm text-on-surface-variant">queued / running / failed 都为空。</p>
+</div>
+{% else %}
+<div class="bg-surface-container-high border border-outline-variant rounded-lg overflow-hidden">
+    <table class="data">
+        <thead>
+            <tr>
+                <th>类型</th>
+                <th>目标</th>
+                <th>语言</th>
+                <th>状态</th>
+                <th class="text-right">尝试</th>
+                <th>错误</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for j in jobs %}
+            <tr>
+                <td><span class="badge">{{ j.kind }}</span></td>
+                <td class="mono text-on-surface-variant">
+                    {% if j.kind == 'subtitle' %}{{ j.entity_ref }} / ep-{{ j.ep_number }} <span class="meta">（源 {{ j.source_lang }}）</span>
+                    {% else %}{{ j.entity_ref }}{% endif %}
+                </td>
+                <td><span class="lang-chip">{{ j.target_lang }}</span></td>
+                <td><span class="sync-badge {% if j.status == 'failed' %}sync_failed{% elif j.status == 'running' %}syncing{% else %}dirty{% endif %}">{{ j.status }}</span></td>
+                <td class="text-right mono">{{ j.attempts }}</td>
+                <td>
+                    {% if j.error %}
+                    <details class="error"><summary>查看错误</summary><pre>{{ j.error }}</pre></details>
+                    {% else %}—{% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+const btnRetry = document.getElementById('btn-retry-failed');
+if (btnRetry) {
+    btnRetry.addEventListener('click', async () => {
+        const orig = btnRetry.innerHTML;
+        btnRetry.disabled = true;
+        btnRetry.innerHTML = '<span class="material-symbols-outlined text-[18px]">hourglass_empty</span>入队中…';
+        try {
+            const r = await fetch('/admin/translations/retry', { method: 'POST' });
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok) { flash(`重试失败 (${r.status}): ${j.detail || ''}`, 'error'); btnRetry.disabled = false; btnRetry.innerHTML = orig; return; }
+            flash(`已重新入队 ${j.requeued} 个失败任务`, 'info');
+            setTimeout(() => location.reload(), 800);
+        } catch (e) { flash('重试出错: ' + e, 'error'); btnRetry.disabled = false; btnRetry.innerHTML = orig; }
+    });
+}
+
+// Auto-refresh while anything is queued/running so progress is visible.
+{% if counts.queued or counts.running %}
+setTimeout(() => location.reload(), 4000);
+{% endif %}
+</script>
+{% endblock %}

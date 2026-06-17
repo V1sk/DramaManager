@@ -26,12 +26,18 @@ log = logging.getLogger("hls.ai_translate")
 
 
 class AITranslateError(Exception):
-    """AI 翻译失败（HTTP 非 2xx / 网络错误 / 返回不可解析）。message 给操作员看。"""
+    """AI 翻译失败（HTTP 非 2xx / 网络错误 / 返回不可解析）。message 给操作员看。
+
+    `retryable=True` 标记瞬时失败（网络 / 超时 / 429 / 网关抖动 / 模型偶发条数不符），
+    供 ai-translation-queue 的 worker 决定是否退避重试；鉴权 / 余额 / 结构性错误为
+    False（重试也没用）。
+    """
 
     _MSG_LIMIT = 600
 
-    def __init__(self, message: str) -> None:
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
         super().__init__(message[: self._MSG_LIMIT])
+        self.retryable = retryable
 
 
 # 系统提示：把模型钉死成"剧集元数据翻译器 + 只输出 JSON"。
@@ -178,13 +184,16 @@ async def _chat(messages: list) -> str:
     try:
         resp = await client.post(path, json=body)
     except httpx.HTTPError as e:
-        raise AITranslateError(f"AI 翻译请求失败（网络 / 超时）：{e}") from e
+        # transport / timeout → transient, worth a backoff retry
+        raise AITranslateError(f"AI 翻译请求失败（网络 / 超时）：{e}", retryable=True) from e
 
     try:
         data = resp.json()
     except ValueError as e:
+        # non-JSON body (often a transient gateway blip) → retryable
         raise AITranslateError(
-            f"AI 翻译响应不是 JSON (HTTP {resp.status_code}): {(resp.text or '')[:300]}"
+            f"AI 翻译响应不是 JSON (HTTP {resp.status_code}): {(resp.text or '')[:300]}",
+            retryable=True,
         ) from e
 
     # kie.ai 即使出错也常返回 HTTP 200，把真实状态塞进 {"code": <非2xx>, "msg": "..."}
@@ -195,11 +204,15 @@ async def _chat(messages: list) -> str:
     if resp.status_code >= 400:
         raise AITranslateError(
             f"AI 翻译服务返回 HTTP {resp.status_code}"
-            + (f" (code={code}): {msg}" if msg else f": {(resp.text or '')[:300]}")
+            + (f" (code={code}): {msg}" if msg else f": {(resp.text or '')[:300]}"),
+            retryable=(resp.status_code == 429 or resp.status_code >= 500),
         )
     if not isinstance(data, dict) or "choices" not in data:
         if msg:
-            raise AITranslateError(f"AI 翻译服务返回错误 (code={code}): {msg}")
+            raise AITranslateError(
+                f"AI 翻译服务返回错误 (code={code}): {msg}",
+                retryable=(code == 429),
+            )
         snippet = json.dumps(data, ensure_ascii=False)[:300] if isinstance(data, dict) else str(data)[:300]
         raise AITranslateError(f"AI 翻译响应缺少 choices：{snippet}")
     try:
@@ -306,7 +319,9 @@ async def translate_lines(
     ]
     arr = _parse_json_array(await _chat(messages))
     if len(arr) != len(lines):
+        # model nondeterminism — a retry may yield the right count
         raise AITranslateError(
-            f"字幕翻译条数不匹配：输入 {len(lines)} 条，返回 {len(arr)} 条"
+            f"字幕翻译条数不匹配：输入 {len(lines)} 条，返回 {len(arr)} 条",
+            retryable=True,
         )
     return ["" if x is None else str(x) for x in arr]

@@ -4,6 +4,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 
 # Ladder rungs the pipeline always produces. Keep in sync with `LADDERS` in pipeline.sh.
 ALLOWED_LADDERS = ("540p", "720p", "1080p")
@@ -63,6 +65,10 @@ class Settings:
     ai_translate_api_key: str | None
     ai_translate_model: str
     ai_translate_timeout: int
+    # ai-translation-queue: how many translation jobs run concurrently in the
+    # background worker pool. Kept small by default to bound kie.ai rate/cost;
+    # raise only if the provider quota comfortably allows it. Integer >= 1.
+    ai_translate_concurrency: int
 
     @property
     def ai_translate_enabled(self) -> bool:
@@ -77,6 +83,11 @@ def _parse_bool_env(name: str) -> bool:
 
 def load_settings() -> Settings:
     repo_root = Path(__file__).resolve().parent.parent
+    # Load .env from the repo root so a direct `uvicorn app.main:app` run (no
+    # docker-compose env_file) still picks up secrets like AI_TRANSLATE_API_KEY.
+    # override=False → real environment vars and docker-compose's env_file keep
+    # precedence; .env only fills what isn't already set.
+    load_dotenv(repo_root / ".env", override=False)
     out_dir = Path(os.environ.get("OUT_DIR", repo_root / "out")).resolve()
     db_path = Path(os.environ.get("DB_PATH", repo_root / "hls.db")).resolve()
     tmp_dir = Path(os.environ.get("UPLOAD_TMP_DIR", repo_root / "tmp")).resolve()
@@ -183,6 +194,17 @@ def load_settings() -> Settings:
         raise RuntimeError(
             f"AI_TRANSLATE_TIMEOUT must be positive, got {ai_timeout}"
         )
+    ai_concurrency_raw = os.environ.get("AI_TRANSLATE_CONCURRENCY", "2").strip()
+    try:
+        ai_concurrency = int(ai_concurrency_raw) if ai_concurrency_raw else 2
+    except ValueError as e:
+        raise RuntimeError(
+            f"AI_TRANSLATE_CONCURRENCY must be an integer, got {ai_concurrency_raw!r}"
+        ) from e
+    if ai_concurrency < 1:
+        raise RuntimeError(
+            f"AI_TRANSLATE_CONCURRENCY must be >= 1, got {ai_concurrency}"
+        )
 
     return Settings(
         out_dir=out_dir,
@@ -202,6 +224,7 @@ def load_settings() -> Settings:
         ai_translate_api_key=ai_key,
         ai_translate_model=ai_model,
         ai_translate_timeout=ai_timeout,
+        ai_translate_concurrency=ai_concurrency,
     )
 
 

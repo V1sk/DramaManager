@@ -413,28 +413,28 @@ function renderAiSubTargets() {
             ? LANGS.map(l => l.code).filter(c => c !== source)
             : [targetVal];
         if (!targets.length) { flash('没有可翻译的目标语言', 'warn'); return; }
-        if (!confirm(`用 AI 把字幕从 "${source}" 翻译到：${targets.join('、')}？\n目标语言已有字幕会被覆盖。`)) return;
+        const allMode = targetVal === '__all__';
+        if (!confirm(`用 AI 把字幕从 "${source}" 翻译到：${allMode ? '全部其它语言' : targets.join('、')}？\n后台逐语言执行（保留时间轴），目标语言已有字幕会被覆盖。`)) return;
         const orig = runBtn.innerHTML;
         runBtn.disabled = true;
-        let ok = 0, fail = 0;
-        for (const t of targets) {
-            runBtn.innerHTML = `<span class="material-symbols-outlined text-[14px]">hourglass_empty</span>翻译 ${t}…`;
-            try {
-                const res = await fetch(`/admin/episodes/${encodeURIComponent(SLUG)}/${EP}/subtitles/translate`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ source_lang: source, target_lang: t }),
-                });
-                const body = await res.json().catch(() => ({}));
-                if (res.status === 503) { flash('AI 翻译未启用', 'warn'); break; }
-                if (!res.ok) { flash(`字幕翻译失败 ${t} (${res.status}): ${body.detail || ''}`, 'error'); fail++; continue; }
-                ok++;
-                flash(`字幕 ${t} 已翻译（${body.cues} 条 cue）`, 'info');
-                await refreshSubs();
-            } catch (e) { flash(`字幕翻译出错 ${t}: ${e}`, 'error'); fail++; }
-        }
-        runBtn.disabled = false; runBtn.innerHTML = orig;
-        flash(`AI 字幕翻译完成：成功 ${ok}，失败 ${fail}`, fail ? 'warn' : 'info');
+        runBtn.innerHTML = '<span class="material-symbols-outlined text-[14px]">hourglass_empty</span>入队中…';
+        // One enqueue call; omit `targets` for "all", else send the chosen one. The
+        // server fans out one job per target language.
+        const payload = allMode ? { source_lang: source } : { source_lang: source, targets };
+        try {
+            const res = await fetch(`/admin/episodes/${encodeURIComponent(SLUG)}/${EP}/subtitles/translate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const body = await res.json().catch(() => ({}));
+            if (res.status === 503) { flash('AI 翻译未启用', 'warn'); return; }
+            if (!res.ok) { flash(`入队失败 (${res.status}): ${body.detail || ''}`, 'error'); return; }
+            if (body.noop) { flash('没有需要翻译的语言（其它语言都已完成）', 'info'); return; }
+            const n = (body.enqueued || []).length, sk = (body.skipped || []).length;
+            flash(`已入队 ${n} 个字幕翻译任务${sk ? `，${sk} 个已在队列` : ''} · 进度见「翻译任务」`, 'info');
+        } catch (e) { flash('入队出错: ' + e, 'error'); }
+        finally { runBtn.disabled = false; runBtn.innerHTML = orig; }
     });
 })();
 
