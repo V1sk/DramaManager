@@ -6,6 +6,10 @@ venv
 .idea
 app/oss_upload.py
 
+# Python bytecode caches
+__pycache__/
+*.py[cod]
+
 # Per-developer object-storage credentials (copy credentials.example.py).
 app/storage/credentials.py
 
