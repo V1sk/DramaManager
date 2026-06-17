@@ -12,6 +12,7 @@ from fastapi.templating import Jinja2Templates
 
 from .. import db
 from ..auth import require_can_delete
+from ..config import settings
 
 router = APIRouter()
 log = logging.getLogger("hls.actors")
@@ -26,7 +27,11 @@ _LANG_PATTERN = r"^[a-z]{2,3}(-[A-Za-z0-9]{2,8})?$"
 
 @router.get("/admin/actors", response_class=HTMLResponse)
 async def actors_page(request: Request) -> HTMLResponse:
-    return _TEMPLATES.TemplateResponse(request, "actors.html", {"nav_active": "actors"})
+    return _TEMPLATES.TemplateResponse(
+        request,
+        "actors.html",
+        {"nav_active": "actors", "ai_translate_enabled": settings.ai_translate_enabled},
+    )
 
 
 @router.get("/admin/actors.json")

@@ -139,26 +139,21 @@
                     <span class="material-symbols-outlined text-secondary-fixed-dim text-[18px]">translate</span>
                     多语言翻译
                 </h3>
-                <button class="btn btn-xs btn-ghost" data-toggle="translations-panel" title="收起">
-                    <span class="material-symbols-outlined text-[16px]">close</span>
-                </button>
-            </div>
-            <div class="p-4">
-                <div id="translations-rows" class="flex flex-col gap-3"></div>
-                <div class="mt-4 pt-4 border-t border-dashed border-outline-variant flex items-end gap-2 flex-wrap">
-                    <div class="flex-1 min-w-[150px]">
-                        <label class="text-body-sm text-on-surface-variant">添加语言</label>
-                        <select id="add-tr-lang" class="mt-1"></select>
-                    </div>
-                    <div class="flex-1 min-w-[200px]">
-                        <label class="text-body-sm text-on-surface-variant">剧名</label>
-                        <input id="add-tr-name" placeholder="必填：剧名" class="mt-1">
-                    </div>
-                    <button class="btn btn-primary" id="add-tr-btn">
-                        <span class="material-symbols-outlined text-[16px]">add</span>添加
+                <div class="flex items-center gap-2">
+                    {% if ai_translate_enabled %}
+                    <button class="btn btn-xs btn-secondary" id="ai-translate-drama-btn"
+                            title="用 AI 把默认语言的剧名 + 简介翻译到其它全部语言（覆盖已有译文）">
+                        <span class="material-symbols-outlined text-[16px]">auto_awesome</span>AI 翻译
+                    </button>
+                    {% endif %}
+                    <button class="btn btn-xs btn-ghost" data-toggle="translations-panel" title="收起">
+                        <span class="material-symbols-outlined text-[16px]">close</span>
                     </button>
                 </div>
-                <p class="meta mt-3">每条翻译可独立保存。删除翻译会清掉该语言的剧名 / 简介 / 海报。默认语言不可整体删除。</p>
+            </div>
+            <div class="p-4">
+                <div id="translations-rows"></div>
+                <p class="meta mt-3">用左上角下拉框切换语言查看 / 编辑该语言的剧名、简介、海报；选「未翻译」的语言填写剧名后保存即新增。删除翻译会清掉该语言的剧名 / 简介 / 海报，默认语言不可整体删除。海报为空时回退显示默认语言海报。</p>
             </div>
         </section>
 
@@ -377,63 +372,94 @@ function renderActorsPanel() {
     });
 }
 
-function renderTranslationsPanel() {
+let TR_LANGS = [];          // all registered languages [{code, display_label}]
+let trSelectedLang = null;  // currently selected language code in the editor
+
+async function renderTranslationsPanel() {
     const wrap = document.getElementById('translations-rows');
-    const langs = Object.keys(DRAMA.translations || {}).sort();
-    if (!langs.length) {
-        wrap.innerHTML = '<div class="meta py-4 text-center">尚无翻译。下方添加新语言。</div>';
-    } else {
-        wrap.innerHTML = langs.map(lang => {
-            const t = DRAMA.translations[lang];
-            const isDefault = lang === DRAMA.default_lang;
-            const posterRow = t.poster
-                ? `<img class="rounded-md border border-outline-variant" src="${t.poster}" alt="" style="width:60px;height:auto">`
-                : '<span class="meta inline-flex items-center justify-center w-[60px] h-[90px] rounded-md border border-dashed border-outline-variant">无海报</span>';
-            return `<div class="bg-surface-container-low border border-outline-variant rounded-lg p-4" data-lang="${lang}">
-                <div class="flex items-center justify-between mb-3">
-                    <div class="flex items-center gap-2">
-                        <span class="lang-chip ${isDefault ? 'default' : ''}">${lang}${isDefault ? ' ★' : ''}</span>
-                        ${isDefault ? '<span class="text-[11px] text-on-surface-variant/70">默认语言</span>' : ''}
-                    </div>
-                    <button class="btn btn-xs btn-ghost" data-action="del-tr" ${isDefault ? 'disabled title="默认语言不可整体删除"' : ''}>
-                        <span class="material-symbols-outlined text-[14px]">delete</span>删除该语言
-                    </button>
-                </div>
-                <div class="grid grid-cols-1 md:grid-cols-[60px_1fr] gap-3">
-                    <div class="md:col-span-2 grid grid-cols-1 md:grid-cols-[80px_1fr] gap-2 items-center">
-                        <label class="text-body-sm text-on-surface-variant">剧名</label>
-                        <input class="tr-name" value="${escapeHtml(t.name || '')}" placeholder="必填">
-                    </div>
-                    <div class="md:col-span-2 grid grid-cols-1 md:grid-cols-[80px_1fr] gap-2 items-start">
-                        <label class="text-body-sm text-on-surface-variant mt-2">简介</label>
-                        <textarea class="tr-syn" rows="3" placeholder="可留空">${escapeHtml(t.synopsis || '')}</textarea>
-                    </div>
-                    <div class="md:col-span-2 grid grid-cols-1 md:grid-cols-[80px_60px_1fr_auto] gap-2 items-center">
-                        <label class="text-body-sm text-on-surface-variant">海报</label>
-                        ${posterRow}
-                        <input type="file" class="poster-file" accept="image/jpeg,image/png,image/webp">
-                        <div class="flex items-center gap-2">
-                            <button class="btn btn-sm btn-secondary" data-action="upload-poster"><span class="material-symbols-outlined text-[14px]">upload</span>上传</button>
-                            ${t.poster ? '<button class="btn btn-sm btn-ghost" data-action="del-poster" title="删海报"><span class="material-symbols-outlined text-[14px]">delete</span></button>' : ''}
-                        </div>
-                    </div>
-                </div>
-                <div class="flex justify-end mt-3">
-                    <button class="btn btn-sm btn-primary" data-action="save-tr">
-                        <span class="material-symbols-outlined text-[14px]">save</span>保存翻译
-                    </button>
-                </div>
-            </div>`;
-        }).join('');
+    // Refetch the registry each render so newly-added languages show up.
+    try { TR_LANGS = (await fetch('/api/languages').then(r => r.json())) || []; }
+    catch (_) { TR_LANGS = TR_LANGS || []; }
+    if (!TR_LANGS.length) {
+        wrap.innerHTML = '<div class="meta py-4 text-center">尚无已注册语言，请先到「语言」页添加。</div>';
+        return;
     }
-    return fetch('/api/languages').then(r => r.json()).then(allLangs => {
-        const sel = document.getElementById('add-tr-lang');
-        const used = new Set(langs);
-        sel.innerHTML = allLangs
-            .filter(l => !used.has(l.code))
-            .map(l => `<option value="${l.code}">${escapeHtml(l.display_label)} (${l.code})</option>`)
-            .join('');
+    const trans = DRAMA.translations || {};
+    if (!trSelectedLang || !TR_LANGS.some(l => l.code === trSelectedLang)) {
+        trSelectedLang = DRAMA.default_lang;
+    }
+    const opts = TR_LANGS.map(l => {
+        const star = l.code === DRAMA.default_lang ? ' ★' : '';
+        const untr = trans[l.code] ? '' : ' · 未翻译';
+        const sel = l.code === trSelectedLang ? ' selected' : '';
+        return `<option value="${escapeHtml(l.code)}"${sel}>${escapeHtml(l.display_label)} (${escapeHtml(l.code)})${star}${untr}</option>`;
+    }).join('');
+    wrap.innerHTML = `
+        <div class="flex items-center justify-between gap-2 mb-3 flex-wrap">
+            <div class="flex items-center gap-2">
+                <select id="tr-lang-select" class="min-w-[200px]">${opts}</select>
+                <span id="tr-default-hint" class="text-[11px] text-on-surface-variant/70"></span>
+            </div>
+            <button class="btn btn-xs btn-ghost" data-action="del-tr-current">
+                <span class="material-symbols-outlined text-[14px]">delete</span>删除该语言
+            </button>
+        </div>
+        <div id="tr-editor"></div>`;
+    document.getElementById('tr-lang-select').addEventListener('change', (e) => {
+        trSelectedLang = e.target.value;
+        renderTrEditor();
     });
+    renderTrEditor();
+}
+
+// Render the name / synopsis / poster editor for the currently selected language.
+function renderTrEditor() {
+    const editor = document.getElementById('tr-editor');
+    if (!editor) return;
+    const trans = DRAMA.translations || {};
+    const lang = trSelectedLang;
+    const t = trans[lang] || {};
+    const isDefault = lang === DRAMA.default_lang;
+
+    const hint = document.getElementById('tr-default-hint');
+    if (hint) hint.textContent = isDefault ? '默认语言' : (trans[lang] ? '' : '（该语言尚无翻译，填写剧名后保存即新增）');
+    const delBtn = document.querySelector('[data-action="del-tr-current"]');
+    if (delBtn) { delBtn.disabled = isDefault; delBtn.title = isDefault ? '默认语言不可整体删除' : ''; }
+
+    // Poster: show this language's own poster, else fall back to the default-lang poster.
+    const ownPoster = t.poster;
+    const defPoster = (trans[DRAMA.default_lang] || {}).poster;
+    const posterUrl = ownPoster || defPoster;
+    const inherited = !ownPoster && !!defPoster;
+    const posterImg = posterUrl
+        ? `<img class="rounded-md border border-outline-variant" src="${posterUrl}?t=${Date.now()}" alt="" style="width:60px;height:auto">`
+        : '<span class="meta inline-flex items-center justify-center w-[60px] h-[90px] rounded-md border border-dashed border-outline-variant">无海报</span>';
+    const posterNote = inherited ? '<span class="text-[11px] text-on-surface-variant/60">默认语言海报</span>' : '';
+
+    editor.innerHTML = `
+        <div class="grid grid-cols-1 md:grid-cols-[80px_1fr] gap-2 items-center mb-3">
+            <label class="text-body-sm text-on-surface-variant">剧名</label>
+            <input class="tr-name" value="${escapeHtml(t.name || '')}" placeholder="必填">
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-[80px_1fr] gap-2 items-start mb-3">
+            <label class="text-body-sm text-on-surface-variant mt-2">简介</label>
+            <textarea class="tr-syn" rows="3" placeholder="可留空">${escapeHtml(t.synopsis || '')}</textarea>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-[80px_60px_1fr_auto] gap-2 items-center">
+            <label class="text-body-sm text-on-surface-variant">海报</label>
+            ${posterImg}
+            <div class="flex items-center gap-2 flex-wrap">
+                <input type="file" class="poster-file" accept="image/jpeg,image/png,image/webp">
+                ${posterNote}
+            </div>
+            <div class="flex items-center gap-2">
+                <button class="btn btn-sm btn-secondary" data-action="upload-poster"><span class="material-symbols-outlined text-[14px]">upload</span>上传</button>
+                ${ownPoster ? '<button class="btn btn-sm btn-ghost" data-action="del-poster" title="删海报"><span class="material-symbols-outlined text-[14px]">delete</span></button>' : ''}
+            </div>
+        </div>
+        <div class="flex justify-end mt-3">
+            <button class="btn btn-sm btn-primary" data-action="save-tr"><span class="material-symbols-outlined text-[14px]">save</span>保存翻译</button>
+        </div>`;
 }
 
 async function refreshDrama() {
@@ -569,34 +595,37 @@ document.getElementById('batch-subtitle-file').addEventListener('change', async 
     finally { btn.disabled = false; btn.innerHTML = orig; ev.target.value = ''; }
 });
 
-// --- Translation panel actions ---
+// --- Translation panel actions (single-card editor; language via dropdown) ---
 document.getElementById('translations-panel').addEventListener('click', async (ev) => {
     const target = ev.target.closest('[data-action]');
     if (!target) return;
     const action = target.dataset.action;
-    const langPanel = target.closest('[data-lang]');
-    const lang = langPanel?.dataset.lang;
+    const lang = trSelectedLang;
+    const editor = document.getElementById('tr-editor');
+    if (!lang || !editor) return;
     if (action === 'save-tr') {
-        const name = langPanel.querySelector('.tr-name').value.trim();
-        const syn = langPanel.querySelector('.tr-syn').value.trim();
-        const body = {};
-        if (name) body.name = name;
+        const name = editor.querySelector('.tr-name').value.trim();
+        const syn = editor.querySelector('.tr-syn').value.trim();
+        if (!name) { flash('剧名为必填', 'warn'); return; }
+        const body = { name };
         if (syn) body.synopsis = syn;
-        if (!Object.keys(body).length) { flash('至少填写名称或简介', 'warn'); return; }
         try {
             await fetchJSON(`/admin/dramas/${encodeURIComponent(SLUG)}/translations/${encodeURIComponent(lang)}`, { method: 'PUT', body });
             await refreshDrama(); await renderTranslationsPanel();
             flash('翻译已保存', 'info');
         } catch (e) { flash(`保存失败: ${e.body?.detail || e}`, 'error'); }
-    } else if (action === 'del-tr') {
+    } else if (action === 'del-tr-current') {
+        if (lang === DRAMA.default_lang) { flash('默认语言不可整体删除', 'warn'); return; }
         if (!confirm(`删除 "${lang}" 的全部翻译（含海报文件）？`)) return;
         try {
             const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/translations/${encodeURIComponent(lang)}`, { method: 'DELETE' });
             if (!res.ok) { flash(`删除失败 (${res.status})`, 'error'); return; }
+            trSelectedLang = DRAMA.default_lang;
             await refreshDrama(); await renderTranslationsPanel();
+            flash('该语言翻译已删除', 'info');
         } catch (e) { flash('删除出错: ' + e, 'error'); }
     } else if (action === 'upload-poster') {
-        const f = langPanel.querySelector('.poster-file').files[0];
+        const f = editor.querySelector('.poster-file').files[0];
         if (!f) { flash('请先选择海报文件', 'warn'); return; }
         const fd = new FormData(); fd.append('file', f);
         try {
@@ -613,22 +642,36 @@ document.getElementById('translations-panel').addEventListener('click', async (e
             if (res.status !== 204) { flash(`删除失败 (${res.status})`, 'error'); return; }
             await refreshDrama(); await renderTranslationsPanel();
             if (lang === document.getElementById('poster-lang').value) updatePosterImg();
+            flash('海报已删除', 'info');
         } catch (e) { flash('删除出错: ' + e, 'error'); }
     }
 });
 
-document.getElementById('add-tr-btn').addEventListener('click', async () => {
-    const lang = document.getElementById('add-tr-lang').value;
-    const name = document.getElementById('add-tr-name').value.trim();
-    if (!lang) { flash('请选择语言', 'warn'); return; }
-    if (!name) { flash('剧名是必填项（新语言）', 'warn'); return; }
-    try {
-        await fetchJSON(`/admin/dramas/${encodeURIComponent(SLUG)}/translations/${encodeURIComponent(lang)}`, { method: 'PUT', body: { name } });
-        document.getElementById('add-tr-name').value = '';
-        await refreshDrama(); await renderTranslationsPanel();
-        flash('翻译已添加', 'info');
-    } catch (e) { flash(`添加失败: ${e.body?.detail || e}`, 'error'); }
-});
+// --- AI translate drama name + synopsis to all languages (overwrite) ---
+(function () {
+    const aiBtn = document.getElementById('ai-translate-drama-btn');
+    if (!aiBtn) return;
+    aiBtn.addEventListener('click', async () => {
+        if (!confirm('用 AI 把默认语言的剧名 + 简介翻译到其它全部已注册语言？\n这会覆盖这些语言已有的剧名 / 简介。')) return;
+        const orig = aiBtn.innerHTML;
+        aiBtn.disabled = true;
+        aiBtn.innerHTML = '<span class="material-symbols-outlined text-[16px]">hourglass_empty</span>翻译中…';
+        try {
+            const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/translate`, { method: 'POST' });
+            const body = await res.json().catch(() => ({}));
+            if (res.status === 503) { flash('AI 翻译未启用', 'warn'); return; }
+            if (!res.ok) { flash(`AI 翻译失败 (${res.status}): ${body.detail || ''}`, 'error'); return; }
+            if (body.noop) { flash('没有其它已注册语言可翻译', 'info'); return; }
+            const n = (body.translated_langs || []).length;
+            const errs = body.errors || [];
+            flash(`AI 已翻译 ${n} 种语言${errs.length ? `，${errs.length} 个有问题` : ''}`, errs.length ? 'warn' : 'info');
+            for (const er of errs) flash(er, 'warn');
+            await refreshDrama();
+            await renderTranslationsPanel();
+        } catch (e) { flash('AI 翻译出错: ' + e, 'error'); }
+        finally { aiBtn.disabled = false; aiBtn.innerHTML = orig; }
+    });
+})();
 
 document.getElementById('save-tags-btn').addEventListener('click', async () => {
     const slugs = Array.from(document.getElementById('tags-multi').selectedOptions).map(o => o.value);
@@ -724,7 +767,8 @@ document.getElementById('sync-drama-btn').addEventListener('click', async () => 
 document.getElementById('poster-lang').addEventListener('change', updatePosterImg);
 function updatePosterImg() {
     const lang = document.getElementById('poster-lang').value;
-    const url = DRAMA.translations?.[lang]?.poster;
+    // Fall back to the default-language poster when the selected language has none.
+    const url = DRAMA.translations?.[lang]?.poster || DRAMA.translations?.[DRAMA.default_lang]?.poster;
     const img = document.getElementById('poster-img');
     const ph = document.getElementById('poster-placeholder');
     if (url) {

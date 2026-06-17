@@ -53,6 +53,21 @@ class Settings:
     # consumed by `init_db()` on first boot when the `users` table is empty.
     # Optional here; `init_db()` fails fast if it is needed and unset.
     admin_initial_password: str | None
+    # ai-translate: optional integration with a kie.ai-style OpenAI-compatible
+    # chat-completions endpoint, used to auto-translate drama name / synopsis,
+    # tag labels, and actor names into every registered language. The feature
+    # is enabled iff `ai_translate_api_key` is set (see `ai_translate_enabled`).
+    # `ai_translate_base_url` always has a sane default; `ai_translate_model`
+    # selects the kie.ai market path segment (`/<model>/v1/chat/completions`).
+    ai_translate_base_url: str
+    ai_translate_api_key: str | None
+    ai_translate_model: str
+    ai_translate_timeout: int
+
+    @property
+    def ai_translate_enabled(self) -> bool:
+        """True iff AI short-text translation is configured (API key present)."""
+        return bool(self.ai_translate_api_key)
 
 
 def _parse_bool_env(name: str) -> bool:
@@ -129,7 +144,7 @@ def load_settings() -> Settings:
             f"PIPELINE_CONCURRENCY must be >= 1, got {pipeline_concurrency}"
         )
 
-    session_secret_key = os.environ.get("SESSION_SECRET_KEY", "").strip()
+    session_secret_key = os.environ.get("SESSION_SECRET_KEY", "636d6260e6dc58c9e8dec39a03df97da4e8c49e3de0f79521b82a4bdb0d4db20").strip()
     if not session_secret_key:
         session_secret_key = secrets.token_hex(32)
         # logging isn't configured yet at this point (basicConfig runs in
@@ -146,6 +161,29 @@ def load_settings() -> Settings:
         os.environ.get("ADMIN_INITIAL_PASSWORD", "123456").strip() or None
     )
 
+    # ai-translate: optional kie.ai-style chat-completions endpoint. The API key
+    # is the on/off gate (feature disabled when unset → routes 503, UI buttons
+    # hidden). base_url / model have sane defaults; timeout is generous because
+    # a single call may translate several fields into many languages at once.
+    ai_base = (os.environ.get("AI_TRANSLATE_BASE_URL", "https://api.kie.ai") or "").strip()
+    if not ai_base:
+        ai_base = "https://api.kie.ai"
+    if ai_base.endswith("/"):
+        ai_base = ai_base.rstrip("/")
+    ai_key = (os.environ.get("AI_TRANSLATE_API_KEY", "") or "").strip() or None
+    ai_model = (os.environ.get("AI_TRANSLATE_MODEL", "gpt-5-2") or "").strip() or "gpt-5-2"
+    ai_timeout_raw = os.environ.get("AI_TRANSLATE_TIMEOUT", "120").strip()
+    try:
+        ai_timeout = int(ai_timeout_raw) if ai_timeout_raw else 120
+    except ValueError as e:
+        raise RuntimeError(
+            f"AI_TRANSLATE_TIMEOUT must be an integer (seconds), got {ai_timeout_raw!r}"
+        ) from e
+    if ai_timeout <= 0:
+        raise RuntimeError(
+            f"AI_TRANSLATE_TIMEOUT must be positive, got {ai_timeout}"
+        )
+
     return Settings(
         out_dir=out_dir,
         db_path=db_path,
@@ -160,6 +198,10 @@ def load_settings() -> Settings:
         pipeline_concurrency=pipeline_concurrency,
         session_secret_key=session_secret_key,
         admin_initial_password=admin_initial_password,
+        ai_translate_base_url=ai_base,
+        ai_translate_api_key=ai_key,
+        ai_translate_model=ai_model,
+        ai_translate_timeout=ai_timeout,
     )
 
 

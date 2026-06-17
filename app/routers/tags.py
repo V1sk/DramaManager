@@ -14,6 +14,7 @@ from fastapi.templating import Jinja2Templates
 
 from .. import db
 from ..auth import require_can_delete
+from ..config import settings
 
 router = APIRouter()
 log = logging.getLogger("hls.tags")
@@ -28,7 +29,11 @@ _LANG_PATTERN = r"^[a-z]{2,3}(-[A-Za-z0-9]{2,8})?$"
 
 @router.get("/admin/tags", response_class=HTMLResponse)
 async def tags_page(request: Request) -> HTMLResponse:
-    return _TEMPLATES.TemplateResponse(request, "tags.html", {"nav_active": "tags"})
+    return _TEMPLATES.TemplateResponse(
+        request,
+        "tags.html",
+        {"nav_active": "tags", "ai_translate_enabled": settings.ai_translate_enabled},
+    )
 
 
 @router.get("/admin/tags.json")

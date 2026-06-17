@@ -1514,11 +1514,21 @@ def list_tags() -> list[dict]:
     """
     with _connect() as conn:
         rows = conn.execute(sql).fetchall()
+        tr_rows = conn.execute(
+            "SELECT entity_id, lang_code, value FROM translations "
+            "WHERE entity_type='tag' AND field='label'"
+        ).fetchall()
+    by_slug: dict[str, dict[str, str]] = {}
+    for tr in tr_rows:
+        by_slug.setdefault(tr["entity_id"], {})[tr["lang_code"]] = tr["value"]
     out: list[dict] = []
     for r in rows:
         d = dict(r)
         csv = d.pop("available_langs_csv") or ""
         d["available_langs"] = sorted(csv.split(",")) if csv else []
+        # Per-language label values keyed by lang_code, so the admin panel can
+        # show what's stored (incl. AI-written translations) instead of blanks.
+        d["translations"] = by_slug.get(d["slug"], {})
         out.append(d)
     return out
 
@@ -1768,11 +1778,21 @@ def list_actors() -> list[dict]:
     """
     with _connect() as conn:
         rows = conn.execute(sql).fetchall()
+        tr_rows = conn.execute(
+            "SELECT entity_id, lang_code, value FROM translations "
+            "WHERE entity_type='actor' AND field='name'"
+        ).fetchall()
+    by_slug: dict[str, dict[str, str]] = {}
+    for tr in tr_rows:
+        by_slug.setdefault(tr["entity_id"], {})[tr["lang_code"]] = tr["value"]
     out: list[dict] = []
     for r in rows:
         d = dict(r)
         csv = d.pop("available_langs_csv") or ""
         d["available_langs"] = sorted(csv.split(",")) if csv else []
+        # Per-language name values keyed by lang_code, so the admin panel can
+        # show what's stored (incl. AI-written translations) instead of blanks.
+        d["translations"] = by_slug.get(d["slug"], {})
         out.append(d)
     return out
 

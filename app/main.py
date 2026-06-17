@@ -17,6 +17,7 @@ from .routers import (
     accounts,
     actors,
     admin,
+    ai_translate as ai_translate_router,
     api,
     auth as auth_router,
     drm,
@@ -63,6 +64,16 @@ async def lifespan(app: FastAPI):
     else:
         log.info("lifespan up: business-sync disabled (BUSINESS_SYNC_BASE_URL unset)")
 
+    if settings.ai_translate_enabled:
+        from . import ai_translate_client
+        await ai_translate_client.startup()
+        log.info(
+            "lifespan up: ai-translate enabled; base=%s model=%s",
+            settings.ai_translate_base_url, settings.ai_translate_model,
+        )
+    else:
+        log.info("lifespan up: ai-translate disabled (AI_TRANSLATE_API_KEY unset)")
+
     if settings.storage_enabled:
         from . import storage
         prov = storage.provider
@@ -94,6 +105,9 @@ async def lifespan(app: FastAPI):
                 pass
             from . import sync_client
             await sync_client.shutdown()
+        if settings.ai_translate_enabled:
+            from . import ai_translate_client
+            await ai_translate_client.shutdown()
 
 
 app = FastAPI(title="HLS Management Server", lifespan=lifespan)
@@ -204,6 +218,7 @@ app.include_router(admin.router, dependencies=_admin_gate)
 app.include_router(languages.router, dependencies=_admin_gate)
 app.include_router(tags.router, dependencies=_admin_gate)
 app.include_router(actors.router, dependencies=_admin_gate)
+app.include_router(ai_translate_router.router, dependencies=_admin_gate)
 app.include_router(sync_router.router, dependencies=_admin_gate)
 # Account management + audit + self-service password change. Router-level gate
 # is `require_user`; the admin-only routes additionally carry `require_admin`.

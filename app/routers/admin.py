@@ -65,7 +65,11 @@ async def admin_drama_detail_page(
     return _TEMPLATES.TemplateResponse(
         request,
         "drama_detail.html",
-        {"drama": full, "nav_active": "home"},
+        {
+            "drama": full,
+            "nav_active": "home",
+            "ai_translate_enabled": settings.ai_translate_enabled,
+        },
     )
 
 
