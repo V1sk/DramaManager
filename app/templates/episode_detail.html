@@ -158,13 +158,18 @@
                         <select id="ai-sub-source"></select>
                     </div>
                     <div class="flex flex-col gap-1">
-                        <label class="text-body-sm text-on-surface-variant">目标语言</label>
+                        <label class="text-body-sm text-on-surface-variant">目标语言（全量翻译用）</label>
                         <select id="ai-sub-target"></select>
                     </div>
-                    <button class="btn btn-secondary btn-sm" id="ai-sub-run">
-                        <span class="material-symbols-outlined text-[14px]">translate</span>开始翻译
-                    </button>
-                    <p class="text-[11px] text-on-surface-variant/70">逐 cue 翻译、保留时间轴；目标语言已有字幕会被覆盖。长字幕可能要等十几秒到一分钟。</p>
+                    <div class="flex items-center gap-2 flex-wrap">
+                        <button class="btn btn-secondary btn-sm" id="ai-sub-missing">
+                            <span class="material-symbols-outlined text-[14px]">playlist_add</span>补齐缺失
+                        </button>
+                        <button class="btn btn-secondary btn-sm" id="ai-sub-run">
+                            <span class="material-symbols-outlined text-[14px]">translate</span>全量翻译
+                        </button>
+                    </div>
+                    <p class="text-[11px] text-on-surface-variant/70">补齐缺失=从源字幕翻译所有还没有字幕的语言（不改动已有）；全量翻译=按上方目标语言覆盖。逐 cue 翻译、保留时间轴。长字幕可能要等十几秒到一分钟。</p>
                 </div>
             </div>
             {% endif %}
@@ -404,24 +409,29 @@ function renderAiSubTargets() {
     const srcSel = document.getElementById('ai-sub-source');
     if (srcSel) srcSel.addEventListener('change', renderAiSubTargets);
     const runBtn = document.getElementById('ai-sub-run');
-    if (!runBtn) return;
-    runBtn.addEventListener('click', async () => {
+    const missBtn = document.getElementById('ai-sub-missing');
+    if (!runBtn && !missBtn) return;
+    const btns = [runBtn, missBtn].filter(Boolean);
+
+    // mode 'overwrite' → respect the target select (single lang or 全部其它语言).
+    // mode 'missing'   → server fills only languages without a subtitle yet.
+    async function runSub(btn, mode) {
         const source = document.getElementById('ai-sub-source').value;
-        const targetVal = document.getElementById('ai-sub-target').value;
         if (!source) { flash('请选择源语言', 'warn'); return; }
-        const targets = targetVal === '__all__'
-            ? LANGS.map(l => l.code).filter(c => c !== source)
-            : [targetVal];
-        if (!targets.length) { flash('没有可翻译的目标语言', 'warn'); return; }
-        const allMode = targetVal === '__all__';
-        if (!confirm(`用 AI 把字幕从 "${source}" 翻译到：${allMode ? '全部其它语言' : targets.join('、')}？\n后台逐语言执行（保留时间轴），目标语言已有字幕会被覆盖。`)) return;
-        const orig = runBtn.innerHTML;
-        const restore = () => { runBtn.disabled = false; runBtn.innerHTML = orig; };
-        const busy = (txt) => { runBtn.disabled = true; runBtn.innerHTML = `<span class="material-symbols-outlined text-[14px]">hourglass_empty</span>${txt}`; };
+        let payload, desc;
+        if (mode === 'missing') {
+            payload = { source_lang: source, mode: 'missing' };
+            desc = '所有还没有字幕的语言（不改动已有字幕）';
+        } else {
+            const targetVal = document.getElementById('ai-sub-target').value;
+            if (targetVal === '__all__') { payload = { source_lang: source }; desc = '全部其它语言（覆盖）'; }
+            else { payload = { source_lang: source, targets: [targetVal] }; desc = `${targetVal}（覆盖）`; }
+        }
+        if (!confirm(`用 AI 把字幕从 "${source}" 翻译到：${desc}？\n后台逐语言执行，保留时间轴。`)) return;
+        const orig = btn.innerHTML;
+        const restore = () => { btns.forEach(b => b.disabled = false); btn.innerHTML = orig; };
+        const busy = (txt) => { btns.forEach(b => b.disabled = true); btn.innerHTML = `<span class="material-symbols-outlined text-[14px]">hourglass_empty</span>${txt}`; };
         busy('入队中…');
-        // One enqueue call; omit `targets` for "all", else send the chosen one. The
-        // server fans out one job per target language.
-        const payload = allMode ? { source_lang: source } : { source_lang: source, targets };
         let body;
         try {
             const res = await fetch(`/admin/episodes/${encodeURIComponent(SLUG)}/${EP}/subtitles/translate`, {
@@ -432,12 +442,12 @@ function renderAiSubTargets() {
             body = await res.json().catch(() => ({}));
             if (res.status === 503) { flash('AI 翻译未启用', 'warn'); return restore(); }
             if (!res.ok) { flash(`入队失败 (${res.status}): ${body.detail || ''}`, 'error'); return restore(); }
-            if (body.noop) { flash('没有需要翻译的语言（其它语言都已完成）', 'info'); return restore(); }
+            if (body.noop) { flash(mode === 'missing' ? '没有缺失字幕的语言（都已翻译）' : '没有需要翻译的语言', 'info'); return restore(); }
         } catch (e) { flash('入队出错: ' + e, 'error'); return restore(); }
         const n = (body.enqueued || []).length, sk = (body.skipped || []).length;
         flash(`已入队 ${n} 个字幕翻译任务${sk ? `，${sk} 个已在队列` : ''} · 后台翻译中，完成后自动刷新`, 'info');
         busy('翻译中…');
-        // Tick a lightweight counter while in flight (no list rebuild → no flicker);
+        // Lightweight counter while in flight (no list rebuild → no flicker);
         // refresh the subtitle list once, at completion.
         pollTranslation('subtitle', SLUG, EP, {
             onTick: (p) => busy(`翻译中…剩 ${p.queued + p.running}`),
@@ -447,7 +457,9 @@ function renderAiSubTargets() {
                 else flash(`字幕翻译完成${p.failed ? `（${p.failed} 个失败，详见「翻译任务」）` : ''}；刷新播放器以加载新字幕轨`, p.failed ? 'warn' : 'info');
             },
         });
-    });
+    }
+    if (runBtn) runBtn.addEventListener('click', () => runSub(runBtn, 'overwrite'));
+    if (missBtn) missBtn.addEventListener('click', () => runSub(missBtn, 'missing'));
 })();
 
 (async function () {

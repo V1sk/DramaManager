@@ -129,10 +129,10 @@ URL map:
 | `GET /api/dramas` | SDK drama catalog; `DramaSummary[]` ordered by `lastUpdatedAt DESC`; empty → `[]`; only dramas with ≥1 `ready` episode; `dramaName` sourced from `dramas.name` |
 | `GET /api/dramas/{slug}/episodes` | SDK per-drama episode list; full `EpisodeInfo[]` (with `drm` embedded) ordered by `ep_number ASC`; empty → `[]`; 422 on malformed slug |
 | `POST /api/episodes/{slug}/{ep}/cover` | multipart `cover`; overwrites `cover.jpg`；同时翻该集 `sync_status='dirty'` |
-| `POST /admin/dramas/{slug}/translate` | AI 翻译**入队**（覆盖式）：剧名（+ 简介若有）从 `default_lang` 扇出每目标语言一个 job（registered − source，**全部重翻不跳过**；已在队列的语言计入 `skipped`）。503（key 未设）/ 404 / 400（默认语言无剧名）/ 200 `{noop}`（无其它语言）/ 202 `{enqueued, skipped}`。 |
-| `POST /admin/tags/{slug}/translate` | AI 翻译标签 label 入队（同上语义）。503 / 404 / 400 / 200 / 202。 |
-| `POST /admin/actors/{slug}/translate` | AI 翻译演员 name 入队（同上语义）。503 / 404 / 400 / 200 / 202。 |
-| `POST /admin/episodes/{slug}/{ep}/subtitles/translate` | AI 字幕翻译入队：body `{source_lang, targets?, force?}`（`targets` 省略=全部其它语言）。从源字幕扇出每目标语言一个 job。503 / 404 / 400（源字幕不存在）/ 422 / 200 `{noop}` / 202 `{enqueued, skipped}`。 |
+| `POST /admin/dramas/{slug}/translate` | AI 翻译**入队**：剧名（+ 简介若有）从 `default_lang` 扇出每目标语言一个 job。`?mode=overwrite`（默认，全量覆盖全部其它语言）/ `?mode=missing`（只翻**还没有 name 译文**的语言，按实际内容判定，不动已译）。已在队列的语言计入 `skipped`。503 / 404 / 400（默认语言无剧名）/ 200 `{noop, mode}` / 202 `{enqueued, skipped, mode}`。 |
+| `POST /admin/tags/{slug}/translate` | AI 翻译标签 label 入队（同上 `?mode=overwrite\|missing`）。503 / 404 / 400 / 200 / 202。 |
+| `POST /admin/actors/{slug}/translate` | AI 翻译演员 name 入队（同上 `?mode=overwrite\|missing`）。503 / 404 / 400 / 200 / 202。 |
+| `POST /admin/episodes/{slug}/{ep}/subtitles/translate` | AI 字幕翻译入队：body `{source_lang, targets?, mode?}`。`mode=overwrite`（默认）按 `targets`（省略=全部其它语言）覆盖；`mode=missing` 只翻**还没有字幕**的语言。从源字幕扇出每目标语言一个 job。503 / 404 / 400（源字幕不存在）/ 422 / 200 `{noop}` / 202 `{enqueued, skipped}`。 |
 | `GET /admin/translations` | HTML：翻译任务总览页，列出全部 queued / running / failed 任务 + 「重试全部失败」。 |
 | `GET /admin/translations/summary` | JSON `{enabled, outstanding, queued, running, failed}`：导航「翻译任务」角标 5s 轮询用。 |
 | `POST /admin/translations/retry` | 重新入队全部 failed 任务（同一单元新建 queued job，dedupe 保护）。503 / 200 `{requeued}`。 |

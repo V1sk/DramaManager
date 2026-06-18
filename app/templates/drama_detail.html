@@ -141,9 +141,13 @@
                 </h3>
                 <div class="flex items-center gap-2">
                     {% if ai_translate_enabled %}
+                    <button class="btn btn-xs btn-secondary" id="ai-translate-drama-missing-btn"
+                            title="只翻译还没有译文的语言，不改动已翻译的语言">
+                        <span class="material-symbols-outlined text-[16px]">playlist_add</span>补齐缺失
+                    </button>
                     <button class="btn btn-xs btn-secondary" id="ai-translate-drama-btn"
-                            title="用 AI 把默认语言的剧名 + 简介翻译到其它全部语言（覆盖已有译文）">
-                        <span class="material-symbols-outlined text-[16px]">auto_awesome</span>AI 翻译
+                            title="把默认语言的剧名 + 简介翻译到其它全部语言（覆盖已有译文）">
+                        <span class="material-symbols-outlined text-[16px]">auto_awesome</span>全量翻译
                     </button>
                     {% endif %}
                     <button class="btn btn-xs btn-ghost" data-toggle="translations-panel" title="收起">
@@ -647,30 +651,34 @@ document.getElementById('translations-panel').addEventListener('click', async (e
     }
 });
 
-// --- AI translate drama name + synopsis to all languages (overwrite) ---
+// --- AI translate drama name + synopsis (全量 overwrite / 补齐缺失 missing) ---
 (function () {
-    const aiBtn = document.getElementById('ai-translate-drama-btn');
-    if (!aiBtn) return;
-    aiBtn.addEventListener('click', async () => {
-        if (!confirm('用 AI 把默认语言的剧名 + 简介翻译到其它全部已注册语言？\n后台逐语言执行，会覆盖这些语言已有的剧名 / 简介。')) return;
-        const orig = aiBtn.innerHTML;
-        const restore = () => { aiBtn.disabled = false; aiBtn.innerHTML = orig; };
-        const busy = (txt) => { aiBtn.disabled = true; aiBtn.innerHTML = `<span class="material-symbols-outlined text-[16px]">hourglass_empty</span>${txt}`; };
+    const fullBtn = document.getElementById('ai-translate-drama-btn');
+    const missBtn = document.getElementById('ai-translate-drama-missing-btn');
+    if (!fullBtn && !missBtn) return;
+    const btns = [fullBtn, missBtn].filter(Boolean);
+    async function run(btn, mode) {
+        const confirmMsg = mode === 'missing'
+            ? '用 AI 补齐还没有剧名译文的语言？不会改动已翻译好的语言。'
+            : '用 AI 把默认语言的剧名 + 简介翻译到其它全部已注册语言？\n后台逐语言执行，会覆盖这些语言已有的剧名 / 简介。';
+        if (!confirm(confirmMsg)) return;
+        const orig = btn.innerHTML;
+        const restore = () => { btns.forEach(b => b.disabled = false); btn.innerHTML = orig; };
+        const busy = (txt) => { btns.forEach(b => b.disabled = true); btn.innerHTML = `<span class="material-symbols-outlined text-[16px]">hourglass_empty</span>${txt}`; };
         busy('入队中…');
         let body;
         try {
-            const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/translate`, { method: 'POST' });
+            const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/translate?mode=${mode}`, { method: 'POST' });
             body = await res.json().catch(() => ({}));
             if (res.status === 503) { flash('AI 翻译未启用', 'warn'); return restore(); }
             if (!res.ok) { flash(`入队失败 (${res.status}): ${body.detail || ''}`, 'error'); return restore(); }
-            if (body.noop) { flash('没有需要翻译的语言（其它语言都已完成）', 'info'); return restore(); }
+            if (body.noop) { flash(mode === 'missing' ? '没有缺失的语言（都已翻译）' : '没有需要翻译的语言', 'info'); return restore(); }
         } catch (e) { flash('入队出错: ' + e, 'error'); return restore(); }
         const n = (body.enqueued || []).length, sk = (body.skipped || []).length;
         flash(`已入队 ${n} 个语言任务${sk ? `，${sk} 个已在队列` : ''} · 后台翻译中，完成后自动刷新`, 'info');
         busy('翻译中…');
-        // Poll until this drama's jobs settle. While in flight only update a
-        // lightweight counter (no panel rebuild / heavy fetch → no flicker);
-        // do the single full refresh once, at completion.
+        // While in flight only update a lightweight counter (no panel rebuild →
+        // no flicker); do the single full refresh once, at completion.
         pollTranslation('drama', SLUG, null, {
             onTick: (p) => busy(`翻译中…剩 ${p.queued + p.running}`),
             onDone: async (p, reason) => {
@@ -679,7 +687,9 @@ document.getElementById('translations-panel').addEventListener('click', async (e
                 else flash(`翻译完成${p.failed ? `（${p.failed} 个失败，详见「翻译任务」）` : ''}`, p.failed ? 'warn' : 'info');
             },
         });
-    });
+    }
+    if (fullBtn) fullBtn.addEventListener('click', () => run(fullBtn, 'overwrite'));
+    if (missBtn) missBtn.addEventListener('click', () => run(missBtn, 'missing'));
 })();
 
 document.getElementById('save-tags-btn').addEventListener('click', async () => {

@@ -139,11 +139,14 @@ function renderPanel(slug, row) {
     const langs = row.available_langs || [];
     let html = '<div class="flex flex-col gap-2">';
     if (AI_TR_ENABLED) {
-        html += `<div class="flex items-center gap-2 pb-2 mb-1 border-b border-dashed border-outline-variant">
-            <button class="btn btn-sm btn-secondary" data-action="ai-translate" data-slug="${escapeHtml(slug)}">
-                <span class="material-symbols-outlined text-[14px]">auto_awesome</span>AI 翻译到全部语言
+        html += `<div class="flex items-center gap-2 pb-2 mb-1 border-b border-dashed border-outline-variant flex-wrap">
+            <button class="btn btn-sm btn-secondary" data-action="ai-translate" data-mode="missing" data-slug="${escapeHtml(slug)}">
+                <span class="material-symbols-outlined text-[14px]">playlist_add</span>补齐缺失
             </button>
-            <span class="meta">从默认语言（★）翻译 name 并覆盖其它语言</span>
+            <button class="btn btn-sm btn-secondary" data-action="ai-translate" data-mode="overwrite" data-slug="${escapeHtml(slug)}">
+                <span class="material-symbols-outlined text-[14px]">auto_awesome</span>全量翻译
+            </button>
+            <span class="meta">补齐缺失=只翻还没 name 的语言；全量=覆盖全部其它语言</span>
         </div>`;
     }
     for (const code of langs) {
@@ -235,17 +238,20 @@ $body.addEventListener('click', async (ev) => {
             await refresh();
         } catch (e) { flash(`添加失败: ${e.body?.detail || e}`, 'error'); }
     } else if (action === 'ai-translate') {
-        if (!confirm(`用 AI 把演员 "${slug}" 的默认语言 name 翻译到其它全部语言？后台逐语言执行，将覆盖已有译文。`)) return;
+        const mode = btn.dataset.mode || 'overwrite';
+        if (!confirm(mode === 'missing'
+            ? `用 AI 补齐演员 "${slug}" 还没有 name 的语言？不改动已翻译的语言。`
+            : `用 AI 把演员 "${slug}" 的默认语言 name 翻译到其它全部语言？后台逐语言执行，将覆盖已有译文。`)) return;
         const orig = btn.innerHTML;
         btn.disabled = true;
         btn.innerHTML = '<span class="material-symbols-outlined text-[14px]">hourglass_empty</span>入队中…';
         let body;
         try {
-            const res = await fetch(`/admin/actors/${encodeURIComponent(slug)}/translate`, { method: 'POST' });
+            const res = await fetch(`/admin/actors/${encodeURIComponent(slug)}/translate?mode=${mode}`, { method: 'POST' });
             body = await res.json().catch(() => ({}));
             if (res.status === 503) { flash('AI 翻译未启用', 'warn'); btn.disabled = false; btn.innerHTML = orig; return; }
             if (!res.ok) { flash(`入队失败 (${res.status}): ${body.detail || ''}`, 'error'); btn.disabled = false; btn.innerHTML = orig; return; }
-            if (body.noop) { flash('没有需要翻译的语言（其它语言都已完成）', 'info'); btn.disabled = false; btn.innerHTML = orig; return; }
+            if (body.noop) { flash(mode === 'missing' ? '没有缺失的语言（都已翻译）' : '没有需要翻译的语言', 'info'); btn.disabled = false; btn.innerHTML = orig; return; }
         } catch (e) { flash('入队出错: ' + e, 'error'); btn.disabled = false; btn.innerHTML = orig; return; }
         const n = (body.enqueued || []).length, sk = (body.skipped || []).length;
         flash(`已入队 ${n} 个语言任务${sk ? `，${sk} 个已在队列` : ''} · 后台翻译中，完成后自动刷新`, 'info');

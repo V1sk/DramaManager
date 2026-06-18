@@ -82,64 +82,86 @@ def _other_lang_codes(default_lang: str) -> list[str]:
     return [c for c in _lang_codes() if c != default_lang]
 
 
+_MODE_PATTERN = r"^(overwrite|missing)$"
+
+
+def _apply_mode(targets: list[str], mode: str, have_langs: set[str]) -> list[str]:
+    """`overwrite` → all targets (re)translated. `missing` → only languages that
+    currently have NO translation content, so existing translations are never
+    touched. "Missing" is decided from the ACTUAL stored content (`have_langs`),
+    never from job history (which goes stale on manual edits/deletes)."""
+    if mode == "missing":
+        return [c for c in targets if c not in have_langs]
+    return targets
+
+
 @router.post("/admin/dramas/{drama_slug}/translate")
 async def ai_translate_drama(
     drama_slug: str = PathParam(..., pattern=_SLUG_PATTERN),
+    mode: str = Query("overwrite", pattern=_MODE_PATTERN),
 ) -> JSONResponse:
-    """Enqueue per-language jobs to translate the drama's name (+ synopsis) from
-    its default_lang into every other registered language (overwrite)."""
+    """Enqueue per-language jobs translating the drama's name (+ synopsis) from
+    its default_lang. `mode=overwrite` (re)does all other languages; `mode=missing`
+    only fills languages that have no name translation yet."""
     _require_enabled()
     drama = db.get_drama(drama_slug)
     if drama is None:
         raise HTTPException(status_code=404, detail=f"drama '{drama_slug}' not found")
     default_lang = drama["default_lang"]
-    src = (db.list_drama_translations(drama_slug) or {}).get(default_lang) or {}
-    if not (src.get("name") or "").strip():
+    trans = db.list_drama_translations(drama_slug) or {}
+    if not ((trans.get(default_lang) or {}).get("name") or "").strip():
         raise HTTPException(status_code=400, detail=f"默认语言 '{default_lang}' 还没有剧名，无法翻译")
-    targets = _other_lang_codes(default_lang)
+    have = {lang for lang, t in trans.items() if (t.get("name") or "").strip()}
+    targets = _apply_mode(_other_lang_codes(default_lang), mode, have)
     if not targets:
-        return JSONResponse({"ok": True, "noop": True, "enqueued": [], "skipped": []})
+        return JSONResponse({"ok": True, "noop": True, "mode": mode, "enqueued": [], "skipped": []})
     enqueued, skipped = await _fanout("drama", drama_slug, targets, source_lang=default_lang)
-    log.info("enqueued drama translate slug=%s enqueued=%d skipped=%d", drama_slug, len(enqueued), len(skipped))
-    return JSONResponse({"ok": True, "enqueued": enqueued, "skipped": skipped}, status_code=202)
+    log.info("enqueued drama translate slug=%s mode=%s enqueued=%d skipped=%d", drama_slug, mode, len(enqueued), len(skipped))
+    return JSONResponse({"ok": True, "mode": mode, "enqueued": enqueued, "skipped": skipped}, status_code=202)
 
 
 @router.post("/admin/tags/{slug}/translate")
 async def ai_translate_tag(
     slug: str = PathParam(..., pattern=_SLUG_PATTERN),
+    mode: str = Query("overwrite", pattern=_MODE_PATTERN),
 ) -> JSONResponse:
     _require_enabled()
     tag = db.get_tag(slug)
     if tag is None:
         raise HTTPException(status_code=404, detail=f"tag '{slug}' not found")
     default_lang = tag["default_lang"]
-    if not (db.list_translations_for_entity("tag", slug, "label").get(default_lang) or "").strip():
+    labels = db.list_translations_for_entity("tag", slug, "label")
+    if not (labels.get(default_lang) or "").strip():
         raise HTTPException(status_code=400, detail=f"默认语言 '{default_lang}' 还没有 label，无法翻译")
-    targets = _other_lang_codes(default_lang)
+    have = {lang for lang, v in labels.items() if (v or "").strip()}
+    targets = _apply_mode(_other_lang_codes(default_lang), mode, have)
     if not targets:
-        return JSONResponse({"ok": True, "noop": True, "enqueued": [], "skipped": []})
+        return JSONResponse({"ok": True, "noop": True, "mode": mode, "enqueued": [], "skipped": []})
     enqueued, skipped = await _fanout("tag", slug, targets, source_lang=default_lang)
-    log.info("enqueued tag translate slug=%s enqueued=%d skipped=%d", slug, len(enqueued), len(skipped))
-    return JSONResponse({"ok": True, "enqueued": enqueued, "skipped": skipped}, status_code=202)
+    log.info("enqueued tag translate slug=%s mode=%s enqueued=%d skipped=%d", slug, mode, len(enqueued), len(skipped))
+    return JSONResponse({"ok": True, "mode": mode, "enqueued": enqueued, "skipped": skipped}, status_code=202)
 
 
 @router.post("/admin/actors/{slug}/translate")
 async def ai_translate_actor(
     slug: str = PathParam(..., pattern=_SLUG_PATTERN),
+    mode: str = Query("overwrite", pattern=_MODE_PATTERN),
 ) -> JSONResponse:
     _require_enabled()
     actor = db.get_actor(slug)
     if actor is None:
         raise HTTPException(status_code=404, detail=f"actor '{slug}' not found")
     default_lang = actor["default_lang"]
-    if not (db.list_translations_for_entity("actor", slug, "name").get(default_lang) or "").strip():
+    names = db.list_translations_for_entity("actor", slug, "name")
+    if not (names.get(default_lang) or "").strip():
         raise HTTPException(status_code=400, detail=f"默认语言 '{default_lang}' 还没有 name，无法翻译")
-    targets = _other_lang_codes(default_lang)
+    have = {lang for lang, v in names.items() if (v or "").strip()}
+    targets = _apply_mode(_other_lang_codes(default_lang), mode, have)
     if not targets:
-        return JSONResponse({"ok": True, "noop": True, "enqueued": [], "skipped": []})
+        return JSONResponse({"ok": True, "noop": True, "mode": mode, "enqueued": [], "skipped": []})
     enqueued, skipped = await _fanout("actor", slug, targets, source_lang=default_lang)
-    log.info("enqueued actor translate slug=%s enqueued=%d skipped=%d", slug, len(enqueued), len(skipped))
-    return JSONResponse({"ok": True, "enqueued": enqueued, "skipped": skipped}, status_code=202)
+    log.info("enqueued actor translate slug=%s mode=%s enqueued=%d skipped=%d", slug, mode, len(enqueued), len(skipped))
+    return JSONResponse({"ok": True, "mode": mode, "enqueued": enqueued, "skipped": skipped}, status_code=202)
 
 
 @router.post("/admin/episodes/{drama_slug}/{ep}/subtitles/translate")
@@ -165,6 +187,9 @@ async def ai_translate_subtitle(
         raise HTTPException(status_code=400, detail=f"源语言 '{source_lang}' 的字幕不存在")
 
     all_codes = _lang_codes()
+    mode = (payload.get("mode") or "overwrite").strip()
+    if mode not in ("overwrite", "missing"):
+        raise HTTPException(status_code=400, detail="mode 必须是 overwrite 或 missing")
     requested = payload.get("targets")
     if requested is not None:
         if not isinstance(requested, list) or not all(isinstance(c, str) for c in requested):
@@ -175,16 +200,19 @@ async def ai_translate_subtitle(
         targets = [c for c in requested if c != source_lang]
     else:
         targets = [c for c in all_codes if c != source_lang]
-    # Overwrite-by-design: always (re)translate all requested targets; no
-    # skip-done (stale job history must not silently drop languages).
+    # `missing` → only languages that have no subtitle yet (existing subtitles
+    # untouched); `overwrite` → all requested targets. "Have" comes from the
+    # actual subtitle rows, not job history.
+    have = {r["lang_code"] for r in db.list_subtitles_for_slug_ep(drama_slug, ep_number)}
+    targets = _apply_mode(targets, mode, have)
     if not targets:
-        return JSONResponse({"ok": True, "noop": True, "enqueued": [], "skipped": []})
+        return JSONResponse({"ok": True, "noop": True, "mode": mode, "enqueued": [], "skipped": []})
     enqueued, skipped = await _fanout(
         "subtitle", drama_slug, targets, ep_number=ep_number, source_lang=source_lang,
     )
-    log.info("enqueued subtitle translate slug=%s ep=%s src=%s enqueued=%d skipped=%d",
-             drama_slug, ep_number, source_lang, len(enqueued), len(skipped))
-    return JSONResponse({"ok": True, "enqueued": enqueued, "skipped": skipped}, status_code=202)
+    log.info("enqueued subtitle translate slug=%s ep=%s src=%s mode=%s enqueued=%d skipped=%d",
+             drama_slug, ep_number, source_lang, mode, len(enqueued), len(skipped))
+    return JSONResponse({"ok": True, "mode": mode, "enqueued": enqueued, "skipped": skipped}, status_code=202)
 
 
 # ---------------------------------------------------------------------------
