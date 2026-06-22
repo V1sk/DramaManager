@@ -266,7 +266,10 @@ async def translations_summary() -> JSONResponse:
 @router.post("/admin/translations/retry")
 async def translations_retry_failed() -> JSONResponse:
     """Re-enqueue every `failed` job (fresh queued jobs for the same units;
-    dedupe-protected). Failed rows stay as history."""
+    dedupe-protected) and drop the old `failed` rows. Without the delete the
+    stale failure would linger in the overview / nav badge even after the retry
+    succeeds — the retry produces a separate `done` row, never clearing the old
+    `failed` one."""
     _require_enabled()
     requeued = 0
     for j in db.list_translation_jobs(statuses=("failed",), limit=1000):
@@ -274,6 +277,10 @@ async def translations_retry_failed() -> JSONResponse:
             j["kind"], j["entity_ref"], j["target_lang"],
             ep_number=j["ep_number"], source_lang=j["source_lang"],
         )
+        # Drop the old failed row whether the enqueue created a fresh job or was
+        # suppressed by an in-flight dup — either way a live job now covers this
+        # unit, so the failed record is stale.
+        db.delete_translation_job(j["id"])
         if job_id is not None:
             await ai_jobs.enqueue(job_id)
             requeued += 1

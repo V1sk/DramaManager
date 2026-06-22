@@ -2705,6 +2705,16 @@ def get_translation_job(job_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+def delete_translation_job(job_id: int) -> bool:
+    """Delete one translation job row by id. Used by retry-failed to drop the
+    stale `failed` record once a fresh job has been enqueued for the same unit,
+    so the old failure doesn't linger in the overview / nav badge. Returns True
+    if a row was removed."""
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM translation_jobs WHERE id=?", (job_id,))
+    return (cur.rowcount or 0) > 0
+
+
 def set_translation_job_status(
     job_id: int,
     status: str,
