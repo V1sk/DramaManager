@@ -108,10 +108,13 @@ async function loadLanguages() {
 }
 
 function langChips(row) {
-    return (row.available_langs || []).map(c => {
-        const cls = c === row.default_lang ? 'lang-chip default' : 'lang-chip';
-        return `<span class="${cls}">${escapeHtml(c)}</span>`;
-    }).join('');
+    // Show only the coverage COUNT — with 40+ languages at launch the full slug
+    // list would overflow the column. The languages are listed on hover (default
+    // language marked ★).
+    const langs = row.available_langs || [];
+    if (!langs.length) return '<span class="meta">—</span>';
+    const listed = langs.map(c => c === row.default_lang ? `${c} ★` : c).join('\n');
+    return `<span class="lang-chip" title="${escapeHtml(listed)}">${langs.length} 种</span>`;
 }
 
 function render(rows) {
