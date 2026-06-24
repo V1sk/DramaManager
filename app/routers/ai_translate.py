@@ -184,6 +184,48 @@ async def ai_translate_tag(
     return JSONResponse({"ok": True, "mode": mode, "enqueued": enqueued, "skipped": skipped}, status_code=202)
 
 
+@router.post("/admin/actors/translate")
+async def ai_translate_all_actors(
+    mode: str = Query("overwrite", pattern=_MODE_PATTERN),
+) -> JSONResponse:
+    """Library-level actor translation: for EVERY actor that has a default-language
+    name, enqueue per-language jobs translating the name. Saves clicking each actor
+    one by one. `overwrite` re-does all other languages per actor; `missing` only
+    fills languages with no name yet. Actors lacking a default name are skipped.
+    Declared BEFORE `/{slug}/translate` so the literal `translate` segment isn't
+    captured as a slug."""
+    _require_enabled()
+    total_enqueued = 0
+    total_skipped = 0
+    actors_translated = 0      # actors that contributed >=1 freshly enqueued job
+    actors_without_source = 0  # actors lacking a default-language name
+    for actor in db.list_actors():
+        slug = actor["slug"]
+        default_lang = actor["default_lang"]
+        names = actor.get("translations") or {}  # {lang: name}, includes default
+        if not (names.get(default_lang) or "").strip():
+            actors_without_source += 1
+            continue
+        have = {lang for lang, v in names.items() if (v or "").strip()}
+        targets = _apply_mode(_other_lang_codes(default_lang), mode, have)
+        if not targets:
+            continue
+        enqueued, skipped = await _fanout("actor", slug, targets, source_lang=default_lang)
+        total_enqueued += len(enqueued)
+        total_skipped += len(skipped)
+        if enqueued:
+            actors_translated += 1
+    log.info("enqueued all-actors translate mode=%s actors=%d no_src=%d enqueued=%d skipped=%d",
+             mode, actors_translated, actors_without_source, total_enqueued, total_skipped)
+    noop = total_enqueued == 0
+    return JSONResponse({
+        "ok": True, "mode": mode, "noop": noop,
+        "actors_translated": actors_translated,
+        "actors_without_source": actors_without_source,
+        "enqueued": total_enqueued, "skipped": total_skipped,
+    }, status_code=(200 if noop else 202))
+
+
 @router.post("/admin/actors/{slug}/translate")
 async def ai_translate_actor(
     slug: str = PathParam(..., pattern=_SLUG_PATTERN),
