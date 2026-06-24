@@ -4,6 +4,11 @@ services:
     container_name: hls
     restart: unless-stopped
     env_file: .env
+    environment:
+      # nas-source-ingest (Docker): the app reads the CIFS-mounted NAS at
+      # /mnt/nas. This overrides any SOURCE_NAS_DIR in .env (which would be a
+      # host path meant for the direct-uvicorn deploy, not the container).
+      - SOURCE_NAS_DIR=/mnt/nas
     ports:
       - "8000:8000"
     volumes:
@@ -12,12 +17,29 @@ services:
       # env (set in the Dockerfile) points OUT_DIR / DB_PATH / UPLOAD_TMP_DIR
       # at /data/... — first `docker compose up` creates the dirs on demand.
       - ./data:/data
-      # nas-source-ingest: bind-mount the shared NAS at the SAME path the app
-      # reads (SOURCE_NAS_DIR, default /Volumes/酷讯短剧组) so operators can
-      # encode 片源 straight off the NAS without re-uploading. `:ro` — read only.
-      # Uncomment + adjust the host path for your mount; set SOURCE_NAS_DIR=
-      # (empty) in .env to disable the feature entirely.
-      # - /Volumes/酷讯短剧组:/Volumes/酷讯短剧组:ro
+      # nas-source-ingest: Docker mounts the NAS over CIFS ITSELF (the macOS
+      # Finder mount is NOT visible inside the container's Linux VM). The `nas`
+      # volume is defined below; fill NAS_* in .env. To DISABLE NAS import,
+      # comment out this line AND the SOURCE_NAS_DIR env above.
+      - nas:/mnt/nas:ro
       # OSS / TOS credentials are baked into the image at build time
       # (app/storage/credentials.py is NOT in .dockerignore). Internal-only
       # deployment; after rotating keys run `docker compose up -d --build`.
+
+volumes:
+  # nas-source-ingest: the Docker engine mounts the SMB share inside its Linux
+  # VM (no host mount, no Finder). NAS_HOST MUST be a STABLE IP — the VM can't
+  # resolve .local/mDNS, so give the NAS a static IP (UGOS 网络设置) or a DHCP
+  # reservation. All NAS specifics live in .env (gitignored):
+  #   NAS_HOST=192.168.x.x   NAS_SHARE=酷讯短剧组   NAS_USER=...   NAS_PASSWORD=...
+  # If the share fails to mount, try vers=2.1 (older SMB) and check
+  # `docker compose logs`. `soft` makes reads fail-fast (instead of hanging) if
+  # the NAS drops — pairs with the app's graceful is_dir() disable.
+  # NOTE: a NAS that is unreachable at container start makes the volume mount
+  # fail; with restart: unless-stopped the container retries until it's back.
+  nas:
+    driver: local
+    driver_opts:
+      type: cifs
+      o: "username=${NAS_USER},password=${NAS_PASSWORD},vers=3.0,ro,soft,uid=0,gid=0,file_mode=0444,dir_mode=0555,iocharset=utf8,nounix,noserverino"
+      device: "//${NAS_HOST}/${NAS_SHARE}"
