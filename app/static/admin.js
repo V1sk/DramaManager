@@ -157,10 +157,12 @@
     setInterval(refreshTranslateZone, 5000);
 
     // --- per-entity translation progress poller (ai-translation-queue) ---
-    // After enqueueing translation jobs, poll this entity's progress and let the
-    // caller repaint the panel as jobs land. `onTick(p)` fires every poll while
-    // work is in flight; `onDone(p, reason)` fires once when active===0 (reason
-    // 'complete') or the poller gives up ('timeout'). Returns a stop() fn.
+    // After enqueueing translation jobs, poll progress and let the caller repaint
+    // as jobs land. `entityRef` null → aggregate across ALL entities of `kind`
+    // (library-wide "translate all"); a slug → that entity; `epNumber` further
+    // scopes to one episode. `onTick(p)` fires every poll while work is in flight;
+    // `onDone(p, reason)` fires once when active===0 (reason 'complete') or the
+    // poller gives up ('timeout'). Returns a stop() fn.
     window.pollTranslation = function (kind, entityRef, epNumber, opts) {
         opts = opts || {};
         const intervalMs = opts.intervalMs || 3000;
@@ -171,7 +173,8 @@
             if (stopped) return;
             let p = null;
             try {
-                const qs = new URLSearchParams({ kind: kind, entity_ref: entityRef });
+                const qs = new URLSearchParams({ kind: kind });
+                if (entityRef != null) qs.set('entity_ref', entityRef);
                 if (epNumber != null) qs.set('ep_number', epNumber);
                 const r = await fetch('/admin/translations/progress?' + qs.toString(), { cache: 'no-store' });
                 if (r.ok) p = await r.json();

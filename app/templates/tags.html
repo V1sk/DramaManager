@@ -44,9 +44,23 @@
 
     <!-- 右：列表 -->
     <div class="xl:col-span-8 bg-surface-container-high border border-outline-variant rounded-lg overflow-hidden">
-        <div class="px-4 py-3 border-b border-outline-variant bg-surface-container flex items-center justify-between">
-            <h3 class="text-headline-sm text-on-surface">当前标签</h3>
-            <span id="tag-count" class="text-body-sm text-on-surface-variant"></span>
+        <div class="px-4 py-3 border-b border-outline-variant bg-surface-container flex items-center justify-between gap-2 flex-wrap">
+            <div class="flex items-center gap-2">
+                <h3 class="text-headline-sm text-on-surface">当前标签</h3>
+                <span id="tag-count" class="text-body-sm text-on-surface-variant"></span>
+            </div>
+            {% if ai_translate_enabled %}
+            <div class="flex items-center gap-2">
+                <button class="btn btn-sm btn-secondary" id="bulk-tr-missing-btn"
+                        title="为所有标签补齐还没有的语言 label，不改动已翻译好的语言">
+                    <span class="material-symbols-outlined text-[16px]">playlist_add</span>补全标签翻译
+                </button>
+                <button class="btn btn-sm btn-secondary" id="bulk-tr-all-btn"
+                        title="把所有标签的默认语言 label 翻译到其它全部语言（覆盖已有译文）">
+                    <span class="material-symbols-outlined text-[16px]">translate</span>翻译所有标签
+                </button>
+            </div>
+            {% endif %}
         </div>
         <table class="data">
             <thead>
@@ -287,6 +301,51 @@ document.getElementById('create-form').addEventListener('submit', async (ev) => 
     } catch (e) { flash('添加出错: ' + e, 'error'); }
     finally { btn.disabled = false; }
 });
+
+// --- Bulk translate ALL tags (翻译所有标签 overwrite / 补全标签翻译 missing) ---
+(function () {
+    const allBtn = document.getElementById('bulk-tr-all-btn');
+    const missBtn = document.getElementById('bulk-tr-missing-btn');
+    if (!allBtn && !missBtn) return;
+    const btns = [allBtn, missBtn].filter(Boolean);
+    async function run(btn, mode) {
+        if (!confirm(mode === 'missing'
+            ? '用 AI 为所有标签补齐还没有的语言 label？不会改动已翻译好的语言。'
+            : '用 AI 把所有标签的默认语言 label 翻译到其它全部已注册语言？\n后台逐标签逐语言执行，会覆盖这些语言已有的 label。')) return;
+        const orig = btn.innerHTML;
+        const restore = () => { btns.forEach(b => b.disabled = false); btn.innerHTML = orig; };
+        const busy = (txt) => { btns.forEach(b => b.disabled = true); btn.innerHTML = `<span class="material-symbols-outlined text-[16px]">hourglass_empty</span>${txt}`; };
+        busy('入队中…');
+        let body;
+        try {
+            const res = await fetch(`/admin/tags/translate?mode=${mode}`, { method: 'POST' });
+            body = await res.json().catch(() => ({}));
+            if (res.status === 503) { flash('AI 翻译未启用', 'warn'); return restore(); }
+            if (!res.ok) { flash(`入队失败 (${res.status}): ${body.detail || ''}`, 'error'); return restore(); }
+            if (body.noop) {
+                const why = (body.tags_without_source && !body.tags_translated)
+                    ? '没有可翻译的标签（都缺默认语言 label）'
+                    : (mode === 'missing' ? '没有缺失的标签语言（都已翻译）' : '没有需要翻译的标签');
+                flash(why, 'info'); return restore();
+            }
+        } catch (e) { flash('入队出错: ' + e, 'error'); return restore(); }
+        const noSrc = body.tags_without_source || 0;
+        flash(`已入队 ${body.enqueued} 个标签翻译任务（${body.tags_translated} 个标签）${noSrc ? `，${noSrc} 个无默认 label 已跳过` : ''} · 后台翻译中，完成后自动刷新`, 'info');
+        busy('翻译中…');
+        // Library-wide tag progress aggregates every tag's jobs (entity_ref=null).
+        // Lightweight counter while in flight; single full refresh at completion.
+        pollTranslation('tag', null, null, {
+            onTick: (p) => busy(`翻译中…剩 ${p.queued + p.running}`),
+            onDone: async (p, reason) => {
+                await refresh(); restore();
+                if (reason === 'timeout') flash('标签翻译仍在进行，已停止自动刷新；详见「翻译任务」', 'warn');
+                else flash(`标签翻译完成${p.failed ? `（${p.failed} 个失败，详见「翻译任务」）` : ''}`, p.failed ? 'warn' : 'info');
+            },
+        });
+    }
+    if (allBtn) allBtn.addEventListener('click', () => run(allBtn, 'overwrite'));
+    if (missBtn) missBtn.addEventListener('click', () => run(missBtn, 'missing'));
+})();
 
 (async () => { await loadLanguages(); await refresh(); })();
 </script>

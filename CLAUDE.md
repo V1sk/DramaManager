@@ -130,6 +130,7 @@ URL map:
 | `GET /api/dramas/{slug}/episodes` | SDK per-drama episode list; full `EpisodeInfo[]` (with `drm` embedded) ordered by `ep_number ASC`; empty → `[]`; 422 on malformed slug |
 | `POST /api/episodes/{slug}/{ep}/cover` | multipart `cover`; overwrites `cover.jpg`；同时翻该集 `sync_status='dirty'` |
 | `POST /admin/dramas/{slug}/translate` | AI 翻译**入队**：剧名（+ 简介若有）从 `default_lang` 扇出每目标语言一个 job。`?mode=overwrite`（默认，全量覆盖全部其它语言）/ `?mode=missing`（只翻**还没有 name 译文**的语言，按实际内容判定，不动已译）。已在队列的语言计入 `skipped`。503 / 404 / 400（默认语言无剧名）/ 200 `{noop, mode}` / 202 `{enqueued, skipped, mode}`。 |
+| `POST /admin/tags/translate` | AI **库级**标签翻译入队（标签库「翻译所有标签」/「补全标签翻译」按钮，免去逐标签点开）：`?mode=overwrite\|missing`。遍历所有标签，对**有默认语言 label** 的标签扇出每目标语言一个 job；`overwrite` 覆盖其它全部语言，`missing` 只补该标签还没有的语言。无默认 label 的标签跳过。进度由 `kind_translation_progress('tag')` 跨全部标签聚合（前端 `pollTranslation('tag', null, null)`）。**路由声明在 `/{slug}/translate` 之前**，否则 `translate` 字面段会被 `{slug}` 捕获。503 / 200 `{noop, tags_without_source}` / 202 `{enqueued, tags_translated, tags_without_source, skipped, mode}`。 |
 | `POST /admin/tags/{slug}/translate` | AI 翻译标签 label 入队（同上 `?mode=overwrite\|missing`）。503 / 404 / 400 / 200 / 202。 |
 | `POST /admin/actors/{slug}/translate` | AI 翻译演员 name 入队（同上 `?mode=overwrite\|missing`）。503 / 404 / 400 / 200 / 202。 |
 | `POST /admin/episodes/{slug}/{ep}/subtitles/translate` | AI 字幕翻译入队：body `{source_lang, targets?, mode?}`。`mode=overwrite`（默认）按 `targets`（省略=全部其它语言）覆盖；`mode=missing` 只翻**还没有字幕**的语言。从源字幕扇出每目标语言一个 job。503 / 404 / 400（源字幕不存在）/ 422 / 200 `{noop}` / 202 `{enqueued, skipped}`。 |

@@ -120,6 +120,48 @@ async def ai_translate_drama(
     return JSONResponse({"ok": True, "mode": mode, "enqueued": enqueued, "skipped": skipped}, status_code=202)
 
 
+@router.post("/admin/tags/translate")
+async def ai_translate_all_tags(
+    mode: str = Query("overwrite", pattern=_MODE_PATTERN),
+) -> JSONResponse:
+    """Library-level tag translation: for EVERY tag that has a default-language
+    label, enqueue per-language jobs translating the label. Saves clicking each
+    tag one by one. `overwrite` re-does all other languages per tag; `missing`
+    only fills languages with no label yet. Tags lacking a default label are
+    skipped (nothing to translate from). Declared BEFORE `/{slug}/translate` so
+    the literal `translate` segment isn't captured as a slug."""
+    _require_enabled()
+    total_enqueued = 0
+    total_skipped = 0
+    tags_translated = 0      # tags that contributed >=1 freshly enqueued job
+    tags_without_source = 0  # tags lacking a default-language label
+    for tag in db.list_tags():
+        slug = tag["slug"]
+        default_lang = tag["default_lang"]
+        labels = tag.get("translations") or {}  # {lang: label}, includes default
+        if not (labels.get(default_lang) or "").strip():
+            tags_without_source += 1
+            continue
+        have = {lang for lang, v in labels.items() if (v or "").strip()}
+        targets = _apply_mode(_other_lang_codes(default_lang), mode, have)
+        if not targets:
+            continue
+        enqueued, skipped = await _fanout("tag", slug, targets, source_lang=default_lang)
+        total_enqueued += len(enqueued)
+        total_skipped += len(skipped)
+        if enqueued:
+            tags_translated += 1
+    log.info("enqueued all-tags translate mode=%s tags=%d no_src=%d enqueued=%d skipped=%d",
+             mode, tags_translated, tags_without_source, total_enqueued, total_skipped)
+    noop = total_enqueued == 0
+    return JSONResponse({
+        "ok": True, "mode": mode, "noop": noop,
+        "tags_translated": tags_translated,
+        "tags_without_source": tags_without_source,
+        "enqueued": total_enqueued, "skipped": total_skipped,
+    }, status_code=(200 if noop else 202))
+
+
 @router.post("/admin/tags/{slug}/translate")
 async def ai_translate_tag(
     slug: str = PathParam(..., pattern=_SLUG_PATTERN),
@@ -289,12 +331,16 @@ async def translations_overview(request: Request) -> HTMLResponse:
 @router.get("/admin/translations/progress")
 async def translation_progress(
     kind: str = Query(..., pattern=r"^(drama|tag|actor|subtitle)$"),
-    entity_ref: str = Query(..., pattern=_SLUG_PATTERN),
+    entity_ref: str | None = Query(None, pattern=_SLUG_PATTERN),
     ep_number: int | None = Query(None),
 ) -> JSONResponse:
-    """Per-entity job counts `{queued, running, done, failed}` — polled by the
-    entity pages after enqueue so they can refresh the panel as jobs complete.
-    `active = queued + running == 0` means this entity's batch has settled."""
+    """Job counts `{queued, running, done, failed}` — polled after enqueue to
+    refresh as jobs complete. `active = queued + running == 0` means the batch
+    has settled. With `entity_ref` → that entity (optionally scoped to one
+    `ep_number`); WITHOUT `entity_ref` → aggregate across ALL entities of `kind`
+    (drives library-wide "translate all" progress, e.g. all tags)."""
+    if entity_ref is None:
+        return JSONResponse(db.kind_translation_progress(kind))
     return JSONResponse(db.entity_translation_progress(kind, entity_ref, ep_number))
 
 

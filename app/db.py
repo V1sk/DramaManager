@@ -2822,6 +2822,22 @@ def entity_translation_progress(
     return out
 
 
+def kind_translation_progress(kind: str) -> dict[str, int]:
+    """`{status: count}` aggregated over EVERY job of one kind (all entities) —
+    drives library-wide "translate all" progress (e.g. all tags / all actors),
+    where each entity has its own `entity_ref` so there's no single entity to
+    scope by."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT status, COUNT(*) AS n FROM translation_jobs WHERE kind=? GROUP BY status",
+            (kind,),
+        ).fetchall()
+    out = {"queued": 0, "running": 0, "done": 0, "failed": 0}
+    for r in rows:
+        out[r["status"]] = r["n"]
+    return out
+
+
 def list_episode_numbers(slug: str) -> list[int]:
     """Ordered ep_numbers for a drama, excluding `pending_delete` rows (awaiting
     delete-sync — shouldn't be (re)translated). Used by the drama-level subtitle
