@@ -221,6 +221,16 @@
                         <span class="material-symbols-outlined text-[16px]">subtitles</span>批量字幕
                     </button>
                     <input type="file" id="batch-subtitle-file" accept=".vtt,.srt" multiple class="hidden">
+                    {% if ai_translate_enabled %}
+                    <button class="btn btn-secondary btn-sm" id="subs-translate-missing-btn"
+                            title="为本剧每一集补齐还没有的语言字幕（基于默认语言字幕），不改动已翻译好的语言">
+                        <span class="material-symbols-outlined text-[16px]">playlist_add</span>补全字幕翻译
+                    </button>
+                    <button class="btn btn-secondary btn-sm" id="subs-translate-all-btn"
+                            title="把本剧每一集的默认语言字幕翻译到其它全部语言（覆盖已有字幕）">
+                        <span class="material-symbols-outlined text-[16px]">translate</span>翻译所有字幕
+                    </button>
+                    {% endif %}
                 </div>
             </div>
             <div class="px-4 py-2 text-[11px] text-on-surface-variant border-b border-outline-variant bg-surface-container/40">
@@ -689,6 +699,53 @@ document.getElementById('translations-panel').addEventListener('click', async (e
         });
     }
     if (fullBtn) fullBtn.addEventListener('click', () => run(fullBtn, 'overwrite'));
+    if (missBtn) missBtn.addEventListener('click', () => run(missBtn, 'missing'));
+})();
+
+// --- AI translate ALL episodes' subtitles for this drama (全量 overwrite / 补全 missing) ---
+(function () {
+    const allBtn = document.getElementById('subs-translate-all-btn');
+    const missBtn = document.getElementById('subs-translate-missing-btn');
+    if (!allBtn && !missBtn) return;
+    const btns = [allBtn, missBtn].filter(Boolean);
+    async function run(btn, mode) {
+        const confirmMsg = mode === 'missing'
+            ? '为本剧每一集补齐还没有的语言字幕（基于各集默认语言字幕）？不会改动已翻译好的语言。'
+            : '把本剧每一集的默认语言字幕翻译到其它全部已注册语言？\n后台逐集逐语言执行，会覆盖这些语言已有的字幕。';
+        if (!confirm(confirmMsg)) return;
+        const orig = btn.innerHTML;
+        const restore = () => { btns.forEach(b => b.disabled = false); btn.innerHTML = orig; };
+        const busy = (txt) => { btns.forEach(b => b.disabled = true); btn.innerHTML = `<span class="material-symbols-outlined text-[16px]">hourglass_empty</span>${txt}`; };
+        busy('入队中…');
+        let body;
+        try {
+            const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/subtitles/translate?mode=${mode}`, { method: 'POST' });
+            body = await res.json().catch(() => ({}));
+            if (res.status === 503) { flash('AI 翻译未启用', 'warn'); return restore(); }
+            if (!res.ok) { flash(`入队失败 (${res.status}): ${body.detail || ''}`, 'error'); return restore(); }
+            if (body.noop) {
+                const why = (body.episodes_without_source && !body.episodes_translated)
+                    ? '没有可翻译的字幕（各集都缺默认语言字幕）'
+                    : (mode === 'missing' ? '没有缺失的字幕语言（都已翻译）' : '没有需要翻译的字幕');
+                flash(why, 'info'); return restore();
+            }
+        } catch (e) { flash('入队出错: ' + e, 'error'); return restore(); }
+        const noSrc = body.episodes_without_source || 0;
+        flash(`已入队 ${body.enqueued} 个字幕翻译任务（${body.episodes_translated} 集）${noSrc ? `，${noSrc} 集无默认语言字幕已跳过` : ''} · 后台翻译中，完成后自动刷新`, 'info');
+        busy('翻译中…');
+        // Drama-level subtitle progress aggregates every episode's subtitle jobs
+        // (pollTranslation with ep_number=null). Lightweight counter while in
+        // flight; single full refresh at completion.
+        pollTranslation('subtitle', SLUG, null, {
+            onTick: (p) => busy(`翻译中…剩 ${p.queued + p.running}`),
+            onDone: async (p, reason) => {
+                await refreshDrama(); restore();
+                if (reason === 'timeout') flash('字幕翻译仍在进行，已停止自动刷新；详见「翻译任务」', 'warn');
+                else flash(`字幕翻译完成${p.failed ? `（${p.failed} 个失败，详见「翻译任务」）` : ''}`, p.failed ? 'warn' : 'info');
+            },
+        });
+    }
+    if (allBtn) allBtn.addEventListener('click', () => run(allBtn, 'overwrite'));
     if (missBtn) missBtn.addEventListener('click', () => run(missBtn, 'missing'));
 })();
 

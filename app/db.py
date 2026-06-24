@@ -2802,18 +2802,37 @@ def list_translation_jobs(statuses: tuple[str, ...] | None = None, limit: int = 
 def entity_translation_progress(
     kind: str, entity_ref: str, ep_number: int | None = None
 ) -> dict[str, int]:
-    """`{status: count}` for one entity's jobs — drives inline "12/40" progress."""
+    """`{status: count}` for one entity's jobs — drives inline "12/40" progress.
+    A concrete `ep_number` scopes to that single episode; `ep_number=None`
+    aggregates across ALL of the entity's jobs (drama/tag/actor jobs all carry a
+    NULL ep, so this is unchanged for them; for kind='subtitle' it sums every
+    episode, which the drama-level "translate all subtitles" button polls)."""
+    if ep_number is None:
+        where, params = "kind=? AND entity_ref=?", (kind, entity_ref)
+    else:
+        where, params = "kind=? AND entity_ref=? AND ep_number=?", (kind, entity_ref, ep_number)
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT status, COUNT(*) AS n FROM translation_jobs "
-            "WHERE kind=? AND entity_ref=? AND IFNULL(ep_number,-1)=IFNULL(?,-1) "
-            "GROUP BY status",
-            (kind, entity_ref, ep_number),
+            f"SELECT status, COUNT(*) AS n FROM translation_jobs WHERE {where} GROUP BY status",
+            params,
         ).fetchall()
     out = {"queued": 0, "running": 0, "done": 0, "failed": 0}
     for r in rows:
         out[r["status"]] = r["n"]
     return out
+
+
+def list_episode_numbers(slug: str) -> list[int]:
+    """Ordered ep_numbers for a drama, excluding `pending_delete` rows (awaiting
+    delete-sync — shouldn't be (re)translated). Used by the drama-level subtitle
+    translation fan-out to walk every episode."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT ep_number FROM episodes WHERE drama_slug=? "
+            "AND IFNULL(sync_status,'') != 'pending_delete' ORDER BY ep_number ASC",
+            (slug,),
+        ).fetchall()
+    return [r["ep_number"] for r in rows]
 
 
 def clear_terminal_translation_jobs(

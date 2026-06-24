@@ -215,6 +215,57 @@ async def ai_translate_subtitle(
     return JSONResponse({"ok": True, "mode": mode, "enqueued": enqueued, "skipped": skipped}, status_code=202)
 
 
+@router.post("/admin/dramas/{drama_slug}/subtitles/translate")
+async def ai_translate_drama_subtitles(
+    drama_slug: str = PathParam(..., pattern=_SLUG_PATTERN),
+    mode: str = Query("overwrite", pattern=_MODE_PATTERN),
+) -> JSONResponse:
+    """Drama-level subtitle translation: for EVERY episode that has a
+    default-language source subtitle, enqueue per-language subtitle jobs (source =
+    drama `default_lang`). Saves opening each episode one by one. `overwrite`
+    re-does all other languages per episode; `missing` only fills languages that
+    have no subtitle yet for that episode. Episodes with no default-language
+    subtitle are skipped (nothing to translate from)."""
+    _require_enabled()
+    drama = db.get_drama(drama_slug)
+    if drama is None:
+        raise HTTPException(status_code=404, detail=f"drama '{drama_slug}' not found")
+    source_lang = drama["default_lang"]
+    other = _other_lang_codes(source_lang)
+
+    total_enqueued = 0
+    total_skipped = 0
+    eps_translated = 0      # episodes that contributed >=1 freshly enqueued job
+    eps_without_source = 0  # episodes lacking a default-language subtitle to translate from
+    for ep_number in db.list_episode_numbers(drama_slug):
+        if not ai_jobs._subtitle_path(drama_slug, ep_number, source_lang).is_file():
+            eps_without_source += 1
+            continue
+        have = {r["lang_code"] for r in db.list_subtitles_for_slug_ep(drama_slug, ep_number)}
+        targets = _apply_mode(other, mode, have)
+        if not targets:
+            continue
+        enqueued, skipped = await _fanout(
+            "subtitle", drama_slug, targets, ep_number=ep_number, source_lang=source_lang,
+        )
+        total_enqueued += len(enqueued)
+        total_skipped += len(skipped)
+        if enqueued:
+            eps_translated += 1
+    log.info(
+        "enqueued drama subtitle translate slug=%s mode=%s eps_translated=%d "
+        "eps_no_source=%d enqueued=%d skipped=%d",
+        drama_slug, mode, eps_translated, eps_without_source, total_enqueued, total_skipped,
+    )
+    noop = total_enqueued == 0
+    return JSONResponse({
+        "ok": True, "mode": mode, "noop": noop,
+        "episodes_translated": eps_translated,
+        "episodes_without_source": eps_without_source,
+        "enqueued": total_enqueued, "skipped": total_skipped,
+    }, status_code=(200 if noop else 202))
+
+
 # ---------------------------------------------------------------------------
 # Operator surfaces: jobs overview page, nav-badge summary, retry-failed.
 # ---------------------------------------------------------------------------

@@ -133,6 +133,7 @@ URL map:
 | `POST /admin/tags/{slug}/translate` | AI 翻译标签 label 入队（同上 `?mode=overwrite\|missing`）。503 / 404 / 400 / 200 / 202。 |
 | `POST /admin/actors/{slug}/translate` | AI 翻译演员 name 入队（同上 `?mode=overwrite\|missing`）。503 / 404 / 400 / 200 / 202。 |
 | `POST /admin/episodes/{slug}/{ep}/subtitles/translate` | AI 字幕翻译入队：body `{source_lang, targets?, mode?}`。`mode=overwrite`（默认）按 `targets`（省略=全部其它语言）覆盖；`mode=missing` 只翻**还没有字幕**的语言。从源字幕扇出每目标语言一个 job。503 / 404 / 400（源字幕不存在）/ 422 / 200 `{noop}` / 202 `{enqueued, skipped}`。 |
+| `POST /admin/dramas/{slug}/subtitles/translate` | AI **剧级**字幕翻译入队（剧详情页「翻译所有字幕」/「补全字幕翻译」按钮，免去逐集点开）：`?mode=overwrite\|missing`。遍历本剧每一集，对**有默认语言字幕**的集，以该集 `default_lang` 字幕为源扇出每目标语言一个 job；`overwrite` 覆盖其它全部语言，`missing` 只补该集还没有的语言。无源字幕的集跳过。进度由 `entity_translation_progress(ep_number=None)` 跨全集聚合（前端 `pollTranslation('subtitle', slug, null)`）。503 / 404 / 200 `{noop, episodes_without_source}` / 202 `{enqueued, episodes_translated, episodes_without_source, skipped, mode}`。 |
 | `GET /admin/translations` | HTML：翻译任务总览页，列出全部 queued / running / failed 任务 + 「重试全部失败」。 |
 | `GET /admin/translations/summary` | JSON `{enabled, outstanding, queued, running, failed}`：导航「翻译任务」角标 5s 轮询用。 |
 | `POST /admin/translations/retry` | 重新入队全部 failed 任务（同一单元新建 queued job，dedupe 保护）。503 / 200 `{requeued}`。 |
