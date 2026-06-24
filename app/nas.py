@@ -13,9 +13,17 @@ inside the NAS that points outside the root is rejected, not followed out.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from .config import settings
+
+
+def _natural_key(name: str):
+    """Case-insensitive natural sort key so `EP2` < `EP10` (numeric runs compared
+    as numbers, not lexically). Without this, plain string sort gives EP1, EP10,
+    EP2 — confusing when 片源 are named EP<n>."""
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", name)]
 
 # Video container extensions we let operators pick. ffmpeg handles far more, but
 # this keeps the browser focused on plausible 片源 and avoids listing junk.
@@ -77,7 +85,7 @@ def list_dir(rel: str) -> dict:
     root_resolved = _root_resolved()
     dirs: list[dict] = []
     files: list[dict] = []
-    for entry in sorted(d.iterdir(), key=lambda e: e.name.lower()):
+    for entry in sorted(d.iterdir(), key=lambda e: _natural_key(e.name)):
         if entry.name.startswith("."):
             continue
         try:

@@ -688,24 +688,23 @@ async def admin_nas_batch_import(
     drama_slug: str = PathParam(..., pattern=r"^[a-z0-9][a-z0-9-]*$"),
     payload: dict = Body(...),
 ) -> JSONResponse:
-    """Batch-ingest a NAS folder: scan its `EP<n>.<ext>` files and ingest each in
-    place (no upload). Body `{dir}` is relative to SOURCE_NAS_DIR. Existing
-    episodes are overwritten (re-upload semantics); encoding episodes skipped.
-    Returns a per-file result list — partial failure is normal."""
+    """Batch-ingest a multi-selected list of NAS files, each read in place (no
+    upload). Body `{paths}` is a list of file paths relative to SOURCE_NAS_DIR
+    (the operator multi-selects them in the browser). Each file's `ep_number`
+    comes from its `EP<n>` filename prefix. Existing episodes are overwritten
+    (re-upload semantics); encoding episodes skipped. Returns a per-file result
+    list — partial failure is normal."""
     _require_nas()
     if db.get_drama(drama_slug) is None:
         raise HTTPException(status_code=404, detail=f"drama '{drama_slug}' not found")
-    rel = (payload.get("dir") or "").strip() if isinstance(payload, dict) else ""
-    try:
-        nas.resolve(rel, must_be="dir")
-        listing = nas.list_dir(rel)
-    except nas.NasPathError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    paths = payload.get("paths") if isinstance(payload, dict) else None
+    if not isinstance(paths, list) or not paths or not all(isinstance(p, str) for p in paths):
+        raise HTTPException(status_code=400, detail="paths 必须是非空的文件路径数组")
 
     results: list[dict] = []
-    seen_eps: dict[int, str] = {}  # ep_number -> filename, dedupe within the folder
-    for f in listing["files"]:
-        filename = f["name"]
+    seen_eps: dict[int, str] = {}  # ep_number -> filename, dedupe within the selection
+    for rel in paths:
+        filename = Path(rel).name
         m = _EP_PREFIX_RE.match(filename.strip())
         if not m:
             results.append({"filename": filename, "ep_number": None, "ok": False,
@@ -722,6 +721,12 @@ async def admin_nas_batch_import(
             continue
         seen_eps[ep_number] = filename
 
+        try:
+            src = nas.resolve(rel, must_be="file")
+        except nas.NasPathError as e:
+            results.append({"filename": filename, "ep_number": ep_number, "ok": False, "detail": str(e)})
+            continue
+
         row = db.get_by_slug_ep(drama_slug, ep_number)
         if row is not None and row["status"] == "encoding":
             results.append({"filename": filename, "ep_number": ep_number, "ok": False,
@@ -729,11 +734,7 @@ async def admin_nas_batch_import(
             continue
 
         try:
-            src = nas.resolve(f["rel"], must_be="file")
             upload_version = _ingest_episode_from_file(drama_slug, ep_number, src, filename)
-        except nas.NasPathError as e:
-            results.append({"filename": filename, "ep_number": ep_number, "ok": False, "detail": str(e)})
-            continue
         except HTTPException as e:
             results.append({"filename": filename, "ep_number": ep_number, "ok": False, "detail": str(e.detail)})
             continue
@@ -756,7 +757,6 @@ async def admin_nas_batch_import(
         "ok_count": ok_count,
         "error_count": len(results) - ok_count,
         "results": results,
-        "dir": listing["path"],
     })
 
 

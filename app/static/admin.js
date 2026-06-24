@@ -218,11 +218,33 @@
         const listEl = document.getElementById('nas-list');
         const hintEl = document.getElementById('nas-hint');
         const pickDirBtn = document.getElementById('nas-pick-dir');
-        titleEl.textContent = opts.title || (select === 'dir' ? '选择 NAS 文件夹' : '选择 NAS 文件');
-        hintEl.textContent = select === 'dir' ? '进入目标文件夹后点「选择当前文件夹」' : '点击文件即选中';
-        pickDirBtn.classList.toggle('hidden', select !== 'dir');
+        // select: 'file' = pick one file; 'files' = multi-select files (list,
+        // persists across folders); 'dir' = pick the current folder.
+        const CHECK = '<span class="material-symbols-outlined text-[16px]">check</span>';
+        titleEl.textContent = opts.title || (select === 'dir' ? '选择 NAS 文件夹'
+            : select === 'files' ? '多选 NAS 文件' : '选择 NAS 文件');
+        hintEl.textContent = select === 'dir' ? '进入目标文件夹后点「选择当前文件夹」'
+            : select === 'files' ? '点击单选；⌘/Ctrl 点击多选、Shift 点击连选；再点「确认」批量导入'
+            : '点击选中文件，再点「确认」（双击文件直接确认）';
+        pickDirBtn.classList.remove('hidden');
 
         let curPath = opts.startPath || '';
+        let selectedFile = null;                  // 'file' mode: {rel, name}
+        const selectedMulti = new Map();           // 'files' mode: rel -> name (preserves pick order)
+        const SEL = ['bg-primary/20', 'ring-1', 'ring-inset', 'ring-primary'];
+        let currentFiles = [];                     // 'files' mode: visible file list (DOM order) for range-select
+        let anchorRel = null;                      // 'files' mode: Shift-range anchor
+        function updateConfirm() {
+            if (select === 'dir') { pickDirBtn.innerHTML = CHECK + '选择当前文件夹'; pickDirBtn.disabled = false; }
+            else if (select === 'files') { pickDirBtn.innerHTML = CHECK + `确认${selectedMulti.size ? `（${selectedMulti.size}）` : ''}`; pickDirBtn.disabled = selectedMulti.size === 0; }
+            else { pickDirBtn.innerHTML = CHECK + '确认'; pickDirBtn.disabled = !selectedFile; }
+        }
+        function applyMultiHighlight() {
+            listEl.querySelectorAll('[data-pick-file]').forEach((el) => {
+                if (selectedMulti.has(el.dataset.pickFile)) el.classList.add(...SEL);
+                else el.classList.remove(...SEL);
+            });
+        }
         let resolveFn;
         const done = new Promise((res) => { resolveFn = res; });
         // Lock background page scroll while the modal is open — the wheel should
@@ -239,7 +261,7 @@
             document.documentElement.style.overflow = prevHtmlOverflow;
             document.body.style.overflow = prevBodyOverflow;
             document.removeEventListener('keydown', onKey);
-            listEl.onclick = null; pickDirBtn.onclick = null;
+            listEl.onclick = null; listEl.ondblclick = null; pickDirBtn.onclick = null;
             resolveFn(result || null);
         }
         function onKey(e) { if (e.key === 'Escape') close(null); }
@@ -254,6 +276,7 @@
                 data = await r.json();
             } catch (e) { listEl.innerHTML = `<div class="meta p-4">读取出错：${escapeHtml(String(e))}</div>`; return; }
             curPath = data.path || '';
+            currentFiles = data.files || [];
             crumbEl.textContent = '/' + curPath;
             let rows = '';
             if (data.parent != null) {
@@ -267,17 +290,63 @@
             }
             if (!data.dirs.length && !data.files.length) rows += '<div class="meta p-4">（空文件夹 / 无视频文件）</div>';
             listEl.innerHTML = rows;
+            // 'files' mode keeps picks across folder navigation — re-apply the
+            // highlight to any now-visible rows that are already selected.
+            if (select === 'files') applyMultiHighlight();
         }
 
         listEl.onclick = (ev) => {
             const nav = ev.target.closest('[data-nav]');
-            if (nav) { load(nav.dataset.nav); return; }
+            if (nav) {
+                if (select === 'file') { selectedFile = null; updateConfirm(); }  // 'files' keeps picks across folders
+                load(nav.dataset.nav);
+                return;
+            }
+            const pf = ev.target.closest('[data-pick-file]');
+            if (!pf) return;
+            if (select === 'file') {
+                // Select-only: highlight the row + enable 确认; do NOT close yet.
+                listEl.querySelectorAll('[data-pick-file]').forEach((el) => el.classList.remove(...SEL));
+                pf.classList.add(...SEL);
+                selectedFile = { rel: pf.dataset.pickFile, name: pf.dataset.name };
+                updateConfirm();
+            } else if (select === 'files') {
+                // System-style multi-select: plain click = single; ⌘/Ctrl click =
+                // toggle one; Shift click = contiguous range from the anchor.
+                const rel = pf.dataset.pickFile, name = pf.dataset.name;
+                const idx = currentFiles.findIndex((f) => f.rel === rel);
+                const aIdx = anchorRel == null ? -1 : currentFiles.findIndex((f) => f.rel === anchorRel);
+                if (ev.shiftKey && aIdx !== -1 && idx !== -1) {
+                    const [lo, hi] = aIdx < idx ? [aIdx, idx] : [idx, aIdx];
+                    selectedMulti.clear();
+                    for (let i = lo; i <= hi; i++) selectedMulti.set(currentFiles[i].rel, currentFiles[i].name);
+                    // anchor stays put so the range can be re-dragged
+                } else if (ev.metaKey || ev.ctrlKey) {
+                    if (selectedMulti.has(rel)) selectedMulti.delete(rel); else selectedMulti.set(rel, name);
+                    anchorRel = rel;
+                } else {
+                    selectedMulti.clear();
+                    selectedMulti.set(rel, name);
+                    anchorRel = rel;
+                }
+                applyMultiHighlight();
+                updateConfirm();
+            }
+        };
+        // Double-click a file = confirm immediately (single-pick shortcut only).
+        listEl.ondblclick = (ev) => {
             const pf = ev.target.closest('[data-pick-file]');
             if (pf && select === 'file') close({ type: 'file', rel: pf.dataset.pickFile, name: pf.dataset.name });
         };
-        pickDirBtn.onclick = () => close({ type: 'dir', rel: curPath, name: curPath || '(根目录)' });
+        pickDirBtn.onclick = () => {
+            if (select === 'dir') close({ type: 'dir', rel: curPath, name: curPath || '(根目录)' });
+            else if (select === 'files') {
+                if (selectedMulti.size) close({ type: 'files', items: [...selectedMulti].map(([rel, name]) => ({ rel, name })) });
+            } else if (selectedFile) close({ type: 'file', rel: selectedFile.rel, name: selectedFile.name });
+        };
         modal.querySelectorAll('[data-nas-close]').forEach((el) => { el.onclick = () => close(null); });
         document.addEventListener('keydown', onKey);
+        updateConfirm();
         modal.classList.remove('hidden');
         load(curPath);
         return done;

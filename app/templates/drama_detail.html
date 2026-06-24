@@ -638,14 +638,14 @@ document.getElementById('batch-subtitle-file').addEventListener('change', async 
         finally { nextBtn.disabled = false; }
     });
     if (batchBtn) batchBtn.addEventListener('click', async () => {
-        const pick = await openNasBrowser({ select: 'dir', title: '选择批量导入文件夹（NAS）' });
-        if (!pick) return;
+        const pick = await openNasBrowser({ select: 'files', title: '多选片源批量导入（NAS）' });
+        if (!pick || !pick.items || !pick.items.length) return;
         batchBtn.disabled = true;
         const orig = batchBtn.innerHTML;
         batchBtn.innerHTML = '<span class="material-symbols-outlined text-[16px]">hourglass_empty</span>导入中…';
         try {
             const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/episodes/batch-nas`, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dir: pick.rel }),
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paths: pick.items.map(i => i.rel) }),
             });
             const body = await res.json().catch(() => ({}));
             if (!res.ok) { flash(`NAS 批量导入失败 (${res.status}): ${body.detail || ''}`, 'error'); return; }
