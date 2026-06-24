@@ -122,7 +122,7 @@ URL map:
 | `POST /admin/dramas/{slug}/episodes` | multipart `video`. Auto-increment `ep_number = MAX(ep_number)+1` **over non-`pending_delete` rows**（同步过被删的集是隐藏的 `pending_delete` 行，等 delete-sync 完成才物理删；不排除它就会跳号，删了唯一一集再传会变成 ep2）。落到 `pending_delete` 槽位时 `upsert_pending` 原地 UPDATE 复活该行，不撞 UNIQUE。UNIQUE-collision retry up to 3×; persistent collision → 503. 404 if drama missing. |
 | `POST /admin/dramas/{slug}/episodes/{ep}` | multipart `video`. Re-encode existing episode in place. 404 if episode missing. 409 if `status=encoding`. |
 | `POST /admin/dramas/{slug}/episodes/batch` | multipart `videos` (多文件). 每个文件名须以 `EP<n>` 开头（大小写不敏感）→ 集号。已存在的集走重传语义覆盖；`status=encoding` 的集跳过。返回逐文件结果 `{ok_count, error_count, results[]}`，部分失败不致命。**路由声明在 `episodes/{ep}` 之前**，否则 `batch` 字面段会被 `{ep}` 的 `^[0-9]+$` 捕获并 422。 |
-| `POST /admin/dramas/{slug}/subtitles/batch` | multipart `files` (多文件). 文件名须形如 `EP<n>-<lang>-说明.vtt\|.srt`（EP 大小写不敏感）；`<lang>` 按最长匹配解析自启用语言注册表（兼容 `zh-rCN` 这类带连字符的 code）。`.srt` 自动转 WebVTT。已存在的 (集, 语言) 字幕覆盖。返回逐文件结果，部分失败不致命。 |
+| `POST /admin/dramas/{slug}/subtitles/batch` | multipart `files` (多文件). 文件名须形如 `EP<n>.vtt\|.srt`（EP 大小写不敏感；集号后可跟 `-`/`_`/空格 分隔的说明，仅供人读，解析时忽略）。**每个文件都落到本剧 `default_lang`**——正常作流只上传默认语言字幕，其余语言由 AI 翻译扇出。`.srt` 自动转 WebVTT。已存在的 (集, 默认语言) 字幕覆盖。返回逐文件结果，部分失败不致命。 |
 | `GET /admin/episodes` | JSON list of all episode rows (`created_at DESC`); each row carries `drama_name` via JOIN |
 | `GET /api/languages` | SDK: array of `{code, display_label}` for every registered language; ordered by `code ASC`; empty registry → `[]` |
 | `GET /api/episodes/{slug}/{ep}` | SDK endpoint; strict `EpisodeInfo` JSON; 404 unless `status=ready` |

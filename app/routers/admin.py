@@ -1267,7 +1267,11 @@ async def admin_delete_subtitle(
     return JSONResponse({"ok": True, "warnings": warnings})
 
 
-_SUBTITLE_BATCH_RE = re.compile(r"^EP(\d+)-(.+)$", re.IGNORECASE)
+# Batch subtitle filename: `EP<n>` (EP case-insensitive), optionally followed by
+# a `-`/`_`/space-separated description for human readability (ignored). The
+# language is no longer encoded in the filename — every batch-uploaded subtitle
+# targets the drama's default language (the normal authoring flow).
+_SUBTITLE_BATCH_RE = re.compile(r"^EP(\d+)(?:[-_ ].*)?$", re.IGNORECASE)
 
 
 def _subtitle_to_vtt_bytes(filename: str, body: bytes) -> bytes:
@@ -1297,21 +1301,23 @@ async def admin_batch_upload_subtitles(
     drama_slug: str = PathParam(..., pattern=r"^[a-z0-9][a-z0-9-]*$"),
     files: list[UploadFile] = File(...),
 ) -> JSONResponse:
-    """Batch-upload subtitles. Each filename must be `EP<n>-<lang>-...vtt|srt`
-    (EP prefix case-insensitive); `<lang>` is resolved against the active
-    language registry by longest match, so hyphenated codes like `zh-rCN`
-    work even though the filename also uses `-` as separator. SRT files are
-    converted to WebVTT. Existing (episode, lang) subtitles are overwritten.
-    Returns a per-file result list — partial failure is normal.
+    """Batch-upload subtitles. Each filename must be `EP<n>.vtt|srt` (EP prefix
+    case-insensitive; an optional `-`/`_`/space-separated description after the
+    episode number is allowed but ignored). Every file targets the drama's
+    default language — the normal authoring flow only uploads default-language
+    subtitles, and AI translation fans the rest out from there. SRT files are
+    converted to WebVTT. Existing (episode, default-lang) subtitles are
+    overwritten. Returns a per-file result list — partial failure is normal.
     """
-    if db.get_drama(drama_slug) is None:
+    drama = db.get_drama(drama_slug)
+    if drama is None:
         for f in files:
             await f.close()
         raise HTTPException(status_code=404, detail=f"drama '{drama_slug}' not found")
 
-    active_langs = [r["code"] for r in db.list_languages()]
+    lang = drama["default_lang"]
     results: list[dict] = []
-    seen: dict[tuple[int, str], str] = {}  # (ep, lang) -> filename, dedupe within the batch
+    seen: dict[int, str] = {}  # ep -> filename, dedupe within the batch
 
     for file in files:
         filename = file.filename or ""
@@ -1320,7 +1326,7 @@ async def admin_batch_upload_subtitles(
             await file.close()
             results.append({
                 "filename": filename, "ep_number": None, "lang_code": None,
-                "ok": False, "detail": "文件名须形如 EP<集号>-<语言>-说明.vtt/srt",
+                "ok": False, "detail": "文件名须形如 EP<集号>.vtt/srt",
             })
             continue
         ep_number = int(m.group(1))
@@ -1331,28 +1337,12 @@ async def admin_batch_upload_subtitles(
                 "ok": False, "detail": "集号必须 >= 1",
             })
             continue
-        remainder = m.group(2)
-        # Resolve language: longest active code that `remainder` equals or
-        # starts with (followed by '-'). Longest-match disambiguates hyphenated
-        # codes (e.g. `zh-rCN-foo` → `zh-rCN`, not a bare `zh`).
-        lang: str | None = None
-        for code in active_langs:
-            if remainder == code or remainder.startswith(code + "-"):
-                if lang is None or len(code) > len(lang):
-                    lang = code
-        if lang is None:
-            await file.close()
-            results.append({
-                "filename": filename, "ep_number": ep_number, "lang_code": None,
-                "ok": False, "detail": "文件名中的语言段未匹配到任何已启用语言",
-            })
-            continue
-        key = (ep_number, lang)
+        key = ep_number
         if key in seen:
             await file.close()
             results.append({
                 "filename": filename, "ep_number": ep_number, "lang_code": lang,
-                "ok": False, "detail": f"与本批次文件 '{seen[key]}' 的集号+语言重复",
+                "ok": False, "detail": f"与本批次文件 '{seen[key]}' 的集号重复",
             })
             continue
         seen[key] = filename
