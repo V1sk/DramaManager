@@ -217,6 +217,14 @@
                         <span class="material-symbols-outlined text-[16px]">cloud_upload</span>批量上传
                     </button>
                     <input type="file" id="batch-upload-file" accept="video/*" multiple class="hidden">
+                    {% if nas_import_enabled %}
+                    <button class="btn btn-secondary btn-sm" id="nas-next-btn" title="从公司 NAS 选一个文件作为下一集，直接编码，无需上传">
+                        <span class="material-symbols-outlined text-[16px]">folder_open</span>NAS 下一集
+                    </button>
+                    <button class="btn btn-secondary btn-sm" id="nas-batch-btn" title="从公司 NAS 选一个文件夹，批量导入其中 EP&lt;n&gt;.mp4，无需上传">
+                        <span class="material-symbols-outlined text-[16px]">drive_folder_upload</span>NAS 批量
+                    </button>
+                    {% endif %}
                     <button class="btn btn-secondary btn-sm" id="batch-subtitle-btn">
                         <span class="material-symbols-outlined text-[16px]">subtitles</span>批量字幕
                     </button>
@@ -236,7 +244,8 @@
             <div class="px-4 py-2 text-[11px] text-on-surface-variant border-b border-outline-variant bg-surface-container/40">
                 单集：自动分配下一个集号（MAX+1）·
                 批量集：文件名须以 <code class="mono">EP&lt;数字&gt;</code> 开头（如 <code class="mono">EP1.mp4</code>）·
-                批量字幕：文件名形如 <code class="mono">EP&lt;集号&gt;.vtt/srt</code>（默认对应本剧默认语言）
+                批量字幕：文件名形如 <code class="mono">EP&lt;集号&gt;.vtt/srt</code>（默认对应本剧默认语言）{% if nas_import_enabled %} ·
+                NAS：直接读公司 NAS 上的片源编码，无需上传（批量同样按 <code class="mono">EP&lt;数字&gt;</code> 命名）{% endif %}
             </div>
             <table class="data" id="episodes-table">
                 <thead>
@@ -608,6 +617,45 @@ document.getElementById('batch-subtitle-file').addEventListener('change', async 
     } catch (e) { flash('批量字幕上传出错: ' + e, 'error'); }
     finally { btn.disabled = false; btn.innerHTML = orig; ev.target.value = ''; }
 });
+
+// --- NAS direct ingest: pick from the shared mount, encode in place (no upload) ---
+(function () {
+    const nextBtn = document.getElementById('nas-next-btn');
+    const batchBtn = document.getElementById('nas-batch-btn');
+    if (nextBtn) nextBtn.addEventListener('click', async () => {
+        const pick = await openNasBrowser({ select: 'file', title: '选择下一集片源（NAS）' });
+        if (!pick) return;
+        nextBtn.disabled = true;
+        try {
+            const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/episodes/nas`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: pick.rel }),
+            });
+            const body = await res.json().catch(() => ({}));
+            if (!res.ok) { flash(`NAS 导入失败 (${res.status}): ${body.detail || ''}`, 'error'); return; }
+            flash(`已从 NAS 导入第 ${body.ep_number} 集（${escapeHtml(pick.name)}），开始编码`, 'info');
+            await refreshDrama();
+        } catch (e) { flash('NAS 导入出错: ' + e, 'error'); }
+        finally { nextBtn.disabled = false; }
+    });
+    if (batchBtn) batchBtn.addEventListener('click', async () => {
+        const pick = await openNasBrowser({ select: 'dir', title: '选择批量导入文件夹（NAS）' });
+        if (!pick) return;
+        batchBtn.disabled = true;
+        const orig = batchBtn.innerHTML;
+        batchBtn.innerHTML = '<span class="material-symbols-outlined text-[16px]">hourglass_empty</span>导入中…';
+        try {
+            const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/episodes/batch-nas`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dir: pick.rel }),
+            });
+            const body = await res.json().catch(() => ({}));
+            if (!res.ok) { flash(`NAS 批量导入失败 (${res.status}): ${body.detail || ''}`, 'error'); return; }
+            flash(`NAS 批量导入完成：成功 ${body.ok_count} 个，失败 ${body.error_count} 个`, body.error_count ? 'warn' : 'info');
+            for (const r of (body.results || []).filter(r => !r.ok)) flash(`✗ ${escapeHtml(r.filename || '(无文件名)')}: ${r.detail}`, 'error');
+            await refreshDrama();
+        } catch (e) { flash('NAS 批量导入出错: ' + e, 'error'); }
+        finally { batchBtn.disabled = false; batchBtn.innerHTML = orig; }
+    });
+})();
 
 // --- Translation panel actions (single-card editor; language via dropdown) ---
 document.getElementById('translations-panel').addEventListener('click', async (ev) => {

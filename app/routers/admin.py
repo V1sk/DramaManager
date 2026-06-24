@@ -10,7 +10,7 @@ from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Path as
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from .. import db
+from .. import db, nas
 from ..auth import require_can_delete
 from ..config import settings
 from ..ffmpeg_utils import (
@@ -19,7 +19,7 @@ from ..ffmpeg_utils import (
     probe_duration_ms,
     probe_video_dimensions,
 )
-from ..work_queue import Job, enqueue
+from ..work_queue import Job, enqueue, is_tmp_source
 
 router = APIRouter()
 log = logging.getLogger("hls.admin")
@@ -69,6 +69,7 @@ async def admin_drama_detail_page(
             "drama": full,
             "nav_active": "home",
             "ai_translate_enabled": settings.ai_translate_enabled,
+            "nas_import_enabled": settings.nas_import_enabled,
         },
     )
 
@@ -114,6 +115,7 @@ async def admin_episode_detail_page(
             "upload_history": upload_history,
             "nav_active": "home",
             "ai_translate_enabled": settings.ai_translate_enabled,
+            "nas_import_enabled": settings.nas_import_enabled,
         },
     )
 
@@ -248,57 +250,55 @@ async def admin_delete_drama(
     return JSONResponse({"ok": True, "warnings": warnings, "pending_sync": pending_sync})
 
 
-def _process_episode_upload(
+def _ingest_episode_from_file(
     drama_slug: str,
     ep_number: int,
-    video: UploadFile,
-) -> tuple[Path, int]:
-    """Shared upload pipeline used by both the batch route and the single
-    re-upload route. Streams the upload to UPLOAD_TMP_DIR, runs ffprobe
-    (duration + dimensions), extracts the cover, and persists the row via
-    `upsert_pending`. Returns `(tmp_path, upload_version)` — the caller
-    plumbs `upload_version` through to the queue job.
+    src_file: Path,
+    source_filename: str,
+) -> int:
+    """Core ingest from an on-disk source — a streamed-upload temp file OR a NAS
+    file read in place (nas-source-ingest). Runs ffprobe (duration + dimensions),
+    extracts the cover, mirrors it to OSS staging, and persists the row via
+    `upsert_pending(source_path=src_file)`. Returns `upload_version`.
+
+    Does NOT itself decide source lifetime: the worker keeps/deletes by location
+    (`is_tmp_source`), so a NAS file is never removed. On failure it unwinds only
+    a freshly-extracted cover and a TEMP `src_file` — a NAS source is left
+    untouched.
 
     Cover.jpg always lives in the v1 directory `ep-{n}/` regardless of the
     current upload_version: it's metadata, not encrypted content, so cached
-    clients won't be silently broken by an in-place overwrite. Segments and
-    keys get the version suffix; cover does not.
+    clients won't be silently broken by an in-place overwrite. Segments and keys
+    get the version suffix; cover does not.
 
-    Raises HTTPException on validation/IO failure (with the temp file already
-    cleaned up).
+    Raises HTTPException on validation/IO failure.
     """
     episode_id = f"{drama_slug}-ep-{ep_number}"
-    # Cover.jpg lives in the v1 directory regardless of upload_version (see
-    # docstring). Encrypted segments / m3u8 / key go under the versioned dir,
-    # which the worker computes from `upload_version` returned below.
     ep_dir_name = f"ep-{ep_number}"
     episode_dir = settings.out_dir / drama_slug / ep_dir_name
 
-    tmp_path = settings.upload_tmp_dir / f"upload-{uuid.uuid4().hex}.mp4"
-    try:
-        with tmp_path.open("wb") as out_f:
-            shutil.copyfileobj(video.file, out_f, length=1024 * 1024)
-    except OSError as e:
-        tmp_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=500, detail=f"failed to persist upload: {e}")
+    def _drop_temp_src() -> None:
+        # Never delete a NAS (or other non-temp) source on failure.
+        if is_tmp_source(src_file):
+            src_file.unlink(missing_ok=True)
 
     try:
-        duration_ms = probe_duration_ms(tmp_path)
-        width, height = probe_video_dimensions(tmp_path)
+        duration_ms = probe_duration_ms(src_file)
+        width, height = probe_video_dimensions(src_file)
     except FfmpegError as e:
-        tmp_path.unlink(missing_ok=True)
+        _drop_temp_src()
         raise HTTPException(status_code=400, detail=f"ffprobe failed: {e}")
 
     cover_path = episode_dir / "cover.jpg"
     try:
-        extract_first_frame(tmp_path, cover_path)
+        extract_first_frame(src_file, cover_path)
     except FfmpegError as e:
-        tmp_path.unlink(missing_ok=True)
+        _drop_temp_src()
         raise HTTPException(status_code=400, detail=f"cover extraction failed: {e}")
 
     # Mirror cover to OSS staging (assets-to-oss). Failure unwinds the just-
-    # extracted cover and the temp upload before raising 500 so we don't
-    # leave a half-published asset.
+    # extracted cover and a temp source before raising 500 so we don't leave a
+    # half-published asset.
     if settings.storage_enabled:
         from .. import publish
         try:
@@ -306,7 +306,7 @@ def _process_episode_upload(
         except publish.PublishError as e:
             log.error("OSS staging upload failed for cover %s/%s: %s", drama_slug, ep_dir_name, e)
             cover_path.unlink(missing_ok=True)
-            tmp_path.unlink(missing_ok=True)
+            _drop_temp_src()
             raise HTTPException(
                 status_code=500,
                 detail=f"failed to mirror cover to OSS staging: {e}",
@@ -314,7 +314,7 @@ def _process_episode_upload(
         except Exception as e:  # noqa: BLE001
             log.exception("OSS unexpected error for cover %s/%s", drama_slug, ep_dir_name)
             cover_path.unlink(missing_ok=True)
-            tmp_path.unlink(missing_ok=True)
+            _drop_temp_src()
             raise HTTPException(
                 status_code=500,
                 detail=f"unexpected OSS error mirroring cover: {e}",
@@ -328,19 +328,42 @@ def _process_episode_upload(
         episode_id=episode_id,
         duration_ms=duration_ms,
         cover_url=cover_url,
-        source_filename=video.filename or "",
+        source_filename=source_filename,
         width=width,
         height=height,
-        source_path=str(tmp_path),
+        source_path=str(src_file),
     )
-    # Re-upload over a previously-failed episode leaves the prior tmp file
-    # orphaned in UPLOAD_TMP_DIR (we keep failed-episode sources around to
-    # power the "重试" button). Sweep it now.
-    if old_source:
+    # Re-ingest over a previously-failed episode leaves the prior TEMP source
+    # orphaned in UPLOAD_TMP_DIR (we keep failed-episode sources around to power
+    # the "重试" button). Sweep it now — but only if it was a temp file; a prior
+    # NAS source must never be deleted.
+    if old_source and is_tmp_source(old_source):
         try:
             Path(old_source).unlink(missing_ok=True)
         except OSError as e:
             log.warning("failed to remove orphaned source %s: %s", old_source, e)
+    return upload_version
+
+
+def _process_episode_upload(
+    drama_slug: str,
+    ep_number: int,
+    video: UploadFile,
+) -> tuple[Path, int]:
+    """Streamed-upload variant used by the batch + single re-upload routes:
+    persist the upload to UPLOAD_TMP_DIR, then delegate to
+    `_ingest_episode_from_file`. Returns `(tmp_path, upload_version)`.
+    """
+    tmp_path = settings.upload_tmp_dir / f"upload-{uuid.uuid4().hex}.mp4"
+    try:
+        with tmp_path.open("wb") as out_f:
+            shutil.copyfileobj(video.file, out_f, length=1024 * 1024)
+    except OSError as e:
+        tmp_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"failed to persist upload: {e}")
+    upload_version = _ingest_episode_from_file(
+        drama_slug, ep_number, tmp_path, video.filename or "",
+    )
     return tmp_path, upload_version
 
 
@@ -586,6 +609,157 @@ async def admin_batch_upload_episodes(
     })
 
 
+# ---------------------------------------------------------------------------
+# nas-source-ingest: encode 片源 straight from the shared NAS mount, no re-upload.
+# The pipeline reads the file IN PLACE; the worker keeps it (only UPLOAD_TMP_DIR
+# files are deleted post-encode). Literal routes are declared BEFORE
+# `episodes/{ep}` so their segments aren't captured by the numeric `{ep}` pattern
+# (same convention as the `batch` route).
+# ---------------------------------------------------------------------------
+
+
+def _require_nas() -> None:
+    if not nas.is_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="NAS 源导入未启用或源目录不可访问（检查 SOURCE_NAS_DIR / 挂载）",
+        )
+
+
+@router.get("/admin/nas/browse")
+async def admin_nas_browse(path: str = Query("")) -> JSONResponse:
+    """List one directory under SOURCE_NAS_DIR for the in-page browser. `path`
+    is relative to the NAS root (''=root). 503 if disabled; 400 on bad path."""
+    _require_nas()
+    try:
+        return JSONResponse(nas.list_dir(path))
+    except nas.NasPathError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/admin/dramas/{drama_slug}/episodes/nas")
+async def admin_nas_next_episode(
+    request: Request,
+    drama_slug: str = PathParam(..., pattern=r"^[a-z0-9][a-z0-9-]*$"),
+    payload: dict = Body(...),
+) -> JSONResponse:
+    """Ingest a single NAS file as the next auto-incremented episode, read in
+    place (no upload). Body `{path}` is relative to SOURCE_NAS_DIR. Mirrors the
+    auto-increment + collision-retry of the upload route."""
+    _require_nas()
+    if db.get_drama(drama_slug) is None:
+        raise HTTPException(status_code=404, detail=f"drama '{drama_slug}' not found")
+    rel = (payload.get("path") or "").strip() if isinstance(payload, dict) else ""
+    try:
+        src = nas.resolve(rel, must_be="file")
+    except nas.NasPathError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    last_err: Exception | None = None
+    for _ in range(3):
+        next_ep = _next_ep_number(drama_slug)
+        episode_id = f"{drama_slug}-ep-{next_ep}"
+        try:
+            upload_version = _ingest_episode_from_file(drama_slug, next_ep, src, src.name)
+        except sqlite3.IntegrityError as e:
+            last_err = e
+            continue  # retry with a freshly-computed next_ep
+        db.record_episode_upload(
+            episode_id=episode_id, version=upload_version,
+            source_filename=src.name, uploaded_by=request.session.get("username"),
+        )
+        await enqueue(Job(
+            episode_id=episode_id, drama_slug=drama_slug, ep_number=next_ep,
+            tmp_path=src, upload_version=upload_version,
+        ))
+        log.info("enqueued NAS next-ep slug=%s ep=%s v=%d src=%s",
+                 drama_slug, episode_id, upload_version, rel)
+        return JSONResponse({"ok": True, "ep_number": next_ep, "source_filename": src.name})
+
+    raise HTTPException(
+        status_code=503,
+        detail=f"concurrent ep-number collision after 3 attempts; last error: {last_err}",
+    )
+
+
+@router.post("/admin/dramas/{drama_slug}/episodes/batch-nas")
+async def admin_nas_batch_import(
+    request: Request,
+    drama_slug: str = PathParam(..., pattern=r"^[a-z0-9][a-z0-9-]*$"),
+    payload: dict = Body(...),
+) -> JSONResponse:
+    """Batch-ingest a NAS folder: scan its `EP<n>.<ext>` files and ingest each in
+    place (no upload). Body `{dir}` is relative to SOURCE_NAS_DIR. Existing
+    episodes are overwritten (re-upload semantics); encoding episodes skipped.
+    Returns a per-file result list — partial failure is normal."""
+    _require_nas()
+    if db.get_drama(drama_slug) is None:
+        raise HTTPException(status_code=404, detail=f"drama '{drama_slug}' not found")
+    rel = (payload.get("dir") or "").strip() if isinstance(payload, dict) else ""
+    try:
+        nas.resolve(rel, must_be="dir")
+        listing = nas.list_dir(rel)
+    except nas.NasPathError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    results: list[dict] = []
+    seen_eps: dict[int, str] = {}  # ep_number -> filename, dedupe within the folder
+    for f in listing["files"]:
+        filename = f["name"]
+        m = _EP_PREFIX_RE.match(filename.strip())
+        if not m:
+            results.append({"filename": filename, "ep_number": None, "ok": False,
+                            "detail": "文件名未以 EP<数字> 开头"})
+            continue
+        ep_number = int(m.group(1))
+        if ep_number < 1:
+            results.append({"filename": filename, "ep_number": ep_number, "ok": False,
+                            "detail": "集号必须 >= 1"})
+            continue
+        if ep_number in seen_eps:
+            results.append({"filename": filename, "ep_number": ep_number, "ok": False,
+                            "detail": f"集号与本批次文件 '{seen_eps[ep_number]}' 重复"})
+            continue
+        seen_eps[ep_number] = filename
+
+        row = db.get_by_slug_ep(drama_slug, ep_number)
+        if row is not None and row["status"] == "encoding":
+            results.append({"filename": filename, "ep_number": ep_number, "ok": False,
+                            "detail": "该集正在编码中，跳过"})
+            continue
+
+        try:
+            src = nas.resolve(f["rel"], must_be="file")
+            upload_version = _ingest_episode_from_file(drama_slug, ep_number, src, filename)
+        except nas.NasPathError as e:
+            results.append({"filename": filename, "ep_number": ep_number, "ok": False, "detail": str(e)})
+            continue
+        except HTTPException as e:
+            results.append({"filename": filename, "ep_number": ep_number, "ok": False, "detail": str(e.detail)})
+            continue
+
+        episode_id = f"{drama_slug}-ep-{ep_number}"
+        db.record_episode_upload(
+            episode_id=episode_id, version=upload_version,
+            source_filename=filename, uploaded_by=request.session.get("username"),
+        )
+        await enqueue(Job(
+            episode_id=episode_id, drama_slug=drama_slug, ep_number=ep_number,
+            tmp_path=src, upload_version=upload_version,
+        ))
+        log.info("enqueued NAS batch slug=%s ep=%s v=%d file=%s",
+                 drama_slug, episode_id, upload_version, filename)
+        results.append({"filename": filename, "ep_number": ep_number, "ok": True, "detail": "已入队"})
+
+    ok_count = sum(1 for r in results if r["ok"])
+    return JSONResponse({
+        "ok_count": ok_count,
+        "error_count": len(results) - ok_count,
+        "results": results,
+        "dir": listing["path"],
+    })
+
+
 @router.post("/admin/dramas/{drama_slug}/episodes/{ep}")
 async def admin_reupload_episode(
     request: Request,
@@ -641,6 +815,46 @@ async def admin_reupload_episode(
         url=f"/admin/dramas/{drama_slug}/episodes/{ep_number}",
         status_code=302,
     )
+
+
+@router.post("/admin/dramas/{drama_slug}/episodes/{ep}/nas")
+async def admin_nas_reupload_episode(
+    request: Request,
+    drama_slug: str = PathParam(..., pattern=r"^[a-z0-9][a-z0-9-]*$"),
+    ep: str = PathParam(..., pattern=r"^[0-9]+$"),
+    payload: dict = Body(...),
+) -> JSONResponse:
+    """Re-encode an existing episode from a NAS file (new version, read in
+    place). Body `{path}` is relative to SOURCE_NAS_DIR. 404 if missing; 409 if
+    encoding."""
+    _require_nas()
+    ep_number = int(ep)
+    if ep_number < 1:
+        raise HTTPException(status_code=422, detail="ep must be >= 1")
+    row = db.get_by_slug_ep(drama_slug, ep_number)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"episode '{drama_slug}/{ep_number}' not found")
+    if row["status"] == "encoding":
+        raise HTTPException(status_code=409, detail="该集正在编码中，等编码结束再换源")
+    rel = (payload.get("path") or "").strip() if isinstance(payload, dict) else ""
+    try:
+        src = nas.resolve(rel, must_be="file")
+    except nas.NasPathError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    upload_version = _ingest_episode_from_file(drama_slug, ep_number, src, src.name)
+    episode_id = f"{drama_slug}-ep-{ep_number}"
+    db.record_episode_upload(
+        episode_id=episode_id, version=upload_version,
+        source_filename=src.name, uploaded_by=request.session.get("username"),
+    )
+    await enqueue(Job(
+        episode_id=episode_id, drama_slug=drama_slug, ep_number=ep_number,
+        tmp_path=src, upload_version=upload_version,
+    ))
+    log.info("enqueued NAS re-import slug=%s ep=%s v=%d src=%s",
+             drama_slug, episode_id, upload_version, rel)
+    return JSONResponse({"ok": True, "ep_number": ep_number, "upload_version": upload_version})
 
 
 @router.post("/admin/dramas/{drama_slug}/episodes/{ep}/retry")

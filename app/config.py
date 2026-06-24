@@ -69,11 +69,25 @@ class Settings:
     # background worker pool. Kept small by default to bound kie.ai rate/cost;
     # raise only if the provider quota comfortably allows it. Integer >= 1.
     ai_translate_concurrency: int
+    # nas-source-ingest: optional shared NAS root the deploy box can read
+    # directly (e.g. `/Volumes/酷讯短剧组`). When set & reachable, operators can
+    # ingest 片源 straight from NAS without re-uploading through the browser —
+    # the pipeline reads the file IN PLACE and the worker keeps it (only files
+    # under UPLOAD_TMP_DIR are deleted post-encode). All operator-supplied paths
+    # are confined to this root (traversal / symlink escapes rejected).
+    source_nas_dir: Path | None
 
     @property
     def ai_translate_enabled(self) -> bool:
         """True iff AI short-text translation is configured (API key present)."""
         return bool(self.ai_translate_api_key)
+
+    @property
+    def nas_import_enabled(self) -> bool:
+        """True iff a NAS source root is configured AND currently a reachable
+        directory (a transient unmount disables the feature rather than erroring
+        deep in a request). Checked at render time to gate the import UI."""
+        return self.source_nas_dir is not None and self.source_nas_dir.is_dir()
 
 
 def _parse_bool_env(name: str) -> bool:
@@ -206,10 +220,16 @@ def load_settings() -> Settings:
             f"AI_TRANSLATE_CONCURRENCY must be >= 1, got {ai_concurrency}"
         )
 
+    # nas-source-ingest: default to the company NAS mount; set SOURCE_NAS_DIR=
+    # (empty) to disable. Not mkdir'd — it's an external mount we only read.
+    nas_raw = os.environ.get("SOURCE_NAS_DIR", "/Volumes/酷讯短剧组").strip()
+    source_nas_dir = Path(nas_raw).resolve() if nas_raw else None
+
     return Settings(
         out_dir=out_dir,
         db_path=db_path,
         upload_tmp_dir=tmp_dir,
+        source_nas_dir=source_nas_dir,
         pipeline_script=(repo_root / "pipeline.sh").resolve(),
         storage_enabled=storage_enabled,
         storage_provider=storage_provider,

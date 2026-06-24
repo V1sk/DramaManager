@@ -57,6 +57,20 @@ def _get_episode_lock(episode_id: str) -> asyncio.Lock:
     return lock
 
 
+def is_tmp_source(path) -> bool:
+    """True iff `path` lives under `UPLOAD_TMP_DIR` — i.e. a streamed-upload temp
+    file this service owns and should delete once the encode succeeds. A NAS (or
+    any other) source returns False and is KEPT: it's operator-owned
+    source-of-truth read in place (nas-source-ingest), not our scratch copy.
+    The whole keep/delete policy keys off location, so retries and re-uploads
+    inherit it without threading a flag through every call site."""
+    try:
+        Path(path).resolve().relative_to(settings.upload_tmp_dir)
+        return True
+    except (ValueError, OSError):
+        return False
+
+
 def _cleanup_tmp(tmp_path: Path) -> None:
     try:
         tmp_path.unlink(missing_ok=True)
@@ -265,8 +279,12 @@ async def worker_loop(worker_id: int = 0) -> None:
             # source on disk + `source_path` column so the admin UI's "重试"
             # button can re-enqueue without a re-upload. The DB column is
             # cleared in the same step so a stale path can't survive cleanup.
+            # NAS sources (read in place, NOT under UPLOAD_TMP_DIR) are never
+            # deleted — they're operator-owned source-of-truth; only the column
+            # is cleared so the row looks identical to a finished upload.
             if success:
-                _cleanup_tmp(job.tmp_path)
+                if is_tmp_source(job.tmp_path):
+                    _cleanup_tmp(job.tmp_path)
                 try:
                     db.clear_episode_source_path(job.episode_id)
                 except Exception:  # noqa: BLE001

@@ -12,6 +12,12 @@ services:
       # env (set in the Dockerfile) points OUT_DIR / DB_PATH / UPLOAD_TMP_DIR
       # at /data/... — first `docker compose up` creates the dirs on demand.
       - ./data:/data
+      # nas-source-ingest: bind-mount the shared NAS at the SAME path the app
+      # reads (SOURCE_NAS_DIR, default /Volumes/酷讯短剧组) so operators can
+      # encode 片源 straight off the NAS without re-uploading. `:ro` — read only.
+      # Uncomment + adjust the host path for your mount; set SOURCE_NAS_DIR=
+      # (empty) in .env to disable the feature entirely.
+      # - /Volumes/酷讯短剧组:/Volumes/酷讯短剧组:ro
       # OSS / TOS credentials are baked into the image at build time
       # (app/storage/credentials.py is NOT in .dockerignore). Internal-only
       # deployment; after rotating keys run `docker compose up -d --build`.

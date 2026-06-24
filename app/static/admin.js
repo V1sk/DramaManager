@@ -197,4 +197,89 @@
         setTimeout(tick, intervalMs);
         return function () { stopped = true; };
     };
+
+    // nas-source-ingest: open the shared NAS browser modal and resolve with the
+    // operator's pick. opts.select = 'file' (click a file to pick) | 'dir' (drill
+    // in, then "选择当前文件夹"). Resolves {type, rel, name} or null if cancelled.
+    function fmtSize(n) {
+        if (n == null) return '';
+        const u = ['B', 'KB', 'MB', 'GB', 'TB']; let v = n, i = 0;
+        while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+        return v.toFixed(i ? 1 : 0) + u[i];
+    }
+    const NAS_ROW = 'w-full flex items-center gap-2 px-3 py-2 rounded hover:bg-surface-container-highest text-body-md text-left';
+    window.openNasBrowser = function (opts) {
+        opts = opts || {};
+        const select = opts.select || 'file';
+        const modal = document.getElementById('nas-modal');
+        if (!modal) return Promise.resolve(null);
+        const titleEl = document.getElementById('nas-modal-title');
+        const crumbEl = document.getElementById('nas-breadcrumb');
+        const listEl = document.getElementById('nas-list');
+        const hintEl = document.getElementById('nas-hint');
+        const pickDirBtn = document.getElementById('nas-pick-dir');
+        titleEl.textContent = opts.title || (select === 'dir' ? '选择 NAS 文件夹' : '选择 NAS 文件');
+        hintEl.textContent = select === 'dir' ? '进入目标文件夹后点「选择当前文件夹」' : '点击文件即选中';
+        pickDirBtn.classList.toggle('hidden', select !== 'dir');
+
+        let curPath = opts.startPath || '';
+        let resolveFn;
+        const done = new Promise((res) => { resolveFn = res; });
+        // Lock background page scroll while the modal is open — the wheel should
+        // only move the #nas-list (which has its own overflow-auto), not the page
+        // behind the overlay. Lock both <html> and <body> since which one is the
+        // viewport scroll container varies by browser; restore both on close.
+        const prevHtmlOverflow = document.documentElement.style.overflow;
+        const prevBodyOverflow = document.body.style.overflow;
+        document.documentElement.style.overflow = 'hidden';
+        document.body.style.overflow = 'hidden';
+
+        function close(result) {
+            modal.classList.add('hidden');
+            document.documentElement.style.overflow = prevHtmlOverflow;
+            document.body.style.overflow = prevBodyOverflow;
+            document.removeEventListener('keydown', onKey);
+            listEl.onclick = null; pickDirBtn.onclick = null;
+            resolveFn(result || null);
+        }
+        function onKey(e) { if (e.key === 'Escape') close(null); }
+
+        async function load(path) {
+            listEl.innerHTML = '<div class="meta p-4">加载中…</div>';
+            let data;
+            try {
+                const r = await fetch('/admin/nas/browse?path=' + encodeURIComponent(path), { cache: 'no-store' });
+                if (r.status === 503) { listEl.innerHTML = '<div class="meta p-4">NAS 源导入未启用或不可访问。</div>'; return; }
+                if (!r.ok) { listEl.innerHTML = `<div class="meta p-4">读取失败 (${r.status})：${escapeHtml(await r.text())}</div>`; return; }
+                data = await r.json();
+            } catch (e) { listEl.innerHTML = `<div class="meta p-4">读取出错：${escapeHtml(String(e))}</div>`; return; }
+            curPath = data.path || '';
+            crumbEl.textContent = '/' + curPath;
+            let rows = '';
+            if (data.parent != null) {
+                rows += `<button class="${NAS_ROW}" data-nav="${escapeHtml(data.parent)}"><span class="material-symbols-outlined text-[18px]">drive_folder_upload</span><span>..（上一级）</span></button>`;
+            }
+            for (const d of data.dirs) {
+                rows += `<button class="${NAS_ROW}" data-nav="${escapeHtml(d.rel)}"><span class="material-symbols-outlined text-[18px] text-tertiary">folder</span><span class="break-all">${escapeHtml(d.name)}</span></button>`;
+            }
+            for (const f of data.files) {
+                rows += `<button class="${NAS_ROW}" data-pick-file="${escapeHtml(f.rel)}" data-name="${escapeHtml(f.name)}"><span class="material-symbols-outlined text-[18px] text-status-info">movie</span><span class="break-all flex-1">${escapeHtml(f.name)}</span><span class="meta">${fmtSize(f.size)}</span></button>`;
+            }
+            if (!data.dirs.length && !data.files.length) rows += '<div class="meta p-4">（空文件夹 / 无视频文件）</div>';
+            listEl.innerHTML = rows;
+        }
+
+        listEl.onclick = (ev) => {
+            const nav = ev.target.closest('[data-nav]');
+            if (nav) { load(nav.dataset.nav); return; }
+            const pf = ev.target.closest('[data-pick-file]');
+            if (pf && select === 'file') close({ type: 'file', rel: pf.dataset.pickFile, name: pf.dataset.name });
+        };
+        pickDirBtn.onclick = () => close({ type: 'dir', rel: curPath, name: curPath || '(根目录)' });
+        modal.querySelectorAll('[data-nas-close]').forEach((el) => { el.onclick = () => close(null); });
+        document.addEventListener('keydown', onKey);
+        modal.classList.remove('hidden');
+        load(curPath);
+        return done;
+    };
 })();
