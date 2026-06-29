@@ -1374,8 +1374,10 @@ def _apply_default_ladder(row: dict) -> dict:
     ep_number = row.get("ep_number")
     if slug is None or ep_number is None:
         return row
+    upload_version = int(row.get("upload_version") or 1)
+    ep_dir = episode_ep_dir(int(ep_number), upload_version)
     ladder = settings.default_ladder
-    row["play_url"] = f"/videos/{slug}/ep-{ep_number}/{ladder}/media-{ladder}.m3u8"
+    row["play_url"] = f"/videos/{slug}/{ep_dir}/{ladder}/media-{ladder}.m3u8"
     return row
 
 

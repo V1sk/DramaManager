@@ -188,8 +188,58 @@ def case_next_ep_excludes_pending_delete():
         print("OK _next_ep_number: live→2, pending_delete→1, upsert resurrects (v2, dirty)")
 
 
+def case_default_ladder_keeps_reupload_version():
+    with tempfile.TemporaryDirectory() as td:
+        _setup_env(Path(td))
+        os.environ["DEFAULT_LADDER"] = "720p"
+        _reset_app_modules()
+        from app import db
+
+        db.init_db()
+        db.create_language(code="zh-rCN", display_label="简体中文")
+        db.create_drama(slug="ly", name="测试剧", default_lang="zh-rCN")
+
+        db.upsert_pending(
+            drama_slug="ly", ep_number=1, episode_id="ly-ep-1",
+            duration_ms=1000, cover_url="/videos/ly/ep-1/cover.jpg",
+            source_filename="v1.mp4",
+        )
+        db.set_status(
+            "ly-ep-1", "ready",
+            play_url="/videos/ly/ep-1/720p/media-720p.m3u8",
+            key_uri="/drm/ly/ep-1/key",
+            key_b64="AAECAwQFBgcICQoLDA0ODw==",
+            iv_hex="abcdef0123456789abcdef0123456789",
+        )
+        db.set_episode_sync_status("ly", 1, "clean")
+
+        _, version = db.upsert_pending(
+            drama_slug="ly", ep_number=1, episode_id="ly-ep-1",
+            duration_ms=2000, cover_url="/videos/ly/ep-1/cover.jpg",
+            source_filename="v2.mp4",
+        )
+        assert version == 2
+        db.set_status(
+            "ly-ep-1", "ready",
+            play_url="/videos/ly/ep-1-v2/720p/media-720p.m3u8",
+            key_uri="/drm/ly/ep-1-v2/key",
+            key_b64="AAECAwQFBgcICQoLDA0ODw==",
+            iv_hex="abcdef0123456789abcdef0123456789",
+        )
+
+        row = db.get_by_slug_ep("ly", 1)
+        assert row["upload_version"] == 2
+        assert row["play_url"] == "/videos/ly/ep-1-v2/720p/media-720p.m3u8"
+        print("OK default ladder rewrite keeps reupload version in play_url")
+
+
+def test_default_ladder_keeps_reupload_version():
+    case_default_ladder_keeps_reupload_version()
+
+
 if __name__ == "__main__":
     case_encode_artifacts_complete()
     case_publish_ladder_skip_existing()
     case_next_ep_excludes_pending_delete()
+    case_default_ladder_keeps_reupload_version()
     print("\nall cases passed")
