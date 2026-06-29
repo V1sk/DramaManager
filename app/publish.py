@@ -1,5 +1,8 @@
-"""Provider-agnostic 发布层：把本地资产（视频切片、海报、封面、字幕）传到 staging 前缀，
-并在 sync 时通过 server-side copy 拷到 prod 前缀。
+"""Provider-agnostic 发布层：把本地资产（视频切片、海报、封面、字幕）直接传到 prod 前缀。
+
+历史上资产先传 staging，再在 sync 时 server-side copy 到 prod；TOS copy
+耗时过长后改为直传 prod。为兼容已经落在 staging 的旧 dirty 数据，
+`publish_*_to_prod` 会先检查 prod 对象，缺失时才尝试从 staging fallback copy。
 
 底层桶由 `app/storage/` 抽象，可在 OSS / TOS 之间切换（`STORAGE_PROVIDER` env）；
 这层只调用 `storage.provider.{upload_file, copy_object, list_with_prefix, batch_delete}`
@@ -55,10 +58,15 @@ def _legacy_ep_dir(ep_dir: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _key_exists(key: str) -> bool:
+    prov = _provider()
+    return key in prov.list_with_prefix(key)
+
+
 def _first_existing_key(candidates: list[str]) -> str | None:
     prov = _provider()
     for key in candidates:
-        if prov.list_with_prefix(key):
+        if key in prov.list_with_prefix(key):
             return key
     return None
 
@@ -120,7 +128,7 @@ def publish_ladder(
     任一上传失败 → raise PublishError，由 worker 把 episode 置为 failed。
     本地产物**保留不删**，便于排错和 follow-up "republish" 操作。
 
-    `skip_existing`：为 True 时先 `list_with_prefix` 列出该档 staging 前缀下已有
+    `skip_existing`：为 True 时先 `list_with_prefix` 列出该档 prod 前缀下已有
     对象，对 key 已存在的文件**跳过上传**，只补传缺失的。对象存储的单次 PUT 是
     原子的（失败的 PUT 不会在桶里留半个对象），所以"桶里存在该 key"== 上一次已
     完整传成，跳过它是安全的。worker 在**重试**（复用已编码产物、DRM key 未变 →
@@ -130,8 +138,8 @@ def publish_ladder(
     **不改写本地 m3u8** —— 本地 m3u8 保持 encode-clear.sh 产出的相对路径
     (`init-720p.mp4` / `seg-720p-0.m4s`)，让 HLS 自家预览页直接走 `/videos/`
     挂载读本地文件，零 CORS、零 TOS 公网出站。
-    给业务服务器的 prod m3u8 由 `publish_ladder_to_prod` 在 sync 时基于
-    相对路径动态拼出 path-only 形态。
+    给业务服务器的 prod m3u8 由 `publish_ladder_to_prod` 在 sync 时基于相对路径
+    动态拼出 path-only 形态；新数据不再发生 staging→prod copy。
     """
     prov = _provider()
     rung_dir: Path = settings.out_dir / slug / ep_dir / ladder
@@ -147,7 +155,7 @@ def publish_ladder(
     if not seg_locals:
         raise PublishError(f"no segments matched seg-{ladder}-*.m4s in {rung_dir}")
 
-    remote_dir = f"{prov.staging_prefix}/{slug}/{ep_dir}/{ladder}"  # Drama/staging/...
+    remote_dir = f"{prov.prod_prefix}/{slug}/{ep_dir}/{ladder}"  # Drama/prod/...
     already: set[str] = set()
     if skip_existing:
         try:
@@ -178,7 +186,7 @@ def publish_ladder(
 
 
 def publish_ladder_to_prod(slug: str, ep_dir: str, ladder: str) -> str:
-    """把一档 ladder 的 staging bucket 对象服务端拷到 prod 前缀，并返回 prod-flavored m3u8 文本（path-only）。
+    """确保一档 ladder 的 prod bucket 对象存在，并返回 prod-flavored m3u8 文本（path-only）。
 
     入参语义：
       `slug` — drama 目录名；`ep_dir` 形如 `ep-3`；`ladder` 是 `540p`/`720p`/`1080p`。
@@ -190,32 +198,41 @@ def publish_ladder_to_prod(slug: str, ep_dir: str, ladder: str) -> str:
     本地 m3u8 是相对路径形态（HLS 自家预览用），`rewrite_playlist` 给每个相对
     `init-{ladder}.mp4` / `seg-{ladder}-N.m4s` 前缀拼 prod 路径，输出 path-only m3u8。
 
-    幂等：重复调用会覆盖 prod 端对象、返回逐字节相等的 m3u8 文本。
-    若 staging 端没有任何对象 → raise PublishError（说明 publish_ladder 还没跑过）。
+    新数据在编码 worker 阶段已直传 prod，这里只校验对象存在。为兼容旧 dirty
+    数据，prod 缺对象时会尝试从 staging 同 key copy 一次。
     """
     prov = _provider()
     src_dir = f"{prov.staging_prefix}/{slug}/{ep_dir}/{ladder}"
     dst_dir = f"{prov.prod_prefix}/{slug}/{ep_dir}/{ladder}"
 
-    src_keys = prov.list_with_prefix(src_dir + "/")
-    if not src_keys:
-        raise PublishError(
-            f"no staging objects under {src_dir}/; was publish_ladder ever called?"
-        )
-    for src_key in src_keys:
-        if not src_key.endswith((".mp4", ".m4s")):
-            continue  # 防御：只拷媒体对象，忽略 m3u8 / 其他
-        filename = src_key.rsplit("/", 1)[-1]
-        try:
-            prov.copy_object(src_key, f"{dst_dir}/{filename}")
-        except Exception as e:  # noqa: BLE001
-            raise PublishError(
-                f"storage copy_object failed for {ladder} {filename}: {e}"
-            ) from e
-
     local_m3u8 = settings.out_dir / slug / ep_dir / ladder / f"media-{ladder}.m3u8"
     if not local_m3u8.is_file():
         raise PublishError(f"missing local playlist: {local_m3u8}")
+
+    rung_dir = settings.out_dir / slug / ep_dir / ladder
+    init_name = f"init-{ladder}.mp4"
+    seg_names = sorted(p.name for p in rung_dir.glob(f"seg-{ladder}-*.m4s"))
+    expected_names = [init_name, *seg_names]
+    if not seg_names:
+        raise PublishError(f"no local segments matched seg-{ladder}-*.m4s in {rung_dir}")
+
+    prod_keys = set(prov.list_with_prefix(dst_dir + "/"))
+    for filename in expected_names:
+        dst_key = f"{dst_dir}/{filename}"
+        if dst_key in prod_keys:
+            continue
+        src_key = f"{src_dir}/{filename}"
+        if not _key_exists(src_key):
+            raise PublishError(
+                f"missing prod object at {dst_key}; no staging fallback at {src_key}"
+            )
+        try:
+            prov.copy_object(src_key, dst_key)
+        except Exception as e:  # noqa: BLE001
+            raise PublishError(
+                f"storage fallback copy failed for {ladder} {filename}: {e}"
+            ) from e
+
     try:
         text = local_m3u8.read_text()
     except OSError as e:
@@ -294,16 +311,15 @@ def upload_poster_to_staging(
     local_path: Path,
     remote_filename: str | None = None,
 ) -> str:
-    """上传 poster 到 `Drama/staging/{slug}/poster/{filename}`。
+    """上传 poster 到 `Drama/prod/{slug}/poster/{filename}`。
 
     默认 filename 为 `{lang}.{ext}`；重传版本化时调用方可传
     `{lang}-vN.{ext}`，避免覆盖已同步到 prod 的旧海报。
-    返回 staging 公网 URL。上传失败 → PublishError。
+    返回 prod 公网 URL。上传失败 → PublishError。
 
     调用方负责：
       - 在调本函数前已经写好 `local_path`。
-      - 在调本函数前清理过同 (slug, lang) 旧扩展名的 staging 对象（用 `unpublish_poster_from_staging`），
-        否则同一语言可能在 staging 残留两个扩展名的对象。
+      - 函数名保留 `_to_staging` 是历史兼容；实际写入 prod。
     """
     _ensure_storage_enabled("upload_poster_to_staging")
     prov = _provider()
@@ -311,33 +327,33 @@ def upload_poster_to_staging(
     if not ext:
         raise PublishError(f"poster local_path has no extension: {local_path}")
     filename = remote_filename or f"{lang}.{ext}"
-    remote_key = f"{prov.staging_prefix}/{slug}/poster/{filename}"
+    remote_key = f"{prov.prod_prefix}/{slug}/poster/{filename}"
     _put_object(remote_key, local_path, f"poster {slug}/{filename}")
-    return f"{prov.staging_base_url}/{slug}/poster/{filename}"
+    return f"{prov.prod_base_url}/{slug}/poster/{filename}"
 
 
 def upload_cover_to_staging(slug: str, ep_dir: str, local_path: Path) -> str:
-    """上传 cover 到 `Drama/staging/{slug}/{ep_dir}/cover.jpg`。固定文件名。"""
+    """上传 cover 到 `Drama/prod/{slug}/{ep_dir}/cover.jpg`。固定文件名。"""
     _ensure_storage_enabled("upload_cover_to_staging")
     prov = _provider()
-    remote_key = f"{prov.staging_prefix}/{slug}/{ep_dir}/cover.jpg"
+    remote_key = f"{prov.prod_prefix}/{slug}/{ep_dir}/cover.jpg"
     _put_object(remote_key, local_path, f"cover {slug}/{ep_dir}")
-    return f"{prov.staging_base_url}/{slug}/{ep_dir}/cover.jpg"
+    return f"{prov.prod_base_url}/{slug}/{ep_dir}/cover.jpg"
 
 
 def upload_subtitle_to_staging(
     slug: str, ep_dir: str, lang: str, local_path: Path
 ) -> str:
-    """上传 vtt 到 `Drama/staging/{slug}/{ep_dir}/subtitles/{lang}.vtt`。"""
+    """上传 vtt 到 `Drama/prod/{slug}/{ep_dir}/subtitles/{lang}.vtt`。"""
     _ensure_storage_enabled("upload_subtitle_to_staging")
     prov = _provider()
-    remote_key = f"{prov.staging_prefix}/{slug}/{ep_dir}/subtitles/{lang}.vtt"
+    remote_key = f"{prov.prod_prefix}/{slug}/{ep_dir}/subtitles/{lang}.vtt"
     _put_object(remote_key, local_path, f"subtitle {slug}/{ep_dir}/{lang}")
-    return f"{prov.staging_base_url}/{slug}/{ep_dir}/subtitles/{lang}.vtt"
+    return f"{prov.prod_base_url}/{slug}/{ep_dir}/subtitles/{lang}.vtt"
 
 
 # ---------------------------------------------------------------------------
-# Per-asset prod publish helpers (server-side copy staging → prod)
+# Per-asset prod publish helpers
 # ---------------------------------------------------------------------------
 
 
@@ -350,7 +366,7 @@ def _copy_one(src_key: str, dst_key: str, label: str) -> None:
 
 
 def publish_poster_to_prod(slug: str, lang: str, ext_or_filename: str) -> str:
-    """staging→prod 服务端拷贝 poster。返回 prod **对象 key**（不含 host）。
+    """返回 prod poster 对象 key；prod 缺失时从旧 staging 对象 fallback copy。
 
     `ext_or_filename` 可为旧调用形态的扩展名 (`jpg`) 或版本化完整文件名
     (`zh-rCN-v2.jpg`)。
@@ -360,47 +376,49 @@ def publish_poster_to_prod(slug: str, lang: str, ext_or_filename: str) -> str:
     filename = ext_or_filename if "." in ext_or_filename else f"{lang}.{ext_or_filename}"
     src_key = f"{prov.staging_prefix}/{slug}/poster/{filename}"
     dst_key = f"{prov.prod_prefix}/{slug}/poster/{filename}"
-    # Pre-flight check: staging object must exist
-    if not prov.list_with_prefix(src_key):
+    if _key_exists(dst_key):
+        return dst_key
+    if not _key_exists(src_key):
         raise PublishError(
-            f"no staging object at {src_key}; "
-            f"upload_poster_to_staging must run first"
+            f"no prod object at {dst_key}; no staging fallback at {src_key}"
         )
     _copy_one(src_key, dst_key, f"poster {slug}/{filename}")
     return dst_key
 
 
 def publish_cover_to_prod(slug: str, ep_dir: str) -> str:
-    """staging→prod 服务端拷贝 cover.jpg。返回 prod **对象 key**。"""
+    """返回 prod cover object key；prod 缺失时从旧 staging 对象 fallback copy。"""
     prov = _provider()
     src_candidates = [f"{prov.staging_prefix}/{slug}/{ep_dir}/cover.jpg"]
     legacy = _legacy_ep_dir(ep_dir)
     if legacy:
         src_candidates.append(f"{prov.staging_prefix}/{slug}/{legacy}/cover.jpg")
-    src_key = _first_existing_key(src_candidates)
     dst_key = f"{prov.prod_prefix}/{slug}/{ep_dir}/cover.jpg"
+    if _key_exists(dst_key):
+        return dst_key
+    src_key = _first_existing_key(src_candidates)
     if not src_key:
         raise PublishError(
-            f"no staging object at {src_candidates[0]}; "
-            f"upload_cover_to_staging must run first"
+            f"no prod object at {dst_key}; no staging fallback at {src_candidates[0]}"
         )
     _copy_one(src_key, dst_key, f"cover {slug}/{ep_dir}")
     return dst_key
 
 
 def publish_subtitle_to_prod(slug: str, ep_dir: str, lang: str) -> str:
-    """staging→prod 服务端拷贝 subtitle vtt。返回 prod **对象 key**。"""
+    """返回 prod subtitle object key；prod 缺失时从旧 staging 对象 fallback copy。"""
     prov = _provider()
     src_candidates = [f"{prov.staging_prefix}/{slug}/{ep_dir}/subtitles/{lang}.vtt"]
     legacy = _legacy_ep_dir(ep_dir)
     if legacy:
         src_candidates.append(f"{prov.staging_prefix}/{slug}/{legacy}/subtitles/{lang}.vtt")
-    src_key = _first_existing_key(src_candidates)
     dst_key = f"{prov.prod_prefix}/{slug}/{ep_dir}/subtitles/{lang}.vtt"
+    if _key_exists(dst_key):
+        return dst_key
+    src_key = _first_existing_key(src_candidates)
     if not src_key:
         raise PublishError(
-            f"no staging object at {src_candidates[0]}; "
-            f"upload_subtitle_to_staging must run first"
+            f"no prod object at {dst_key}; no staging fallback at {src_candidates[0]}"
         )
     _copy_one(src_key, dst_key, f"subtitle {slug}/{ep_dir}/{lang}")
     return dst_key

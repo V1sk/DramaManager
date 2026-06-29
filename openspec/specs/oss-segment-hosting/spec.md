@@ -36,21 +36,21 @@
 
 OSS 模式启用时，worker 在 `pipeline.sh` 三个 stage 全部成功后、`set_status('ready')` 之前，MUST 对每档 ladder（540p / 720p / 1080p）：
 
-1. 把该档目录下 `init-{rung}.mp4` 和所有 `seg-{rung}-*.m4s` 通过 `app.oss_upload.upload_file(oss_path, local_file_path)` 上传到 OSS。`oss_path` MUST 形如 `f"{OSS_STAGING_PREFIX}/{drama_slug}/ep-{n}/{rung}/{filename}"`（即 `Drama/staging/...` 前缀 + 服务自身的目录约定），其中 `OSS_STAGING_PREFIX` 从 `app.oss_upload` import；`oss_path` MUST NOT 以 `/` 开头。
+1. 把该档目录下 `init-{rung}.mp4` 和所有 `seg-{rung}-*.m4s` 上传到对象存储 prod 前缀。`oss_path` MUST 形如 `Drama/prod/{drama_slug}/{ep_dir}/{rung}/{filename}`；`oss_path` MUST NOT 以 `/` 开头。
 2. `upload_file` 返回字典中 `result == True` 视为成功；`False` 视为失败并 raise，由调用方转化为 episode `status=failed`。
-3. 改写本地 `media-{rung}.m3u8` —— `#EXT-X-MAP:URI` 行内层 URI 与 segment 行 MUST 替换为对应的绝对 OSS URL，前缀 = `f"{oss_staging_public_base_url}/{drama_slug}/ep-{n}/{rung}/"`；`#EXT-X-KEY:URI` 行 MUST 不变。
+3. 本地 `media-{rung}.m3u8` MUST 保持相对文件名，供 HLS 管理端 `/videos/` 预览使用；sync 阶段基于本地 m3u8 生成 prod object-key 形态的 playlist payload。
 
 任一档的上传或改写失败时，worker MUST `set_status('failed', error_message=...)` 并保留本地产物供事后排查；MUST NOT 把 episode 状态置为 `ready`。
 
-prod 前缀 (`Drama/prod/...`) MUST NOT 由 worker 直接写入；prod 对象只能通过 `app.publish.publish_ladder_to_prod` 在 sync 时刻产生（详见 `oss-staging-prod-separation` capability）。
+历史 staging 对象 MAY exist for dirty legacy rows; sync 阶段只在 prod 对象缺失时 fallback copy staging 对象。
 
 #### Scenario: 三档全部成功后 episode 进入 ready
 - **GIVEN** OSS 模式启用，worker 已完成 pipeline 三个 stage
-- **WHEN** 三档 ladder 的 init.mp4 + 全部 .m4s 都成功上传到 staging 前缀，三个 m3u8 改写完成
+- **WHEN** 三档 ladder 的 init.mp4 + 全部 .m4s 都成功上传到 prod 前缀
 - **THEN** DB 中该 episode 的 `status` 等于 `ready`
-- **AND** 本地 `out/{slug}/ep-{n}/{rung}/media-{rung}.m3u8` 中 `#EXT-X-MAP:URI` 与 segment 行 MUST 是以 `oss_staging_public_base_url` 开头的绝对 URL（即 `https://photobundle.oss-ap-southeast-1.aliyuncs.com/Drama/staging/...`）
+- **AND** 本地 `out/{slug}/{ep_dir}/{rung}/media-{rung}.m3u8` 中 `#EXT-X-MAP:URI` 与 segment 行 MUST remain relative file names
 - **AND** 同一 m3u8 中 `#EXT-X-KEY:URI` MUST 仍是 `/drm/{slug}/ep-{n}/key` 相对路径
-- **AND** OSS 中 `Drama/prod/{slug}/...` 路径下 MUST 没有由 worker 创建的对象
+- **AND** OSS 中 `Drama/prod/{slug}/{ep_dir}/{rung}/...` 路径下存在对应媒体对象
 
 #### Scenario: 任一上传失败 → episode 进入 failed
 - **GIVEN** OSS 模式启用，worker 完成 pipeline 三个 stage

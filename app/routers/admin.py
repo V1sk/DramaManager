@@ -241,6 +241,16 @@ async def admin_delete_drama(
             drama_slug, len(warnings),
         )
     else:
+        # Never synced: prod assets are not business-visible yet, so clean them
+        # immediately to avoid direct-upload orphans.
+        if settings.storage_enabled:
+            from .. import publish
+            try:
+                await asyncio.to_thread(publish.unpublish_drama_from_prod, drama_slug)
+            except Exception as e:  # noqa: BLE001
+                log.warning("failed to unpublish unsynced drama %s from prod OSS: %s", drama_slug, e)
+                warnings.append(f"oss-prod:{drama_slug}")
+
         # Never synced: physical delete is safe.
         deleted, _ = db.delete_drama(drama_slug)
         if not deleted:
@@ -1010,6 +1020,23 @@ async def admin_delete_episode(
             drama_slug, row["episode_id"], len(warnings),
         )
     else:
+        # Never synced: prod assets are not business-visible yet, so direct
+        # uploads can be removed immediately. Synced rows keep prod cleanup for
+        # the sync worker after the business DELETE succeeds.
+        if settings.storage_enabled:
+            from .. import publish
+            for ep_dir_name in ep_dir_names:
+                try:
+                    await asyncio.to_thread(
+                        publish.unpublish_episode_from_prod, drama_slug, ep_dir_name,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    log.warning(
+                        "failed to unpublish unsynced episode %s/%s from prod OSS: %s",
+                        drama_slug, ep_dir_name, e,
+                    )
+                    warnings.append(f"oss-prod:{drama_slug}/{ep_dir_name}")
+
         # Never synced: physical delete is safe.
         db.delete_by_slug_ep(drama_slug, ep_number)
         log.info(

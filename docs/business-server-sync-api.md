@@ -1,6 +1,6 @@
 # 业务服务器同步 API（简明版）
 
-HLS 管理服务器（staging）通过 4 个 HTTP 接口把剧 / 集 / 翻译 / 标签 / 演员 / 字幕 / 封面 / 海报 / DRM 推送给业务服务器（prod）。媒体字节走 TOS server-side copy，业务服务器只接 JSON。
+HLS 管理服务器通过 4 个 HTTP 接口把剧 / 集 / 翻译 / 标签 / 演员 / 字幕 / 封面 / 海报 / DRM 推送给业务服务器。媒体字节由 HLS 端在编码/上传阶段直接写入 TOS prod 前缀；同步时业务服务器只接 JSON。
 
 ---
 
@@ -265,7 +265,7 @@ def rewrite_m3u8(text: str, media_base: str) -> str:
 4. 遍历 `video_tracks`，把每档的 `playlist` 文本**原样**写到 `<biz_out>/{slug}/ep-{n}/{ladder}/media-{ladder}.m3u8`（`{ladder}` 取该档的 `video_tracks[].ladder`；不要在写盘时 rewrite，rewrite 推迟到给客户端时做，方便 `MEDIA_BASE_URL` 切 CDN 不用回填）。
 5. Upsert `episodes` 行：把每档 `video_tracks[].{id,width,height}` 存进 DB（给客户端时直接拼成 `videoTracks`），`cover_key` / `subtitles[].key` 作为 opaque 字符串存。
 
-> m3u8 引用的 `init-*.mp4` / `seg-*.m4s`、payload 里的 `cover_key` / `subtitles[].key` 对应的 TOS 对象已经由 HLS 端通过 server-side copy 放在 prod 前缀；**业务端不需要任何 TOS 出站**。客户端按 `MEDIA_BASE_URL` 拼好的 URL（或解析 m3u8 行 rewrite 后的绝对 URL）直接拿数据，CDN 命中走 CDN，回源到 TOS。
+> m3u8 引用的 `init-*.mp4` / `seg-*.m4s`、payload 里的 `cover_key` / `subtitles[].key` 对应的 TOS 对象已经由 HLS 端放在 prod 前缀；**业务端不需要任何 TOS 出站**。客户端按 `MEDIA_BASE_URL` 拼好的 URL（或解析 m3u8 行 rewrite 后的绝对 URL）直接拿数据，CDN 命中走 CDN，回源到 TOS。
 
 **响应**：
 

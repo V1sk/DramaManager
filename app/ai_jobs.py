@@ -5,7 +5,7 @@
 in-memory `asyncio.Queue` 只是调度通道，启动期从 DB 重新 seed，崩溃重启不丢活。
 
 对标 `app/work_queue.py`（worker 池 + per-entity 锁）与 `app/sync.py`（DB 状态机 +
-启动 reap）。翻译完成只写 staging editor 状态（translations 行 / 本地+staging 字幕）
+启动 reap）。翻译完成只写 editor 状态（translations 行 / 本地字幕 + prod 对象）
 并标 dirty；推 prod 仍由既有 business-sync 队列负责（两队列串联）。
 """
 import asyncio

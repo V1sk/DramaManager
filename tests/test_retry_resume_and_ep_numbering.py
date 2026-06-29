@@ -129,7 +129,7 @@ def case_publish_ladder_skip_existing():
         from app import publish
 
         _build_complete_ep_dir(settings.out_dir, "ly", "ep-1")
-        prefix = "Drama/staging/ly/ep-1/720p"
+        prefix = "Drama/prod/ly/ep-1/720p"
         # Simulate a prior partial publish: init + seg-0 already in the bucket,
         # seg-1 never made it.
         existing = [f"{prefix}/init-720p.mp4", f"{prefix}/seg-720p-0.m4s"]
@@ -143,6 +143,9 @@ def case_publish_ladder_skip_existing():
         assert uploaded == 1, (uploaded, prov.uploaded)
         assert skipped == 2, skipped
         assert prov.uploaded == [f"{prefix}/seg-720p-1.m4s"], prov.uploaded
+        playlist = publish.publish_ladder_to_prod("ly", "ep-1", "720p")
+        assert "Drama/prod/ly/ep-1/720p/init-720p.mp4" in playlist
+        assert prov.copied == []
 
         # skip_existing=False → everything (re-)uploaded, overwriting.
         prov2 = _FakeProvider(existing=existing)
@@ -152,7 +155,21 @@ def case_publish_ladder_skip_existing():
         )
         assert uploaded2 == 3, uploaded2   # init + seg-0 + seg-1
         assert skipped2 == 0, skipped2
-        print("OK publish_ladder skip_existing: resume uploads 1/skips 2; full uploads 3")
+
+        staging_prefix = "Drama/staging/ly/ep-1/720p"
+        prov3 = _FakeProvider(existing=[
+            f"{staging_prefix}/init-720p.mp4",
+            f"{staging_prefix}/seg-720p-0.m4s",
+            f"{staging_prefix}/seg-720p-1.m4s",
+        ])
+        storage_mod.provider = prov3
+        publish.publish_ladder_to_prod("ly", "ep-1", "720p")
+        assert len(prov3.copied) == 3
+        assert (
+            f"{staging_prefix}/seg-720p-1.m4s",
+            "Drama/prod/ly/ep-1/720p/seg-720p-1.m4s",
+        ) in prov3.copied
+        print("OK publish_ladder direct-prod resume + legacy staging fallback")
 
 
 def case_versioned_asset_publish_fallbacks():
@@ -161,6 +178,21 @@ def case_versioned_asset_publish_fallbacks():
         _reset_app_modules()
         import app.storage as storage_mod
         from app import publish
+
+        direct = _FakeProvider(existing=[
+            "Drama/prod/ly/ep-1-v2/cover.jpg",
+            "Drama/prod/ly/ep-1-v2/subtitles/zh-rCN.vtt",
+            "Drama/prod/ly/poster/zh-rCN-v2.jpg",
+        ])
+        storage_mod.provider = direct
+        assert publish.publish_cover_to_prod("ly", "ep-1-v2") == "Drama/prod/ly/ep-1-v2/cover.jpg"
+        assert publish.publish_subtitle_to_prod("ly", "ep-1-v2", "zh-rCN") == (
+            "Drama/prod/ly/ep-1-v2/subtitles/zh-rCN.vtt"
+        )
+        assert publish.publish_poster_to_prod("ly", "zh-rCN", "zh-rCN-v2.jpg") == (
+            "Drama/prod/ly/poster/zh-rCN-v2.jpg"
+        )
+        assert direct.copied == []
 
         prov = _FakeProvider(existing=[
             "Drama/staging/ly/ep-1/cover.jpg",

@@ -1,27 +1,24 @@
 # oss-staging-prod-separation
 
-OSS 桶的 staging / prod 双前缀拓扑：staging 服务器（这台 HLS 管理服务器）只读写 `Drama/staging/...`；prod 子树（`Drama/prod/...`）只在手动 sync 触发时由 server-side copy 产生，由业务服务器消费。归档自 `2026-05-07-oss-staging-prod-separation`。
+OSS 桶的历史 staging / prod 双前缀拓扑：新资产由 HLS 管理服务器直接写入 `Drama/prod/...`；`Drama/staging/...` 仅作为旧 dirty 数据的兼容 fallback。归档自 `2026-05-07-oss-staging-prod-separation`，后续被直传 prod 流程修订。
 
 ## Requirements
 
 ### Requirement: staging vs prod path layout
 
-OSS objects representing each rung's media files SHALL be stored under two parallel prefixes within the same bucket:
-- `Drama/staging/{slug}/{ep_dir}/{ladder}/init-{ladder}.mp4`
-- `Drama/staging/{slug}/{ep_dir}/{ladder}/seg-{ladder}-*.m4s`
+OSS objects representing each rung's media files SHALL be stored under the prod prefix within the same bucket:
 - `Drama/prod/{slug}/{ep_dir}/{ladder}/init-{ladder}.mp4`
 - `Drama/prod/{slug}/{ep_dir}/{ladder}/seg-{ladder}-*.m4s`
 
-The encoder pipeline (this server) SHALL only ever write under `Drama/staging/`. The `Drama/prod/` subtree is populated exclusively by sync-time copy operations (`publish_ladder_to_prod`).
+The encoder pipeline (this server) SHALL write new media under `Drama/prod/`. Sync-time publish helpers SHALL verify prod objects exist and MAY copy from legacy `Drama/staging/` objects only when prod is missing.
 
 The constants `OSS_STAGING_PREFIX` (= `"Drama/staging"`) and `OSS_PROD_PREFIX` (= `"Drama/prod"`) SHALL be defined in `app/oss_upload.py` and used by all callers; the strings SHALL NOT be re-hardcoded elsewhere.
 
-#### Scenario: encoder writes to staging only
+#### Scenario: encoder writes to prod
 - **GIVEN** OSS mode enabled and an episode `(slug='ly', ep=3)` reaching pipeline completion
 - **WHEN** worker runs `publish_ladder('ly', 'ep-3', '720p')`
-- **THEN** the OSS object `Drama/staging/ly/ep-3/720p/init-720p.mp4` exists
-- **AND** at least one `Drama/staging/ly/ep-3/720p/seg-720p-N.m4s` exists
-- **AND** no objects under `Drama/prod/ly/...` were created by this call
+- **THEN** the OSS object `Drama/prod/ly/ep-3/720p/init-720p.mp4` exists
+- **AND** at least one `Drama/prod/ly/ep-3/720p/seg-720p-N.m4s` exists
 
 ### Requirement: public URL constants for staging and prod
 

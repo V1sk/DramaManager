@@ -266,14 +266,14 @@ HLS 端在收到 2xx 后会调用 `unpublish_episode_from_prod(slug, ep_dir)` �
 
 > v1.0 → v2.0 BREAKING：海报 / 封面 / 字幕从"业务服务器主动拉 HLS 服务器"改为"OSS 直发"。详见 §13。
 
-四类资产**统一**走 OSS staging→prod 双前缀拓扑：
+四类资产由 HLS 端直接写入 OSS prod 前缀；sync 阶段只把 prod object key 推给业务服务器。旧 staging 对象仅作为历史 dirty 数据的 fallback。
 
-| 资产 | OSS staging 路径 | OSS prod 路径 | sync 时如何到 prod |
-|---|---|---|---|
-| init / segment | `Drama/staging/{slug}/{ep_dir}/{ladder}/...` | `Drama/prod/{slug}/{ep_dir}/{ladder}/...` | `publish_ladder_to_prod` server-side copy |
-| 海报 | `Drama/staging/{slug}/poster/{lang}.{ext}` | `Drama/prod/{slug}/poster/{lang}.{ext}` | `publish_poster_to_prod` server-side copy |
-| 集封面 | `Drama/staging/{slug}/{ep_dir}/cover.jpg` | `Drama/prod/{slug}/{ep_dir}/cover.jpg` | `publish_cover_to_prod` server-side copy |
-| 字幕 | `Drama/staging/{slug}/{ep_dir}/subtitles/{lang}.vtt` | `Drama/prod/{slug}/{ep_dir}/subtitles/{lang}.vtt` | `publish_subtitle_to_prod` server-side copy |
+| 资产 | OSS prod 路径 | sync 时如何处理 |
+|---|---|---|
+| init / segment | `Drama/prod/{slug}/{ep_dir}/{ladder}/...` | 校验 prod 对象存在，生成 prod-flavored m3u8 |
+| 海报 | `Drama/prod/{slug}/poster/{lang}[-vN].{ext}` | 返回 prod object key |
+| 集封面 | `Drama/prod/{slug}/{ep_dir}/cover.jpg` | 返回 prod object key |
+| 字幕 | `Drama/prod/{slug}/{ep_dir}/subtitles/{lang}.vtt` | 返回 prod object key |
 
 业务服务器在 `/sync/*` 收到的 `poster_url` / `cover_url` / `subtitles[].url` 都是**已经在 prod 前缀就位**的绝对 OSS URL：
 
