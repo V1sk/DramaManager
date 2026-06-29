@@ -412,17 +412,17 @@ async def handle_drama_sync(slug: str) -> None:
                 rel_url = fields.get("poster")
                 if not rel_url:
                     continue
-                # rel_url is like "/videos/{slug}/poster/{lang}.{ext}";
-                # extract the extension off the tail.
+                # rel_url is like "/videos/{slug}/poster/{lang}.jpg" or
+                # "/videos/{slug}/poster/{lang}-v2.jpg"; publish by exact
+                # filename so versioned poster keys are preserved.
                 tail = rel_url.rsplit("/", 1)[-1]   # "{lang}.{ext}"
                 if "." not in tail:
                     log.warning(
                         "skipping malformed poster rel_url for sync: %s", rel_url,
                     )
                     continue
-                ext = tail.rsplit(".", 1)[-1]
                 prod_key = await asyncio.to_thread(
-                    publish.publish_poster_to_prod, slug, lang_code, ext,
+                    publish.publish_poster_to_prod, slug, lang_code, tail,
                 )
                 poster_prod_keys[lang_code] = prod_key
 

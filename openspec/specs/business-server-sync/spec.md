@@ -233,6 +233,12 @@ The business server MUST: validate the API key; ensure the drama exists (else 40
 - **AND** the `mid` entry's `playlist` contains `#EXT-X-KEY:METHOD=AES-128,URI="/drm/ly/ep-3/key"...` (verbatim)
 - **AND** `payload.cover_key` is the prod cover object key (storage on) or the staging `/videos/ly/ep-3/cover.jpg` URL (storage off)
 
+#### Scenario: re-uploaded episode sync uses versioned ancillary assets
+- **GIVEN** episode `ly-ep-3` has `upload_version=2`
+- **WHEN** the HLS sync worker calls `POST /sync/episodes`
+- **THEN** playlist object keys, `payload.cover_key`, and subtitle keys use the `Drama/prod/ly/ep-3-v2/...` prefix
+- **AND** if legacy staging cover/subtitle objects only exist under `Drama/staging/ly/ep-3/...`, the sync worker may copy those bytes into the versioned prod prefix for compatibility
+
 #### Scenario: API key mismatch returns 401
 - **GIVEN** the business server is running with a different `X-API-Key` than the HLS server is sending
 - **WHEN** the HLS worker calls any `/sync/*` endpoint

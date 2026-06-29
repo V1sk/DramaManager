@@ -109,13 +109,13 @@ The service SHALL serve `GET /drm/{drama_slug}/{ep}/key` returning the exact 16-
 
 ### Requirement: Cover replacement endpoint
 
-The service SHALL serve `POST /api/episodes/{drama_slug}/{ep}/cover` accepting `multipart/form-data` with a single `cover` file part whose MIME type starts with `image/`. The uploaded image SHALL overwrite `OUT_DIR/{drama_slug}/ep-{ep}/cover.jpg` on disk. The DB row's `updated_at` SHALL be bumped; `cover_url` SHALL remain unchanged (the URL is stable).
+The service SHALL serve `POST /api/episodes/{drama_slug}/{ep}/cover` accepting `multipart/form-data` with a single `cover` file part whose MIME type starts with `image/`. The uploaded image SHALL overwrite `OUT_DIR/{drama_slug}/{ep_dir}/cover.jpg`, where `ep_dir` is `ep-{ep}` for upload version 1 and `ep-{ep}-v{V}` for later re-uploads. The DB row's `cover_url` and `updated_at` SHALL be bumped to the current versioned cover path.
 
 #### Scenario: Cover overwrite succeeds
 - **GIVEN** a row with `(drama_slug=langyabang, ep_number=3)`
 - **WHEN** the client posts a JPEG to `POST /api/episodes/langyabang/3/cover`
-- **THEN** the file at `OUT_DIR/langyabang/ep-3/cover.jpg` is replaced with the uploaded bytes
-- **AND** the row's `updated_at` is set to the current time
+- **THEN** the file at the current version's cover path is replaced with the uploaded bytes
+- **AND** the row's `cover_url` and `updated_at` are set to the current versioned values
 
 #### Scenario: Non-image payload is rejected
 - **WHEN** the client posts `application/pdf` to the cover endpoint

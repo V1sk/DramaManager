@@ -266,16 +266,13 @@ def _ingest_episode_from_file(
     a freshly-extracted cover and a TEMP `src_file` — a NAS source is left
     untouched.
 
-    Cover.jpg always lives in the v1 directory `ep-{n}/` regardless of the
-    current upload_version: it's metadata, not encrypted content, so cached
-    clients won't be silently broken by an in-place overwrite. Segments and keys
-    get the version suffix; cover does not.
+    Cover.jpg follows the same versioned episode directory as the media
+    artifacts (`ep-{n}` for v1, `ep-{n}-v{V}` for v2+), so sync can copy the
+    current version's full asset set without looking in mixed prefixes.
 
     Raises HTTPException on validation/IO failure.
     """
     episode_id = f"{drama_slug}-ep-{ep_number}"
-    ep_dir_name = f"ep-{ep_number}"
-    episode_dir = settings.out_dir / drama_slug / ep_dir_name
 
     def _drop_temp_src() -> None:
         # Never delete a NAS (or other non-temp) source on failure.
@@ -289,12 +286,35 @@ def _ingest_episode_from_file(
         _drop_temp_src()
         raise HTTPException(status_code=400, detail=f"ffprobe failed: {e}")
 
-    cover_path = episode_dir / "cover.jpg"
+    temp_cover_path = settings.upload_tmp_dir / f"cover-{uuid.uuid4().hex}.jpg"
     try:
-        extract_first_frame(src_file, cover_path)
+        extract_first_frame(src_file, temp_cover_path)
     except FfmpegError as e:
+        temp_cover_path.unlink(missing_ok=True)
         _drop_temp_src()
         raise HTTPException(status_code=400, detail=f"cover extraction failed: {e}")
+
+    old_source, upload_version = db.upsert_pending(
+        drama_slug=drama_slug,
+        ep_number=ep_number,
+        episode_id=episode_id,
+        duration_ms=duration_ms,
+        cover_url=None,
+        source_filename=source_filename,
+        width=width,
+        height=height,
+        source_path=str(src_file),
+    )
+    ep_dir_name = db.episode_ep_dir(ep_number, upload_version)
+    episode_dir = settings.out_dir / drama_slug / ep_dir_name
+    cover_path = episode_dir / "cover.jpg"
+    cover_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.move(str(temp_cover_path), cover_path)
+    except OSError as e:
+        temp_cover_path.unlink(missing_ok=True)
+        db.set_status(episode_id, "failed", error_message=f"cover move failed: {e}")
+        raise HTTPException(status_code=500, detail=f"failed to store cover: {e}")
 
     # Mirror cover to OSS staging (assets-to-oss). Failure unwinds the just-
     # extracted cover and a temp source before raising 500 so we don't leave a
@@ -306,7 +326,7 @@ def _ingest_episode_from_file(
         except publish.PublishError as e:
             log.error("OSS staging upload failed for cover %s/%s: %s", drama_slug, ep_dir_name, e)
             cover_path.unlink(missing_ok=True)
-            _drop_temp_src()
+            db.set_status(episode_id, "failed", error_message=f"cover staging upload failed: {e}")
             raise HTTPException(
                 status_code=500,
                 detail=f"failed to mirror cover to OSS staging: {e}",
@@ -314,25 +334,17 @@ def _ingest_episode_from_file(
         except Exception as e:  # noqa: BLE001
             log.exception("OSS unexpected error for cover %s/%s", drama_slug, ep_dir_name)
             cover_path.unlink(missing_ok=True)
-            _drop_temp_src()
+            db.set_status(episode_id, "failed", error_message=f"cover staging upload unexpected: {e}")
             raise HTTPException(
                 status_code=500,
                 detail=f"unexpected OSS error mirroring cover: {e}",
             )
 
-    cover_url = f"/videos/{drama_slug}/{ep_dir_name}/cover.jpg"
-
-    old_source, upload_version = db.upsert_pending(
-        drama_slug=drama_slug,
-        ep_number=ep_number,
-        episode_id=episode_id,
-        duration_ms=duration_ms,
-        cover_url=cover_url,
-        source_filename=source_filename,
-        width=width,
-        height=height,
-        source_path=str(src_file),
-    )
+    try:
+        _copy_existing_subtitles_to_version(drama_slug, ep_number, upload_version)
+    except HTTPException as e:
+        db.set_status(episode_id, "failed", error_message=str(e.detail))
+        raise
     # Re-ingest over a previously-failed episode leaves the prior TEMP source
     # orphaned in UPLOAD_TMP_DIR (we keep failed-episode sources around to power
     # the "重试" button). Sweep it now — but only if it was a temp file; a prior
@@ -365,6 +377,55 @@ def _process_episode_upload(
         drama_slug, ep_number, tmp_path, video.filename or "",
     )
     return tmp_path, upload_version
+
+
+def _copy_existing_subtitles_to_version(
+    drama_slug: str,
+    ep_number: int,
+    upload_version: int,
+) -> None:
+    """Carry existing subtitles forward to the current episode version.
+
+    Subtitles are keyed by stable episode_id + lang in SQLite, but the actual
+    bucket/local path must follow the current media version so sync can publish
+    a self-contained `ep-N-vV/` prefix. Missing legacy files are ignored; sync
+    has a staging fallback for already-deployed rows.
+    """
+    ep_dir = db.episode_ep_dir(ep_number, upload_version)
+    episode_id = f"{drama_slug}-ep-{ep_number}"
+    for row in db.list_subtitles_for_slug_ep(drama_slug, ep_number):
+        lang = row["lang_code"]
+        old_path = _local_path_from_video_url(row["file_url"])
+        new_path = _subtitle_path(drama_slug, ep_number, lang, upload_version)
+        if old_path == new_path:
+            continue
+        if old_path is None or not old_path.is_file():
+            continue
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(old_path, new_path)
+        except OSError as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"failed to copy subtitle '{lang}' to {ep_dir}: {e}",
+            )
+        if settings.storage_enabled:
+            from .. import publish
+            try:
+                publish.upload_subtitle_to_staging(drama_slug, ep_dir, lang, new_path)
+            except publish.PublishError as e:
+                new_path.unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"failed to mirror subtitle '{lang}' to OSS staging: {e}",
+                )
+            except Exception as e:  # noqa: BLE001
+                new_path.unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"unexpected OSS error mirroring subtitle '{lang}': {e}",
+                )
+        db.upsert_subtitle(episode_id, lang, _subtitle_url(drama_slug, ep_number, lang, upload_version))
 
 
 def _next_ep_number(drama_slug: str) -> int:
@@ -419,9 +480,7 @@ async def admin_upload_next_episode(
     last_err: Exception | None = None
     for _ in range(3):
         next_ep = _next_ep_number(drama_slug)
-        ep_dir_name = f"ep-{next_ep}"
         episode_id = f"{drama_slug}-ep-{next_ep}"
-        episode_dir = settings.out_dir / drama_slug / ep_dir_name
 
         tmp_path = settings.upload_tmp_dir / f"upload-{uuid.uuid4().hex}.mp4"
         try:
@@ -430,47 +489,8 @@ async def admin_upload_next_episode(
             raise HTTPException(status_code=500, detail=f"failed to persist upload: {e}")
 
         try:
-            duration_ms = probe_duration_ms(tmp_path)
-            width, height = probe_video_dimensions(tmp_path)
-        except FfmpegError as e:
-            tmp_path.unlink(missing_ok=True)
-            raise HTTPException(status_code=400, detail=f"ffprobe failed: {e}")
-
-        cover_path = episode_dir / "cover.jpg"
-        try:
-            extract_first_frame(tmp_path, cover_path)
-        except FfmpegError as e:
-            tmp_path.unlink(missing_ok=True)
-            raise HTTPException(status_code=400, detail=f"cover extraction failed: {e}")
-
-        if settings.storage_enabled:
-            from .. import publish
-            try:
-                publish.upload_cover_to_staging(drama_slug, ep_dir_name, cover_path)
-            except Exception as e:  # noqa: BLE001 — PublishError or unexpected
-                log.error(
-                    "OSS staging upload failed for cover %s/%s: %s",
-                    drama_slug, ep_dir_name, e,
-                )
-                cover_path.unlink(missing_ok=True)
-                tmp_path.unlink(missing_ok=True)
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"failed to mirror cover to OSS staging: {e}",
-                )
-
-        cover_url = f"/videos/{drama_slug}/{ep_dir_name}/cover.jpg"
-        try:
-            _, upload_version = db.upsert_pending(
-                drama_slug=drama_slug,
-                ep_number=next_ep,
-                episode_id=episode_id,
-                duration_ms=duration_ms,
-                cover_url=cover_url,
-                source_filename=video.filename or "",
-                width=width,
-                height=height,
-                source_path=str(tmp_path),
+            upload_version = _ingest_episode_from_file(
+                drama_slug, next_ep, tmp_path, video.filename or "",
             )
         except sqlite3.IntegrityError as e:
             tmp_path.unlink(missing_ok=True)
@@ -1021,8 +1041,30 @@ def _poster_dir(drama_slug: str) -> Path:
     return settings.out_dir / drama_slug / "poster"
 
 
-def _poster_url(drama_slug: str, lang_code: str, ext: str) -> str:
-    return f"/videos/{drama_slug}/poster/{lang_code}.{ext}"
+def _poster_filename(lang_code: str, version: int, ext: str) -> str:
+    return f"{lang_code}.{ext}" if version <= 1 else f"{lang_code}-v{version}.{ext}"
+
+
+def _poster_url(drama_slug: str, filename: str) -> str:
+    return f"/videos/{drama_slug}/poster/{filename}"
+
+
+def _next_poster_version(drama_slug: str, lang_code: str) -> int:
+    pattern = re.compile(rf"^{re.escape(lang_code)}(?:-v(\d+))?\.[^.]+$")
+    max_seen = 0
+    current = db.get_drama_poster_url(drama_slug, lang_code)
+    if current:
+        name = current.rsplit("/", 1)[-1]
+        if m := pattern.match(name):
+            max_seen = max(max_seen, int(m.group(1) or "1"))
+    poster_dir = _poster_dir(drama_slug)
+    if poster_dir.is_dir():
+        for p in poster_dir.iterdir():
+            if not p.is_file():
+                continue
+            if m := pattern.match(p.name):
+                max_seen = max(max_seen, int(m.group(1) or "1"))
+    return max_seen + 1 if max_seen else 1
 
 
 def _remove_existing_poster_files(drama_slug: str, lang_code: str) -> list[str]:
@@ -1034,10 +1076,10 @@ def _remove_existing_poster_files(drama_slug: str, lang_code: str) -> list[str]:
     poster_dir = _poster_dir(drama_slug)
     if not poster_dir.is_dir():
         return warnings
-    prefix = f"{lang_code}."
-    for p in poster_dir.glob(f"{lang_code}.*"):
-        if not p.name.startswith(prefix):
-            continue  # defensive — glob could match {lang_code}.bar via wildcard
+    pattern = re.compile(rf"^{re.escape(lang_code)}(?:-v\d+)?\.[^.]+$")
+    for p in poster_dir.iterdir():
+        if not p.is_file() or not pattern.match(p.name):
+            continue
         try:
             p.unlink()
         except OSError as e:
@@ -1218,11 +1260,13 @@ async def admin_upload_drama_poster(
         )
     new_ext = _POSTER_MIME_EXT[content_type]
 
-    # Order: remove any existing files for this (slug, lang) → write new file → upsert row.
+    # Versioned write: keep prior poster files around so already-synced prod
+    # keys remain valid until the business server receives the new key.
     poster_dir = _poster_dir(drama_slug)
     poster_dir.mkdir(parents=True, exist_ok=True)
-    _remove_existing_poster_files(drama_slug, lang)
-    target_path = poster_dir / f"{lang}.{new_ext}"
+    poster_version = _next_poster_version(drama_slug, lang)
+    poster_filename = _poster_filename(lang, poster_version, new_ext)
+    target_path = poster_dir / poster_filename
     try:
         with target_path.open("wb") as out_f:
             shutil.copyfileobj(file.file, out_f, length=1024 * 1024)
@@ -1234,16 +1278,14 @@ async def admin_upload_drama_poster(
     finally:
         await file.close()
 
-    # Mirror to OSS staging if enabled. Order: clear stale OSS object for any
-    # prior extension under this (slug, lang) → upload new bytes. On OSS
-    # failure unlink the local file we just wrote and respond 500 so the DB
-    # row is not left pointing at a half-published asset.
+    # Mirror to OSS staging if enabled. Versioned filenames avoid overwriting
+    # already-synced prod keys; stale staging objects are kept for compatibility.
     if settings.storage_enabled:
         from .. import publish
         try:
-            await asyncio.to_thread(publish.unpublish_poster_from_staging, drama_slug, lang)
             await asyncio.to_thread(
-                publish.upload_poster_to_staging, drama_slug, lang, target_path,
+                publish.upload_poster_to_staging,
+                drama_slug, lang, target_path, poster_filename,
             )
         except publish.PublishError as e:
             log.error("OSS staging upload failed for poster %s/%s: %s", drama_slug, lang, e)
@@ -1260,7 +1302,7 @@ async def admin_upload_drama_poster(
                 detail=f"unexpected OSS error mirroring poster: {e}",
             )
 
-    url = _poster_url(drama_slug, lang, new_ext)
+    url = _poster_url(drama_slug, poster_filename)
     db.upsert_drama_poster(drama_slug, lang, url)
     db.mark_drama_dirty(drama_slug)
     log.info("uploaded drama poster slug=%s lang=%s ext=%s", drama_slug, lang, new_ext)
@@ -1303,12 +1345,40 @@ _VTT_MAGIC = b"WEBVTT"
 _UTF8_BOM = b"\xef\xbb\xbf"
 
 
-def _subtitle_path(drama_slug: str, ep_number: int, lang_code: str) -> Path:
-    return settings.out_dir / drama_slug / f"ep-{ep_number}" / "subtitles" / f"{lang_code}.vtt"
+def _local_path_from_video_url(url: str | None) -> Path | None:
+    if not url or not url.startswith("/videos/"):
+        return None
+    rel = url.removeprefix("/videos/")
+    return settings.out_dir / rel
 
 
-def _subtitle_url(drama_slug: str, ep_number: int, lang_code: str) -> str:
-    return f"/videos/{drama_slug}/ep-{ep_number}/subtitles/{lang_code}.vtt"
+def _ep_dir_from_video_url(url: str | None, drama_slug: str) -> str | None:
+    if not url or not url.startswith("/videos/"):
+        return None
+    parts = url.removeprefix("/videos/").split("/")
+    if len(parts) < 2 or parts[0] != drama_slug:
+        return None
+    return parts[1]
+
+
+def _subtitle_path(
+    drama_slug: str,
+    ep_number: int,
+    lang_code: str,
+    upload_version: int = 1,
+) -> Path:
+    ep_dir = db.episode_ep_dir(ep_number, upload_version)
+    return settings.out_dir / drama_slug / ep_dir / "subtitles" / f"{lang_code}.vtt"
+
+
+def _subtitle_url(
+    drama_slug: str,
+    ep_number: int,
+    lang_code: str,
+    upload_version: int = 1,
+) -> str:
+    ep_dir = db.episode_ep_dir(ep_number, upload_version)
+    return f"/videos/{drama_slug}/{ep_dir}/subtitles/{lang_code}.vtt"
 
 
 @router.post("/admin/episodes/{drama_slug}/{ep}/subtitles")
@@ -1357,7 +1427,8 @@ async def admin_upload_subtitle(
             detail="file does not start with the WEBVTT magic bytes; expected a WebVTT (.vtt) file",
         )
 
-    target_path = _subtitle_path(drama_slug, ep_number, lang)
+    upload_version = int(ep_row.get("upload_version") or 1)
+    target_path = _subtitle_path(drama_slug, ep_number, lang, upload_version)
     target_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         target_path.write_bytes(body)
@@ -1368,7 +1439,7 @@ async def admin_upload_subtitle(
     # a row pointing at half-published content.
     if settings.storage_enabled:
         from .. import publish
-        ep_dir = f"ep-{ep_number}"
+        ep_dir = db.episode_ep_dir(ep_number, upload_version)
         try:
             await asyncio.to_thread(
                 publish.upload_subtitle_to_staging,
@@ -1396,7 +1467,7 @@ async def admin_upload_subtitle(
             )
 
     episode_id = ep_row["episode_id"]
-    file_url = _subtitle_url(drama_slug, ep_number, lang)
+    file_url = _subtitle_url(drama_slug, ep_number, lang, upload_version)
     upserted = db.upsert_subtitle(episode_id, lang, file_url)
     db.mark_episode_dirty(drama_slug, ep_number)
     log.info("uploaded subtitle slug=%s ep=%s lang=%s bytes=%d",
@@ -1446,7 +1517,7 @@ async def admin_delete_subtitle(
     if ep_row is None:
         raise HTTPException(status_code=404, detail=f"episode '{drama_slug}/{ep_number}' not found")
 
-    deleted, _file_url = db.delete_subtitle(ep_row["episode_id"], lang)
+    deleted, file_url = db.delete_subtitle(ep_row["episode_id"], lang)
     if not deleted:
         raise HTTPException(
             status_code=404,
@@ -1454,7 +1525,9 @@ async def admin_delete_subtitle(
         )
 
     warnings: list[str] = []
-    target_path = _subtitle_path(drama_slug, ep_number, lang)
+    target_path = _local_path_from_video_url(file_url) or _subtitle_path(
+        drama_slug, ep_number, lang, int(ep_row.get("upload_version") or 1),
+    )
     try:
         target_path.unlink(missing_ok=True)
     except OSError as e:
@@ -1463,7 +1536,9 @@ async def admin_delete_subtitle(
 
     if settings.storage_enabled:
         from .. import publish
-        ep_dir = f"ep-{ep_number}"
+        ep_dir = _ep_dir_from_video_url(file_url, drama_slug) or db.episode_ep_dir(
+            ep_number, int(ep_row.get("upload_version") or 1),
+        )
         try:
             await asyncio.to_thread(
                 publish.unpublish_subtitle_from_staging, drama_slug, ep_dir, lang,
@@ -1583,7 +1658,8 @@ async def admin_batch_upload_subtitles(
             })
             continue
 
-        target_path = _subtitle_path(drama_slug, ep_number, lang)
+        upload_version = int(ep_row.get("upload_version") or 1)
+        target_path = _subtitle_path(drama_slug, ep_number, lang, upload_version)
         target_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             target_path.write_bytes(vtt_bytes)
@@ -1596,7 +1672,7 @@ async def admin_batch_upload_subtitles(
 
         if settings.storage_enabled:
             from .. import publish
-            ep_dir = f"ep-{ep_number}"
+            ep_dir = db.episode_ep_dir(ep_number, upload_version)
             try:
                 await asyncio.to_thread(
                     publish.upload_subtitle_to_staging,
@@ -1614,7 +1690,7 @@ async def admin_batch_upload_subtitles(
                 })
                 continue
 
-        file_url = _subtitle_url(drama_slug, ep_number, lang)
+        file_url = _subtitle_url(drama_slug, ep_number, lang, upload_version)
         db.upsert_subtitle(ep_row["episode_id"], lang, file_url)
         db.mark_episode_dirty(drama_slug, ep_number)
         log.info("batch subtitle slug=%s ep=%s lang=%s bytes=%d file=%s",

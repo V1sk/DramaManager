@@ -102,6 +102,7 @@ class _FakeProvider:
     def __init__(self, existing=None):
         self.store = set(existing or [])
         self.uploaded = []
+        self.copied = []
 
     def upload_file(self, remote_key, local_file_path):
         self.uploaded.append(remote_key)
@@ -111,8 +112,9 @@ class _FakeProvider:
     def list_with_prefix(self, prefix):
         return [k for k in self.store if k.startswith(prefix)]
 
-    def copy_object(self, s, d):  # pragma: no cover
-        pass
+    def copy_object(self, s, d):
+        self.copied.append((s, d))
+        self.store.add(d)
 
     def batch_delete(self, keys):  # pragma: no cover
         pass
@@ -153,6 +155,43 @@ def case_publish_ladder_skip_existing():
         print("OK publish_ladder skip_existing: resume uploads 1/skips 2; full uploads 3")
 
 
+def case_versioned_asset_publish_fallbacks():
+    with tempfile.TemporaryDirectory() as td:
+        _setup_env(Path(td))
+        _reset_app_modules()
+        import app.storage as storage_mod
+        from app import publish
+
+        prov = _FakeProvider(existing=[
+            "Drama/staging/ly/ep-1/cover.jpg",
+            "Drama/staging/ly/ep-1/subtitles/zh-rCN.vtt",
+            "Drama/staging/ly/poster/zh-rCN-v2.jpg",
+        ])
+        storage_mod.provider = prov
+
+        cover_key = publish.publish_cover_to_prod("ly", "ep-1-v2")
+        assert cover_key == "Drama/prod/ly/ep-1-v2/cover.jpg"
+        assert (
+            "Drama/staging/ly/ep-1/cover.jpg",
+            "Drama/prod/ly/ep-1-v2/cover.jpg",
+        ) in prov.copied
+
+        sub_key = publish.publish_subtitle_to_prod("ly", "ep-1-v2", "zh-rCN")
+        assert sub_key == "Drama/prod/ly/ep-1-v2/subtitles/zh-rCN.vtt"
+        assert (
+            "Drama/staging/ly/ep-1/subtitles/zh-rCN.vtt",
+            "Drama/prod/ly/ep-1-v2/subtitles/zh-rCN.vtt",
+        ) in prov.copied
+
+        poster_key = publish.publish_poster_to_prod("ly", "zh-rCN", "zh-rCN-v2.jpg")
+        assert poster_key == "Drama/prod/ly/poster/zh-rCN-v2.jpg"
+        assert (
+            "Drama/staging/ly/poster/zh-rCN-v2.jpg",
+            "Drama/prod/ly/poster/zh-rCN-v2.jpg",
+        ) in prov.copied
+        print("OK versioned cover/subtitle fallback + versioned poster publish")
+
+
 def case_next_ep_excludes_pending_delete():
     with tempfile.TemporaryDirectory() as td:
         _setup_env(Path(td))
@@ -186,6 +225,33 @@ def case_next_ep_excludes_pending_delete():
         row = db.get_by_slug_ep("ly", 1)
         assert row["sync_status"] == "dirty", row["sync_status"]
         print("OK _next_ep_number: live→2, pending_delete→1, upsert resurrects (v2, dirty)")
+
+
+def case_upsert_pending_computes_versioned_cover_url():
+    with tempfile.TemporaryDirectory() as td:
+        _setup_env(Path(td))
+        _reset_app_modules()
+        from app import db
+
+        db.init_db()
+        db.create_language(code="zh-rCN", display_label="简体中文")
+        db.create_drama(slug="ly", name="测试剧", default_lang="zh-rCN")
+        _, v1 = db.upsert_pending(
+            drama_slug="ly", ep_number=1, episode_id="ly-ep-1",
+            duration_ms=1000, cover_url=None, source_filename="v1.mp4",
+        )
+        row1 = db.get_by_slug_ep("ly", 1)
+        assert v1 == 1
+        assert row1["cover_url"] == "/videos/ly/ep-1/cover.jpg"
+
+        _, v2 = db.upsert_pending(
+            drama_slug="ly", ep_number=1, episode_id="ly-ep-1",
+            duration_ms=2000, cover_url=None, source_filename="v2.mp4",
+        )
+        row2 = db.get_by_slug_ep("ly", 1)
+        assert v2 == 2
+        assert row2["cover_url"] == "/videos/ly/ep-1-v2/cover.jpg"
+        print("OK upsert_pending computes versioned cover_url")
 
 
 def case_default_ladder_keeps_reupload_version():
@@ -237,9 +303,19 @@ def test_default_ladder_keeps_reupload_version():
     case_default_ladder_keeps_reupload_version()
 
 
+def test_versioned_asset_publish_fallbacks():
+    case_versioned_asset_publish_fallbacks()
+
+
+def test_upsert_pending_computes_versioned_cover_url():
+    case_upsert_pending_computes_versioned_cover_url()
+
+
 if __name__ == "__main__":
     case_encode_artifacts_complete()
     case_publish_ladder_skip_existing()
+    case_versioned_asset_publish_fallbacks()
     case_next_ep_excludes_pending_delete()
+    case_upsert_pending_computes_versioned_cover_url()
     case_default_ladder_keeps_reupload_version()
     print("\nall cases passed")

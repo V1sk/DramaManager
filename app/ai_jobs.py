@@ -65,12 +65,35 @@ def _label(all_langs: dict[str, str], code: str) -> str:
     return f"{label} ({code})" if label else code
 
 
+def _local_path_from_video_url(url: str | None) -> Path | None:
+    if not url or not url.startswith("/videos/"):
+        return None
+    return settings.out_dir / url.removeprefix("/videos/")
+
+
+def _current_ep_dir(slug: str, ep_number: int) -> str:
+    row = db.get_by_slug_ep(slug, ep_number)
+    version = int(row.get("upload_version") or 1) if row else 1
+    return db.episode_ep_dir(ep_number, version)
+
+
 def _subtitle_path(slug: str, ep_number: int, lang: str) -> Path:
-    return settings.out_dir / slug / f"ep-{ep_number}" / "subtitles" / f"{lang}.vtt"
+    """Existing subtitle path for source reads; falls back to current version."""
+    episode_id = f"{slug}-ep-{ep_number}"
+    for row in db.list_subtitles_for_episode(episode_id):
+        if row["lang_code"] == lang:
+            local = _local_path_from_video_url(row["file_url"])
+            if local is not None:
+                return local
+    return _current_subtitle_path(slug, ep_number, lang)
+
+
+def _current_subtitle_path(slug: str, ep_number: int, lang: str) -> Path:
+    return settings.out_dir / slug / _current_ep_dir(slug, ep_number) / "subtitles" / f"{lang}.vtt"
 
 
 def _subtitle_url(slug: str, ep_number: int, lang: str) -> str:
-    return f"/videos/{slug}/ep-{ep_number}/subtitles/{lang}.vtt"
+    return f"/videos/{slug}/{_current_ep_dir(slug, ep_number)}/subtitles/{lang}.vtt"
 
 
 class _PermanentJobError(Exception):
@@ -180,7 +203,8 @@ async def _run_subtitle(job: dict, all_langs: dict[str, str]) -> None:
     ep_number = job["ep_number"]
     source_lang = job["source_lang"]
     target = job["target_lang"]
-    if db.get_by_slug_ep(slug, ep_number) is None:
+    ep_row = db.get_by_slug_ep(slug, ep_number)
+    if ep_row is None:
         raise _PermanentJobError(f"episode '{slug}/{ep_number}' 不存在")
     src_path = _subtitle_path(slug, ep_number, source_lang)
     if not src_path.is_file():
@@ -202,13 +226,13 @@ async def _run_subtitle(job: dict, all_langs: dict[str, str]) -> None:
     if not vtt_bytes.startswith(b"WEBVTT"):
         vtt_bytes = b"WEBVTT\n\n" + vtt_bytes
 
-    target_path = _subtitle_path(slug, ep_number, target)
+    target_path = _current_subtitle_path(slug, ep_number, target)
     target_path.parent.mkdir(parents=True, exist_ok=True)
     target_path.write_bytes(vtt_bytes)
 
     if settings.storage_enabled:
         from . import publish
-        ep_dir = f"ep-{ep_number}"
+        ep_dir = db.episode_ep_dir(ep_number, int(ep_row.get("upload_version") or 1))
         try:
             await asyncio.to_thread(
                 publish.upload_subtitle_to_staging, slug, ep_dir, target, target_path,

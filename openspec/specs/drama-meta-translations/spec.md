@@ -116,11 +116,11 @@ The drama SHALL exist (else 404). The lang_code SHALL reference an active langua
 
 The handler SHALL:
 1. Determine the new file extension from MIME.
-2. Remove any existing poster file at `OUT_DIR/{slug}/poster/{lang_code}.*` (any extension).
-3. Write the upload to `OUT_DIR/{slug}/poster/{lang_code}.{new_ext}`.
-4. Upsert `translations` with `field='poster'`, `value='/videos/{slug}/poster/{lang_code}.{new_ext}'`.
+2. Determine the next poster asset version for this `(slug, lang_code)`: the first upload MAY use `{lang_code}.{ext}`, and later uploads SHALL use `{lang_code}-v{N}.{ext}`.
+3. Write the upload to `OUT_DIR/{slug}/poster/{versioned_filename}` without deleting earlier versions.
+4. Upsert `translations` with `field='poster'`, `value='/videos/{slug}/poster/{versioned_filename}'`.
 
-If step 3 fails the handler SHALL roll back step 2 (best-effort) and respond 500. The response on success is 200 with the new poster URL.
+If step 3 fails the handler SHALL respond 500 and remove the partially written file if present. The response on success is 200 with the new poster URL.
 
 #### Scenario: first poster upload writes file and translation
 - **GIVEN** drama `ly` with `name` translation in `en`, no poster yet
@@ -128,6 +128,13 @@ If step 3 fails the handler SHALL roll back step 2 (best-effort) and respond 500
 - **THEN** `OUT_DIR/ly/poster/en.jpg` exists
 - **AND** `translations` has `(drama, ly, en, poster, '/videos/ly/poster/en.jpg')`
 - **AND** the response is 200 with that URL
+
+#### Scenario: repeated poster upload writes a versioned file
+- **GIVEN** drama `ly` already has `translations` poster value `/videos/ly/poster/en.jpg`
+- **WHEN** the client posts another `image/jpeg` to `POST /admin/dramas/ly/poster?lang=en`
+- **THEN** `OUT_DIR/ly/poster/en-v2.jpg` exists
+- **AND** the existing `OUT_DIR/ly/poster/en.jpg` file is not removed
+- **AND** `translations` has `(drama, ly, en, poster, '/videos/ly/poster/en-v2.jpg')`
 
 #### Scenario: poster upload rejected without name translation
 - **GIVEN** drama `ly` has no `name` translation in `ja`

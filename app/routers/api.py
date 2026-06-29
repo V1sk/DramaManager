@@ -115,7 +115,8 @@ async def replace_cover(
     if not cover.content_type or not cover.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="cover must be an image/* upload")
 
-    ep_dir = f"ep-{ep_number}"
+    upload_version = int(row.get("upload_version") or 1)
+    ep_dir = db.episode_ep_dir(ep_number, upload_version)
     cover_path = settings.out_dir / drama_slug / ep_dir / "cover.jpg"
     cover_path.parent.mkdir(parents=True, exist_ok=True)
     # Snapshot prior cover so we can restore on OSS failure (assets-to-oss).
@@ -170,6 +171,10 @@ async def replace_cover(
     if backup_made:
         backup_path.unlink(missing_ok=True)
 
+    db.set_episode_cover_url(
+        row["episode_id"],
+        f"/videos/{drama_slug}/{ep_dir}/cover.jpg",
+    )
     db.bump_updated_at(drama_slug, ep_number)
     db.mark_episode_dirty(drama_slug, ep_number)
     return JSONResponse({"ok": True})

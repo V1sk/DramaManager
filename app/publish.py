@@ -46,6 +46,21 @@ class PublishError(Exception):
 
 
 _MAP_URI_RE = re.compile(r'(URI=")([^"]+)(")')
+_VERSIONED_EP_DIR_RE = re.compile(r"^(ep-\d+)-v\d+$")
+
+
+def _legacy_ep_dir(ep_dir: str) -> str | None:
+    """Return `ep-N` for `ep-N-vV`, otherwise None."""
+    m = _VERSIONED_EP_DIR_RE.match(ep_dir)
+    return m.group(1) if m else None
+
+
+def _first_existing_key(candidates: list[str]) -> str | None:
+    prov = _provider()
+    for key in candidates:
+        if prov.list_with_prefix(key):
+            return key
+    return None
 
 
 def rewrite_playlist(text: str, base_url: str) -> str:
@@ -273,10 +288,16 @@ def _put_object(remote_key: str, local_path: Path, label: str) -> None:
         raise PublishError(f"storage upload failed for {label}: {res}")
 
 
-def upload_poster_to_staging(slug: str, lang: str, local_path: Path) -> str:
-    """上传 poster 到 `Drama/staging/{slug}/poster/{lang}.{ext}`。
+def upload_poster_to_staging(
+    slug: str,
+    lang: str,
+    local_path: Path,
+    remote_filename: str | None = None,
+) -> str:
+    """上传 poster 到 `Drama/staging/{slug}/poster/{filename}`。
 
-    `ext` 由 `local_path.suffix` 决定，需带 `.`（例如 `.jpg` / `.png` / `.webp`）。
+    默认 filename 为 `{lang}.{ext}`；重传版本化时调用方可传
+    `{lang}-vN.{ext}`，避免覆盖已同步到 prod 的旧海报。
     返回 staging 公网 URL。上传失败 → PublishError。
 
     调用方负责：
@@ -289,9 +310,10 @@ def upload_poster_to_staging(slug: str, lang: str, local_path: Path) -> str:
     ext = local_path.suffix.lstrip(".")
     if not ext:
         raise PublishError(f"poster local_path has no extension: {local_path}")
-    remote_key = f"{prov.staging_prefix}/{slug}/poster/{lang}.{ext}"
-    _put_object(remote_key, local_path, f"poster {slug}/{lang}.{ext}")
-    return f"{prov.staging_base_url}/{slug}/poster/{lang}.{ext}"
+    filename = remote_filename or f"{lang}.{ext}"
+    remote_key = f"{prov.staging_prefix}/{slug}/poster/{filename}"
+    _put_object(remote_key, local_path, f"poster {slug}/{filename}")
+    return f"{prov.staging_base_url}/{slug}/poster/{filename}"
 
 
 def upload_cover_to_staging(slug: str, ep_dir: str, local_path: Path) -> str:
@@ -327,33 +349,39 @@ def _copy_one(src_key: str, dst_key: str, label: str) -> None:
         raise PublishError(f"storage copy_object failed for {label}: {e}") from e
 
 
-def publish_poster_to_prod(slug: str, lang: str, ext: str) -> str:
+def publish_poster_to_prod(slug: str, lang: str, ext_or_filename: str) -> str:
     """staging→prod 服务端拷贝 poster。返回 prod **对象 key**（不含 host）。
 
-    `ext` 不带 `.`（与 `upload_poster_to_staging` 返回的扩展名一致）。
+    `ext_or_filename` 可为旧调用形态的扩展名 (`jpg`) 或版本化完整文件名
+    (`zh-rCN-v2.jpg`)。
     业务端按自己的 `MEDIA_BASE_URL` 拼前缀。Staging 对象不存在 → PublishError。
     """
     prov = _provider()
-    src_key = f"{prov.staging_prefix}/{slug}/poster/{lang}.{ext}"
-    dst_key = f"{prov.prod_prefix}/{slug}/poster/{lang}.{ext}"
+    filename = ext_or_filename if "." in ext_or_filename else f"{lang}.{ext_or_filename}"
+    src_key = f"{prov.staging_prefix}/{slug}/poster/{filename}"
+    dst_key = f"{prov.prod_prefix}/{slug}/poster/{filename}"
     # Pre-flight check: staging object must exist
     if not prov.list_with_prefix(src_key):
         raise PublishError(
             f"no staging object at {src_key}; "
             f"upload_poster_to_staging must run first"
         )
-    _copy_one(src_key, dst_key, f"poster {slug}/{lang}.{ext}")
+    _copy_one(src_key, dst_key, f"poster {slug}/{filename}")
     return dst_key
 
 
 def publish_cover_to_prod(slug: str, ep_dir: str) -> str:
     """staging→prod 服务端拷贝 cover.jpg。返回 prod **对象 key**。"""
     prov = _provider()
-    src_key = f"{prov.staging_prefix}/{slug}/{ep_dir}/cover.jpg"
+    src_candidates = [f"{prov.staging_prefix}/{slug}/{ep_dir}/cover.jpg"]
+    legacy = _legacy_ep_dir(ep_dir)
+    if legacy:
+        src_candidates.append(f"{prov.staging_prefix}/{slug}/{legacy}/cover.jpg")
+    src_key = _first_existing_key(src_candidates)
     dst_key = f"{prov.prod_prefix}/{slug}/{ep_dir}/cover.jpg"
-    if not prov.list_with_prefix(src_key):
+    if not src_key:
         raise PublishError(
-            f"no staging object at {src_key}; "
+            f"no staging object at {src_candidates[0]}; "
             f"upload_cover_to_staging must run first"
         )
     _copy_one(src_key, dst_key, f"cover {slug}/{ep_dir}")
@@ -363,11 +391,15 @@ def publish_cover_to_prod(slug: str, ep_dir: str) -> str:
 def publish_subtitle_to_prod(slug: str, ep_dir: str, lang: str) -> str:
     """staging→prod 服务端拷贝 subtitle vtt。返回 prod **对象 key**。"""
     prov = _provider()
-    src_key = f"{prov.staging_prefix}/{slug}/{ep_dir}/subtitles/{lang}.vtt"
+    src_candidates = [f"{prov.staging_prefix}/{slug}/{ep_dir}/subtitles/{lang}.vtt"]
+    legacy = _legacy_ep_dir(ep_dir)
+    if legacy:
+        src_candidates.append(f"{prov.staging_prefix}/{slug}/{legacy}/subtitles/{lang}.vtt")
+    src_key = _first_existing_key(src_candidates)
     dst_key = f"{prov.prod_prefix}/{slug}/{ep_dir}/subtitles/{lang}.vtt"
-    if not prov.list_with_prefix(src_key):
+    if not src_key:
         raise PublishError(
-            f"no staging object at {src_key}; "
+            f"no staging object at {src_candidates[0]}; "
             f"upload_subtitle_to_staging must run first"
         )
     _copy_one(src_key, dst_key, f"subtitle {slug}/{ep_dir}/{lang}")
@@ -390,14 +422,22 @@ def unpublish_poster_from_staging(slug: str, lang: str) -> None:
     用于 poster 替换前清掉旧扩展、或单语言海报删除时。Idempotent。
     """
     prov = _provider()
-    keys = prov.list_with_prefix(f"{prov.staging_prefix}/{slug}/poster/{lang}.")
+    pattern = re.compile(rf"^{re.escape(lang)}(?:-v\d+)?\.[^.]+$")
+    keys = [
+        k for k in prov.list_with_prefix(f"{prov.staging_prefix}/{slug}/poster/{lang}")
+        if pattern.match(k.rsplit("/", 1)[-1])
+    ]
     prov.batch_delete(keys)
 
 
 def unpublish_poster_from_prod(slug: str, lang: str) -> None:
     """删 prod 端 `Drama/prod/{slug}/poster/{lang}.*`。Idempotent。"""
     prov = _provider()
-    keys = prov.list_with_prefix(f"{prov.prod_prefix}/{slug}/poster/{lang}.")
+    pattern = re.compile(rf"^{re.escape(lang)}(?:-v\d+)?\.[^.]+$")
+    keys = [
+        k for k in prov.list_with_prefix(f"{prov.prod_prefix}/{slug}/poster/{lang}")
+        if pattern.match(k.rsplit("/", 1)[-1])
+    ]
     prov.batch_delete(keys)
 
 

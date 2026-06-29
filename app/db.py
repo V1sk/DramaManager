@@ -1165,7 +1165,7 @@ def upsert_pending(
     ep_number: int,
     episode_id: str,
     duration_ms: int,
-    cover_url: str,
+    cover_url: str | None,
     source_filename: str,
     width: int | None = None,
     height: int | None = None,
@@ -1196,6 +1196,10 @@ def upsert_pending(
             (drama_slug, ep_number),
         ).fetchone()
         if existing is None:
+            upload_version = 1
+            resolved_cover_url = cover_url or (
+                f"/videos/{drama_slug}/{episode_ep_dir(ep_number, upload_version)}/cover.jpg"
+            )
             conn.execute(
                 """
                 INSERT INTO episodes (
@@ -1207,7 +1211,7 @@ def upsert_pending(
                 """,
                 (
                     drama_slug, ep_number, episode_id,
-                    duration_ms, cover_url, width, height, source_filename,
+                    duration_ms, resolved_cover_url, width, height, source_filename,
                     source_path, now, now,
                 ),
             )
@@ -1218,6 +1222,9 @@ def upsert_pending(
         # then re-encoded today" visible). sync_status flips back to dirty
         # because the new content has not yet been pushed to prod.
         new_version = (existing["upload_version"] or 1) + 1
+        resolved_cover_url = cover_url or (
+            f"/videos/{drama_slug}/{episode_ep_dir(ep_number, new_version)}/cover.jpg"
+        )
         conn.execute(
             """
             UPDATE episodes SET
@@ -1242,7 +1249,7 @@ def upsert_pending(
             WHERE id = ?
             """,
             (
-                episode_id, duration_ms, cover_url,
+                episode_id, duration_ms, resolved_cover_url,
                 width, height, source_filename, source_path,
                 new_version, now, existing["id"],
             ),
@@ -1252,6 +1259,21 @@ def upsert_pending(
             old_source if (old_source and old_source != source_path) else None
         )
         return old_source_to_delete, new_version
+
+
+def set_episode_cover_url(episode_id: str, cover_url: str) -> None:
+    """Update the persisted cover URL after a manual cover replacement.
+
+    Reupload-versioning keeps cover assets under the current episode directory
+    (`ep-{n}` for v1, `ep-{n}-v{V}` for v2+), so replacement endpoints may need
+    to repair old rows that still carry the legacy v1 URL.
+    """
+    now = _now_iso()
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE episodes SET cover_url=?, updated_at=? WHERE episode_id=?",
+            (cover_url, now, episode_id),
+        )
 
 
 def set_status(
