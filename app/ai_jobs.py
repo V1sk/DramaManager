@@ -19,7 +19,7 @@ from .config import settings
 log = logging.getLogger("hls.ai_jobs")
 
 _SUBTITLE_CHUNK = 40          # cues per AI call (equal-length contract easier; bounds size)
-_MAX_ATTEMPTS = 3            # per-job attempts (1 try + 2 retries) for transient errors
+_MAX_ATTEMPTS = 3            # per-job attempts (1 try + 2 retries) for retryable errors
 _BACKOFF_SECONDS = (2, 8, 32)  # capped exponential backoff between retries
 
 

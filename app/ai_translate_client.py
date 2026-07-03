@@ -136,13 +136,16 @@ def _parse_json_object(text: str) -> dict:
         start = s.find("{")
         end = s.rfind("}")
         if start == -1 or end == -1 or end <= start:
-            raise AITranslateError("AI 翻译返回的不是有效 JSON")
+            raise AITranslateError("AI 翻译返回的不是有效 JSON", retryable=True)
         try:
             obj = json.loads(s[start : end + 1])
         except ValueError as e:
-            raise AITranslateError(f"AI 翻译返回的 JSON 无法解析：{e}") from e
+            raise AITranslateError(
+                f"AI 翻译返回的 JSON 无法解析：{e}",
+                retryable=True,
+            ) from e
     if not isinstance(obj, dict):
-        raise AITranslateError("AI 翻译返回的 JSON 顶层不是对象")
+        raise AITranslateError("AI 翻译返回的 JSON 顶层不是对象", retryable=True)
     return obj
 
 
@@ -157,18 +160,21 @@ def _parse_json_array(text: str) -> list:
         start = s.find("[")
         end = s.rfind("]")
         if start == -1 or end == -1 or end <= start:
-            raise AITranslateError("字幕翻译返回的不是 JSON 数组")
+            raise AITranslateError("字幕翻译返回的不是 JSON 数组", retryable=True)
         try:
             obj = json.loads(s[start : end + 1])
         except ValueError as e:
-            raise AITranslateError(f"字幕翻译返回的 JSON 数组无法解析：{e}") from e
+            raise AITranslateError(
+                f"字幕翻译返回的 JSON 数组无法解析：{e}",
+                retryable=True,
+            ) from e
     if isinstance(obj, dict):
         for v in obj.values():
             if isinstance(v, list):
                 obj = v
                 break
     if not isinstance(obj, list):
-        raise AITranslateError("字幕翻译返回的 JSON 不是数组")
+        raise AITranslateError("字幕翻译返回的 JSON 不是数组", retryable=True)
     return obj
 
 
@@ -214,12 +220,13 @@ async def _chat(messages: list) -> str:
                 retryable=(code == 429),
             )
         snippet = json.dumps(data, ensure_ascii=False)[:300] if isinstance(data, dict) else str(data)[:300]
-        raise AITranslateError(f"AI 翻译响应缺少 choices：{snippet}")
+        raise AITranslateError(f"AI 翻译响应缺少 choices：{snippet}", retryable=True)
     try:
         content = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as e:
         raise AITranslateError(
-            f"AI 翻译响应结构异常：{json.dumps(data, ensure_ascii=False)[:300]}"
+            f"AI 翻译响应结构异常：{json.dumps(data, ensure_ascii=False)[:300]}",
+            retryable=True,
         ) from e
     return _content_to_text(content)
 
@@ -273,7 +280,10 @@ async def translate_texts(
         if clean:
             out[code] = clean
     if not out:
-        raise AITranslateError("AI 翻译未返回任何可用的目标语言译文（格式不符或为空）")
+        raise AITranslateError(
+            "AI 翻译未返回任何可用的目标语言译文（格式不符或为空）",
+            retryable=True,
+        )
     return out
 
 

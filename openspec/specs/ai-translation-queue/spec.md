@@ -43,13 +43,18 @@ The system SHALL process `queued` jobs with a pool of background worker coroutin
 - **WHEN** `AI_TRANSLATE_CONCURRENCY` is set to a non-integer or value `< 1`
 - **THEN** startup fails fast with a clear error
 
-### Requirement: Retry with backoff on transient and rate-limit errors
+### Requirement: Retry with backoff on retryable AI errors
 
-A worker SHALL retry a job a bounded number of times with backoff when the provider returns a transient error or rate-limit (e.g. HTTP/`code` 429), incrementing `attempts`. After exhausting retries the job SHALL be marked `failed` with the provider's error surfaced in `error`.
+A worker SHALL retry a job a bounded number of times with backoff when the provider returns a transient error, rate-limit (e.g. HTTP/`code` 429), or model-output format error (invalid JSON, wrong top-level shape, missing expected fields, empty usable translation), incrementing `attempts`. The default bound is one initial attempt plus two automatic retries. After exhausting retries the job SHALL be marked `failed` with the provider/model error surfaced in `error`.
 
 #### Scenario: Rate-limit triggers backoff retry
 - **WHEN** a provider call returns a 429 / rate-limit envelope
 - **THEN** the worker waits with backoff and retries up to the bounded limit before failing the job
+
+#### Scenario: Model output format error triggers automatic retry
+- **WHEN** the model returns text that cannot be parsed as the required JSON object/array, or omits the requested translation fields
+- **THEN** the worker retries automatically up to two more times
+- **AND** only after those retries fail is the job marked `failed` for manual retry
 
 #### Scenario: Permanent error surfaces real reason
 - **WHEN** the provider returns a non-retryable error envelope (e.g. insufficient credits)
@@ -106,4 +111,3 @@ Completed translation jobs SHALL only write to the staging editor state (transla
 #### Scenario: Completion does not bypass sync
 - **WHEN** a translation job completes successfully
 - **THEN** the entity becomes `dirty` and prod is updated only later, by the existing business-sync worker when the operator syncs
-
