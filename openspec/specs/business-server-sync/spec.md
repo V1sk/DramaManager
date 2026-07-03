@@ -165,7 +165,8 @@ The business server (separate codebase to be built later) SHALL expose these fou
     "<lang_code>": {
       "name": str,                             // required (the drama-meta-translations invariant)
       "synopsis": str | null,
-      "poster_url": str | null                 // absolute https URL the business server pulls
+      "poster_key": str | null,                // prod object key for portrait poster
+      "poster_landscape_key": str | null       // prod object key for landscape poster
     }
   },
   "tags":   [ {"slug": str, "default_lang": str, "translations": {"<lang_code>": str}} ],
@@ -174,7 +175,7 @@ The business server (separate codebase to be built later) SHALL expose these fou
 }
 ```
 
-The business server MUST: validate the API key; pull every non-null `poster_url` (any pull failure → 502 with the failing URL named); upsert language rows; upsert tag rows + tag translations; upsert actor rows + actor translations; upsert drama row + drama translations; persist poster bytes locally. On success → 200 `{"ok": true, "client_updated_at": "...", "synced_at": "..."}`. If the supplied `client_updated_at` is older than what is already stored → 409 (defensive against out-of-order overwrites).
+The business server MUST: validate the API key; upsert language rows; upsert tag rows + tag translations; upsert actor rows + actor translations; upsert drama row + drama translations; persist `poster_key` / `poster_landscape_key` as opaque prod object keys. On success → 200 `{"ok": true, "client_updated_at": "...", "synced_at": "..."}`. If the supplied `client_updated_at` is older than what is already stored → 409 (defensive against out-of-order overwrites).
 
 **`DELETE /sync/dramas/{slug}`** — no body. Removes the drama and every cascading row (episodes, translations, tags-for-this-drama-only relations, posters on disk). Returns 204 on success or if the drama did not exist (idempotent). 401 on key mismatch.
 

@@ -1062,29 +1062,73 @@ _POSTER_MIME_EXT = {
     "image/png": "png",
     "image/webp": "webp",
 }
+_POSTER_VARIANTS = {
+    "portrait": {
+        "dir": "poster",
+        "field": "poster",
+        "label": "poster",
+    },
+    "landscape": {
+        "dir": "poster-landscape",
+        "field": "poster_landscape",
+        "label": "landscape poster",
+    },
+}
 
 
-def _poster_dir(drama_slug: str) -> Path:
-    return settings.out_dir / drama_slug / "poster"
+def _poster_variant_dir_name(variant: str) -> str:
+    return _POSTER_VARIANTS[variant]["dir"]
+
+
+def _poster_dir(drama_slug: str, variant: str = "portrait") -> Path:
+    return settings.out_dir / drama_slug / _poster_variant_dir_name(variant)
 
 
 def _poster_filename(lang_code: str, version: int, ext: str) -> str:
     return f"{lang_code}.{ext}" if version <= 1 else f"{lang_code}-v{version}.{ext}"
 
 
-def _poster_url(drama_slug: str, filename: str) -> str:
-    return f"/videos/{drama_slug}/poster/{filename}"
+def _poster_url(drama_slug: str, filename: str, variant: str = "portrait") -> str:
+    return f"/videos/{drama_slug}/{_poster_variant_dir_name(variant)}/{filename}"
 
 
-def _next_poster_version(drama_slug: str, lang_code: str) -> int:
+def _get_drama_poster_url(drama_slug: str, lang_code: str, variant: str) -> str | None:
+    if variant == "landscape":
+        return db.get_drama_landscape_poster_url(drama_slug, lang_code)
+    return db.get_drama_poster_url(drama_slug, lang_code)
+
+
+def _upsert_drama_poster_url(
+    drama_slug: str,
+    lang_code: str,
+    url: str,
+    variant: str,
+) -> None:
+    if variant == "landscape":
+        db.upsert_drama_landscape_poster(drama_slug, lang_code, url)
+    else:
+        db.upsert_drama_poster(drama_slug, lang_code, url)
+
+
+def _delete_drama_poster_url(drama_slug: str, lang_code: str, variant: str) -> bool:
+    if variant == "landscape":
+        return db.delete_drama_landscape_poster(drama_slug, lang_code)
+    return db.delete_drama_poster(drama_slug, lang_code)
+
+
+def _next_poster_version(
+    drama_slug: str,
+    lang_code: str,
+    variant: str = "portrait",
+) -> int:
     pattern = re.compile(rf"^{re.escape(lang_code)}(?:-v(\d+))?\.[^.]+$")
     max_seen = 0
-    current = db.get_drama_poster_url(drama_slug, lang_code)
+    current = _get_drama_poster_url(drama_slug, lang_code, variant)
     if current:
         name = current.rsplit("/", 1)[-1]
         if m := pattern.match(name):
             max_seen = max(max_seen, int(m.group(1) or "1"))
-    poster_dir = _poster_dir(drama_slug)
+    poster_dir = _poster_dir(drama_slug, variant)
     if poster_dir.is_dir():
         for p in poster_dir.iterdir():
             if not p.is_file():
@@ -1094,13 +1138,18 @@ def _next_poster_version(drama_slug: str, lang_code: str) -> int:
     return max_seen + 1 if max_seen else 1
 
 
-def _remove_existing_poster_files(drama_slug: str, lang_code: str) -> list[str]:
-    """Remove any `OUT_DIR/{drama_slug}/poster/{lang_code}.*` file regardless
-    of extension. Returns a list of paths that failed to delete (warnings).
+def _remove_existing_poster_files(
+    drama_slug: str,
+    lang_code: str,
+    variant: str = "portrait",
+) -> list[str]:
+    """Remove any poster variant file for `lang_code` regardless of extension.
+
+    Returns a list of paths that failed to delete (warnings).
     Tolerates missing files.
     """
     warnings: list[str] = []
-    poster_dir = _poster_dir(drama_slug)
+    poster_dir = _poster_dir(drama_slug, variant)
     if not poster_dir.is_dir():
         return warnings
     pattern = re.compile(rf"^{re.escape(lang_code)}(?:-v\d+)?\.[^.]+$")
@@ -1112,6 +1161,13 @@ def _remove_existing_poster_files(drama_slug: str, lang_code: str) -> list[str]:
         except OSError as e:
             log.warning("failed to remove poster file %s: %s", p, e)
             warnings.append(str(p))
+    return warnings
+
+
+def _remove_all_poster_variant_files(drama_slug: str, lang_code: str) -> list[str]:
+    warnings: list[str] = []
+    for variant in _POSTER_VARIANTS:
+        warnings.extend(_remove_existing_poster_files(drama_slug, lang_code, variant))
     return warnings
 
 
@@ -1246,8 +1302,21 @@ async def admin_delete_drama_translation(
         raise HTTPException(status_code=404, detail=str(e))
     except db.DramaDefaultTranslationProtectedError as e:
         raise HTTPException(status_code=409, detail=str(e))
-    # Translation rows are gone; now remove the on-disk poster file (any ext).
-    warnings = _remove_existing_poster_files(drama_slug, lang_code)
+    # Translation rows are gone; now remove both poster variants on disk.
+    warnings = _remove_all_poster_variant_files(drama_slug, lang_code)
+    if settings.storage_enabled:
+        from .. import publish
+        for variant, meta in _POSTER_VARIANTS.items():
+            try:
+                await asyncio.to_thread(
+                    publish.unpublish_poster_from_staging,
+                    drama_slug, lang_code, meta["dir"],
+                )
+            except Exception as e:  # noqa: BLE001 — best-effort cleanup
+                log.warning(
+                    "OSS staging cleanup failed for %s %s/%s: %s",
+                    meta["label"], drama_slug, lang_code, e,
+                )
     db.mark_drama_dirty(drama_slug)
     log.info("deleted drama translation slug=%s lang=%s warnings=%d",
              drama_slug, lang_code, len(warnings))
@@ -1258,6 +1327,7 @@ async def admin_delete_drama_translation(
 async def admin_upload_drama_poster(
     drama_slug: str = PathParam(..., pattern=r"^[a-z0-9][a-z0-9-]*$"),
     lang: str = Query(..., pattern=_LANG_PATTERN),
+    variant: str = Query("portrait", pattern=r"^(portrait|landscape)$"),
     file: UploadFile = File(...),
 ) -> JSONResponse:
     # Drama must exist
@@ -1289,9 +1359,9 @@ async def admin_upload_drama_poster(
 
     # Versioned write: keep prior poster files around so already-synced prod
     # keys remain valid until the business server receives the new key.
-    poster_dir = _poster_dir(drama_slug)
+    poster_dir = _poster_dir(drama_slug, variant)
     poster_dir.mkdir(parents=True, exist_ok=True)
-    poster_version = _next_poster_version(drama_slug, lang)
+    poster_version = _next_poster_version(drama_slug, lang, variant)
     poster_filename = _poster_filename(lang, poster_version, new_ext)
     target_path = poster_dir / poster_filename
     try:
@@ -1313,51 +1383,79 @@ async def admin_upload_drama_poster(
             await asyncio.to_thread(
                 publish.upload_poster_to_staging,
                 drama_slug, lang, target_path, poster_filename,
+                _poster_variant_dir_name(variant),
             )
         except publish.PublishError as e:
-            log.error("OSS staging upload failed for poster %s/%s: %s", drama_slug, lang, e)
+            log.error(
+                "OSS staging upload failed for %s %s/%s: %s",
+                _POSTER_VARIANTS[variant]["label"], drama_slug, lang, e,
+            )
             target_path.unlink(missing_ok=True)
             raise HTTPException(
                 status_code=500,
                 detail=f"failed to mirror poster to OSS staging: {e}",
             )
         except Exception as e:  # noqa: BLE001
-            log.exception("OSS unexpected error for poster %s/%s", drama_slug, lang)
+            log.exception(
+                "OSS unexpected error for %s %s/%s",
+                _POSTER_VARIANTS[variant]["label"], drama_slug, lang,
+            )
             target_path.unlink(missing_ok=True)
             raise HTTPException(
                 status_code=500,
                 detail=f"unexpected OSS error mirroring poster: {e}",
             )
 
-    url = _poster_url(drama_slug, poster_filename)
-    db.upsert_drama_poster(drama_slug, lang, url)
+    url = _poster_url(drama_slug, poster_filename, variant)
+    _upsert_drama_poster_url(drama_slug, lang, url, variant)
     db.mark_drama_dirty(drama_slug)
-    log.info("uploaded drama poster slug=%s lang=%s ext=%s", drama_slug, lang, new_ext)
-    return JSONResponse({"slug": drama_slug, "lang_code": lang, "poster_url": url})
+    log.info(
+        "uploaded drama %s slug=%s lang=%s ext=%s",
+        _POSTER_VARIANTS[variant]["label"], drama_slug, lang, new_ext,
+    )
+    return JSONResponse({
+        "slug": drama_slug,
+        "lang_code": lang,
+        "variant": variant,
+        "poster_url": url,
+    })
 
 
 @router.delete("/admin/dramas/{drama_slug}/poster")
 async def admin_delete_drama_poster(
     drama_slug: str = PathParam(..., pattern=r"^[a-z0-9][a-z0-9-]*$"),
     lang: str = Query(..., pattern=_LANG_PATTERN),
+    variant: str = Query("portrait", pattern=r"^(portrait|landscape)$"),
 ) -> Response:
     if db.get_drama(drama_slug) is None:
         raise HTTPException(status_code=404, detail=f"drama '{drama_slug}' not found")
-    if db.get_drama_poster_url(drama_slug, lang) is None:
+    if _get_drama_poster_url(drama_slug, lang, variant) is None:
         raise HTTPException(
             status_code=404,
-            detail=f"drama '{drama_slug}' has no poster in '{lang}'",
+            detail=(
+                f"drama '{drama_slug}' has no "
+                f"{_POSTER_VARIANTS[variant]['label']} in '{lang}'"
+            ),
         )
-    db.delete_drama_poster(drama_slug, lang)
-    _remove_existing_poster_files(drama_slug, lang)
+    _delete_drama_poster_url(drama_slug, lang, variant)
+    _remove_existing_poster_files(drama_slug, lang, variant)
     if settings.storage_enabled:
         from .. import publish
         try:
-            await asyncio.to_thread(publish.unpublish_poster_from_staging, drama_slug, lang)
+            await asyncio.to_thread(
+                publish.unpublish_poster_from_staging,
+                drama_slug, lang, _poster_variant_dir_name(variant),
+            )
         except Exception as e:  # noqa: BLE001 — best-effort, don't fail the API
-            log.warning("OSS staging cleanup failed for poster %s/%s: %s", drama_slug, lang, e)
+            log.warning(
+                "OSS staging cleanup failed for %s %s/%s: %s",
+                _POSTER_VARIANTS[variant]["label"], drama_slug, lang, e,
+            )
     db.mark_drama_dirty(drama_slug)
-    log.info("deleted drama poster slug=%s lang=%s", drama_slug, lang)
+    log.info(
+        "deleted drama %s slug=%s lang=%s",
+        _POSTER_VARIANTS[variant]["label"], drama_slug, lang,
+    )
     return Response(status_code=204)
 
 

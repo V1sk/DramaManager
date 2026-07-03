@@ -70,6 +70,11 @@
                 <input type="file" name="poster" accept="image/jpeg,image/png,image/webp">
                 <span class="text-[11px] text-on-surface-variant/70">可选；推荐 800×1200 JPG/PNG/WebP；后续可为其它语言单独上传</span>
             </div>
+            <div class="flex flex-col gap-1.5">
+                <label class="text-body-sm text-on-surface-variant">横版海报</label>
+                <input type="file" name="poster_landscape" accept="image/jpeg,image/png,image/webp">
+                <span class="text-[11px] text-on-surface-variant/70">可选；推荐 3:2 JPG/PNG/WebP</span>
+            </div>
         </div>
     </div>
 
@@ -168,6 +173,7 @@ document.getElementById('create-form').addEventListener('submit', async (ev) => 
     }
     const synopsis = form.synopsis.value.trim();
     const posterFile = form.poster.files[0] || null;
+    const posterLandscapeFile = form.poster_landscape.files[0] || null;
     const tagSlugs = Array.from(form.tags.selectedOptions).map(o => o.value);
     const actorSlugs = Array.from(form.actors.selectedOptions).map(o => o.value);
 
@@ -231,7 +237,19 @@ document.getElementById('create-form').addEventListener('submit', async (ev) => 
         } catch (e) { partialErrors.push('海报上传出错: ' + e); }
     }
 
-    // Step 4: tags
+    // Step 4: landscape poster (optional)
+    if (posterLandscapeFile) {
+        progress.textContent = '上传横版海报…';
+        try {
+            const fd = new FormData(); fd.append('file', posterLandscapeFile);
+            const res = await fetch(`/admin/dramas/${encodeURIComponent(slug)}/poster?lang=${encodeURIComponent(defaultLang)}&variant=landscape`, {
+                method: 'POST', body: fd,
+            });
+            if (!res.ok) partialErrors.push(`横版海报上传失败 (${res.status}): ${await res.text()}`);
+        } catch (e) { partialErrors.push('横版海报上传出错: ' + e); }
+    }
+
+    // Step 5: tags
     if (tagSlugs.length) {
         progress.textContent = '关联标签…';
         try {
@@ -239,7 +257,7 @@ document.getElementById('create-form').addEventListener('submit', async (ev) => 
         } catch (e) { partialErrors.push('关联标签失败: ' + (e.body && e.body.detail || e)); }
     }
 
-    // Step 5: actors
+    // Step 6: actors
     if (actorSlugs.length) {
         progress.textContent = '关联演员…';
         try {

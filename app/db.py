@@ -850,7 +850,8 @@ def upsert_drama_translation(
         the call MUST include `name` (else DramaTranslationFreshNameRequiredError).
       - lang_code must reference an active language.
 
-    Returns the resulting per-language content `{lang_code, name?, synopsis?, poster?}`.
+    Returns the resulting per-language content
+    `{lang_code, name?, synopsis?, poster?, poster_landscape?}`.
     """
     if get_drama(slug) is None:
         raise DramaNotFoundError(f"drama '{slug}' not found")
@@ -906,15 +907,21 @@ def upsert_drama_translation(
                 pass
             raise
 
-        # Return the resulting per-lang content (name/synopsis/poster)
+        # Return the resulting per-lang content (name/synopsis/poster variants)
         rows = conn.execute(
             "SELECT field, value FROM translations "
             "WHERE entity_type='drama' AND entity_id=? AND lang_code=?",
             (slug, lang_code),
         ).fetchall()
-    out: dict = {"lang_code": lang_code, "name": None, "synopsis": None, "poster": None}
+    out: dict = {
+        "lang_code": lang_code,
+        "name": None,
+        "synopsis": None,
+        "poster": None,
+        "poster_landscape": None,
+    }
     for r in rows:
-        if r["field"] in ("name", "synopsis", "poster"):
+        if r["field"] in ("name", "synopsis", "poster", "poster_landscape"):
             out[r["field"]] = r["value"]
     return out
 
@@ -948,7 +955,7 @@ def delete_drama_translation(slug: str, lang_code: str) -> bool:
 
 def list_drama_translations(slug: str) -> dict:
     """Return per-language nested content for a drama:
-        {lang_code: {name, synopsis, poster}, ...}
+        {lang_code: {name, synopsis, poster, poster_landscape}, ...}
     Each field is null when no translation row exists; ordering of keys is by
     `lang_code ASC`. Languages with no translation rows for this drama are absent.
 
@@ -960,14 +967,14 @@ def list_drama_translations(slug: str) -> dict:
         rows = conn.execute(
             "SELECT lang_code, field, value FROM translations "
             "WHERE entity_type='drama' AND entity_id=? "
-            "AND field IN ('name', 'synopsis', 'poster')",
+            "AND field IN ('name', 'synopsis', 'poster', 'poster_landscape')",
             (slug,),
         ).fetchall()
     out: dict[str, dict] = {}
     for r in rows:
         bucket = out.setdefault(
             r["lang_code"],
-            {"name": None, "synopsis": None, "poster": None},
+            {"name": None, "synopsis": None, "poster": None, "poster_landscape": None},
         )
         bucket[r["field"]] = r["value"]
     # Stable key order by lang_code
@@ -990,6 +997,17 @@ def upsert_drama_poster(slug: str, lang_code: str, url: str) -> None:
         )
 
 
+def upsert_drama_landscape_poster(slug: str, lang_code: str, url: str) -> None:
+    """Upsert the horizontal poster translation row for `(slug, lang_code)`."""
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO translations(entity_type, entity_id, lang_code, field, value) "
+            "VALUES ('drama', ?, ?, 'poster_landscape', ?) "
+            "ON CONFLICT(entity_type, entity_id, lang_code, field) DO UPDATE SET value=excluded.value",
+            (slug, lang_code, url),
+        )
+
+
 def delete_drama_poster(slug: str, lang_code: str) -> bool:
     """Delete the `(drama, slug, lang_code, poster)` translation row only.
     Caller handles the on-disk file. Returns True if a row was deleted.
@@ -1003,12 +1021,34 @@ def delete_drama_poster(slug: str, lang_code: str) -> bool:
     return (cur.rowcount or 0) > 0
 
 
+def delete_drama_landscape_poster(slug: str, lang_code: str) -> bool:
+    """Delete the `(drama, slug, lang_code, poster_landscape)` row only."""
+    with _connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM translations "
+            "WHERE entity_type='drama' AND entity_id=? AND lang_code=? AND field='poster_landscape'",
+            (slug, lang_code),
+        )
+    return (cur.rowcount or 0) > 0
+
+
 def get_drama_poster_url(slug: str, lang_code: str) -> str | None:
     """Return the stored poster URL for `(slug, lang_code)`, or None."""
     with _connect() as conn:
         row = conn.execute(
             "SELECT value FROM translations "
             "WHERE entity_type='drama' AND entity_id=? AND lang_code=? AND field='poster'",
+            (slug, lang_code),
+        ).fetchone()
+    return row["value"] if row else None
+
+
+def get_drama_landscape_poster_url(slug: str, lang_code: str) -> str | None:
+    """Return the stored horizontal poster URL for `(slug, lang_code)`, or None."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT value FROM translations "
+            "WHERE entity_type='drama' AND entity_id=? AND lang_code=? AND field='poster_landscape'",
             (slug, lang_code),
         ).fetchone()
     return row["value"] if row else None
@@ -1990,6 +2030,20 @@ def list_drama_actors(drama_slug: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+def _subtitle_file_exists(file_url: str) -> bool:
+    """Return whether a subtitle file URL is backed by a local file.
+
+    Subtitle rows are used by the admin player and SDK API as `/videos/...`
+    static-file URLs. If the DB row survives but the file is gone, surfacing it
+    creates a broken detail-page entry. Non-local legacy values are treated as
+    existing because this helper cannot verify external storage.
+    """
+    if not file_url.startswith("/videos/"):
+        return True
+    rel = file_url.removeprefix("/videos/")
+    return (settings.out_dir / rel).is_file()
+
+
 def upsert_subtitle(episode_id: str, lang_code: str, file_url: str) -> dict:
     """Upsert a subtitle row keyed by (episode_id, lang_code). Sets `uploaded_at`
     to the current timestamp on every call (insert or update). Returns the
@@ -2028,7 +2082,7 @@ def list_subtitles_for_episode(episode_id: str) -> list[dict]:
     """
     with _connect() as conn:
         rows = conn.execute(sql, (episode_id,)).fetchall()
-    return [dict(r) for r in rows]
+    return [dict(r) for r in rows if _subtitle_file_exists(r["file_url"])]
 
 
 def list_subtitles_for_slug_ep(drama_slug: str, ep_number: int) -> list[dict]:

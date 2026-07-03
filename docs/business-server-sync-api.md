@@ -53,12 +53,14 @@ HLS 管理服务器通过 4 个 HTTP 接口把剧 / 集 / 翻译 / 标签 / 演�
     "zh-rCN": {
       "name": "琅琊榜",
       "synopsis": "豪门复仇 ...",
-      "poster_key": "Drama/prod/ly/poster/zh-rCN.jpg"
+      "poster_key": "Drama/prod/ly/poster/zh-rCN.jpg",
+      "poster_landscape_key": "Drama/prod/ly/poster-landscape/zh-rCN.jpg"
     },
     "en": {
       "name": "Langya Bang",
       "synopsis": null,
-      "poster_key": null
+      "poster_key": null,
+      "poster_landscape_key": null
     }
   },
   "tags": [
@@ -88,12 +90,13 @@ HLS 管理服务器通过 4 个 HTTP 接口把剧 / 集 / 翻译 / 标签 / 演�
 | `default_lang` | str | 默认语言 code（必须在 `languages` 里） |
 | `free_episodes` | int | 前 N 集免费，第 N+1 集起付费；`0` = 全部付费 |
 | `client_updated_at` | str | HLS 端 `dramas.updated_at`，乱序保护 |
-| `translations` | object | 按 `lang_code` 索引；`name` 必填，`synopsis` / `poster_key` 可空 |
+| `translations` | object | 按 `lang_code` 索引；`name` 必填，`synopsis` / `poster_key` / `poster_landscape_key` 可空 |
 | `translations[lang].poster_key` | str ∣ null | **TOS prod 对象 key**，例如 `Drama/prod/ly/poster/zh-rCN.jpg`；业务端存进 DB，给客户端时拼 `MEDIA_BASE_URL` |
+| `translations[lang].poster_landscape_key` | str ∣ null | 横版海报 **TOS prod 对象 key**，例如 `Drama/prod/ly/poster-landscape/zh-rCN.jpg`；没有上传横版时为 `null` |
 | `tags[]` / `actors[]` | array | 各自含 `slug` + `default_lang` + 全部语言翻译 |
 | `languages[]` | array | 该剧涉及的全部语言（drama / tag / actor / 字幕语言的并集） |
 
-**处理顺序**：upsert `languages` → `tags` → `actors` → `dramas` + 翻译。`poster_key` opaque 存进 DB；给客户端拼 URL = `f"{MEDIA_BASE_URL}/{poster_key}"`。
+**处理顺序**：upsert `languages` → `tags` → `actors` → `dramas` + 翻译。`poster_key` / `poster_landscape_key` opaque 存进 DB；给客户端拼 URL = `f"{MEDIA_BASE_URL}/{key}"`。
 
 **响应**：
 

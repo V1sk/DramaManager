@@ -183,6 +183,7 @@ def case_versioned_asset_publish_fallbacks():
             "Drama/prod/ly/ep-1-v2/cover.jpg",
             "Drama/prod/ly/ep-1-v2/subtitles/zh-rCN.vtt",
             "Drama/prod/ly/poster/zh-rCN-v2.jpg",
+            "Drama/prod/ly/poster-landscape/zh-rCN-v2.jpg",
         ])
         storage_mod.provider = direct
         assert publish.publish_cover_to_prod("ly", "ep-1-v2") == "Drama/prod/ly/ep-1-v2/cover.jpg"
@@ -192,12 +193,16 @@ def case_versioned_asset_publish_fallbacks():
         assert publish.publish_poster_to_prod("ly", "zh-rCN", "zh-rCN-v2.jpg") == (
             "Drama/prod/ly/poster/zh-rCN-v2.jpg"
         )
+        assert publish.publish_poster_to_prod(
+            "ly", "zh-rCN", "zh-rCN-v2.jpg", "poster-landscape",
+        ) == "Drama/prod/ly/poster-landscape/zh-rCN-v2.jpg"
         assert direct.copied == []
 
         prov = _FakeProvider(existing=[
             "Drama/staging/ly/ep-1/cover.jpg",
             "Drama/staging/ly/ep-1/subtitles/zh-rCN.vtt",
             "Drama/staging/ly/poster/zh-rCN-v2.jpg",
+            "Drama/staging/ly/poster-landscape/zh-rCN-v2.jpg",
         ])
         storage_mod.provider = prov
 
@@ -220,6 +225,14 @@ def case_versioned_asset_publish_fallbacks():
         assert (
             "Drama/staging/ly/poster/zh-rCN-v2.jpg",
             "Drama/prod/ly/poster/zh-rCN-v2.jpg",
+        ) in prov.copied
+        landscape_key = publish.publish_poster_to_prod(
+            "ly", "zh-rCN", "zh-rCN-v2.jpg", "poster-landscape",
+        )
+        assert landscape_key == "Drama/prod/ly/poster-landscape/zh-rCN-v2.jpg"
+        assert (
+            "Drama/staging/ly/poster-landscape/zh-rCN-v2.jpg",
+            "Drama/prod/ly/poster-landscape/zh-rCN-v2.jpg",
         ) in prov.copied
         print("OK versioned cover/subtitle fallback + versioned poster publish")
 
@@ -286,6 +299,67 @@ def case_upsert_pending_computes_versioned_cover_url():
         print("OK upsert_pending computes versioned cover_url")
 
 
+def case_missing_subtitle_file_is_hidden():
+    with tempfile.TemporaryDirectory() as td:
+        _setup_env(Path(td))
+        _reset_app_modules()
+        from app import db
+        from app.config import settings
+
+        db.init_db()
+        db.create_language(code="zh-rCN", display_label="简体中文")
+        db.create_language(code="en-US", display_label="English")
+        db.create_drama(slug="ly", name="测试剧", default_lang="zh-rCN")
+        db.upsert_pending(
+            drama_slug="ly", ep_number=1, episode_id="ly-ep-1",
+            duration_ms=1000, cover_url=None, source_filename="v1.mp4",
+        )
+        db.upsert_subtitle("ly-ep-1", "en-US", "/videos/ly/ep-1/subtitles/en-US.vtt")
+        assert db.list_subtitles_for_slug_ep("ly", 1) == []
+
+        p = settings.out_dir / "ly" / "ep-1" / "subtitles" / "en-US.vtt"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nhello\n")
+        rows = db.list_subtitles_for_slug_ep("ly", 1)
+        assert [r["lang_code"] for r in rows] == ["en-US"]
+        print("OK missing subtitle files are hidden until local file exists")
+
+
+def case_landscape_poster_sync_payload():
+    with tempfile.TemporaryDirectory() as td:
+        _setup_env(Path(td))
+        _reset_app_modules()
+        from app import db
+        from app.sync import build_drama_payload
+
+        db.init_db()
+        db.create_language(code="zh-rCN", display_label="简体中文")
+        db.create_drama(slug="ly", name="测试剧", default_lang="zh-rCN")
+        db.upsert_drama_poster("ly", "zh-rCN", "/videos/ly/poster/zh-rCN.jpg")
+        db.upsert_drama_landscape_poster(
+            "ly", "zh-rCN", "/videos/ly/poster-landscape/zh-rCN-v2.jpg",
+        )
+        translations = db.list_drama_translations("ly")
+        assert translations["zh-rCN"]["poster"] == "/videos/ly/poster/zh-rCN.jpg"
+        assert translations["zh-rCN"]["poster_landscape"] == (
+            "/videos/ly/poster-landscape/zh-rCN-v2.jpg"
+        )
+
+        payload = build_drama_payload(
+            "ly",
+            poster_prod_keys={"zh-rCN": "Drama/prod/ly/poster/zh-rCN.jpg"},
+            poster_landscape_prod_keys={
+                "zh-rCN": "Drama/prod/ly/poster-landscape/zh-rCN-v2.jpg",
+            },
+        )
+        zh = payload["translations"]["zh-rCN"]
+        assert zh["poster_key"] == "Drama/prod/ly/poster/zh-rCN.jpg"
+        assert zh["poster_landscape_key"] == (
+            "Drama/prod/ly/poster-landscape/zh-rCN-v2.jpg"
+        )
+        print("OK landscape poster appears in translations and sync payload")
+
+
 def case_default_ladder_keeps_reupload_version():
     with tempfile.TemporaryDirectory() as td:
         _setup_env(Path(td))
@@ -343,11 +417,21 @@ def test_upsert_pending_computes_versioned_cover_url():
     case_upsert_pending_computes_versioned_cover_url()
 
 
+def test_missing_subtitle_file_is_hidden():
+    case_missing_subtitle_file_is_hidden()
+
+
+def test_landscape_poster_sync_payload():
+    case_landscape_poster_sync_payload()
+
+
 if __name__ == "__main__":
     case_encode_artifacts_complete()
     case_publish_ladder_skip_existing()
     case_versioned_asset_publish_fallbacks()
     case_next_ep_excludes_pending_delete()
     case_upsert_pending_computes_versioned_cover_url()
+    case_missing_subtitle_file_is_hidden()
+    case_landscape_poster_sync_payload()
     case_default_ladder_keeps_reupload_version()
     print("\nall cases passed")

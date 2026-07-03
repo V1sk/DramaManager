@@ -310,8 +310,9 @@ def upload_poster_to_staging(
     lang: str,
     local_path: Path,
     remote_filename: str | None = None,
+    poster_dir: str = "poster",
 ) -> str:
-    """上传 poster 到 `Drama/prod/{slug}/poster/{filename}`。
+    """上传 poster 到 `Drama/prod/{slug}/{poster_dir}/{filename}`。
 
     默认 filename 为 `{lang}.{ext}`；重传版本化时调用方可传
     `{lang}-vN.{ext}`，避免覆盖已同步到 prod 的旧海报。
@@ -327,9 +328,9 @@ def upload_poster_to_staging(
     if not ext:
         raise PublishError(f"poster local_path has no extension: {local_path}")
     filename = remote_filename or f"{lang}.{ext}"
-    remote_key = f"{prov.prod_prefix}/{slug}/poster/{filename}"
-    _put_object(remote_key, local_path, f"poster {slug}/{filename}")
-    return f"{prov.prod_base_url}/{slug}/poster/{filename}"
+    remote_key = f"{prov.prod_prefix}/{slug}/{poster_dir}/{filename}"
+    _put_object(remote_key, local_path, f"{poster_dir} {slug}/{filename}")
+    return f"{prov.prod_base_url}/{slug}/{poster_dir}/{filename}"
 
 
 def upload_cover_to_staging(slug: str, ep_dir: str, local_path: Path) -> str:
@@ -365,7 +366,12 @@ def _copy_one(src_key: str, dst_key: str, label: str) -> None:
         raise PublishError(f"storage copy_object failed for {label}: {e}") from e
 
 
-def publish_poster_to_prod(slug: str, lang: str, ext_or_filename: str) -> str:
+def publish_poster_to_prod(
+    slug: str,
+    lang: str,
+    ext_or_filename: str,
+    poster_dir: str = "poster",
+) -> str:
     """返回 prod poster 对象 key；prod 缺失时从旧 staging 对象 fallback copy。
 
     `ext_or_filename` 可为旧调用形态的扩展名 (`jpg`) 或版本化完整文件名
@@ -374,15 +380,15 @@ def publish_poster_to_prod(slug: str, lang: str, ext_or_filename: str) -> str:
     """
     prov = _provider()
     filename = ext_or_filename if "." in ext_or_filename else f"{lang}.{ext_or_filename}"
-    src_key = f"{prov.staging_prefix}/{slug}/poster/{filename}"
-    dst_key = f"{prov.prod_prefix}/{slug}/poster/{filename}"
+    src_key = f"{prov.staging_prefix}/{slug}/{poster_dir}/{filename}"
+    dst_key = f"{prov.prod_prefix}/{slug}/{poster_dir}/{filename}"
     if _key_exists(dst_key):
         return dst_key
     if not _key_exists(src_key):
         raise PublishError(
             f"no prod object at {dst_key}; no staging fallback at {src_key}"
         )
-    _copy_one(src_key, dst_key, f"poster {slug}/{filename}")
+    _copy_one(src_key, dst_key, f"{poster_dir} {slug}/{filename}")
     return dst_key
 
 
@@ -434,26 +440,34 @@ def publish_subtitle_to_prod(slug: str, ep_dir: str, lang: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def unpublish_poster_from_staging(slug: str, lang: str) -> None:
-    """删 staging 端 `Drama/staging/{slug}/poster/{lang}.*`（任意扩展名）。
+def unpublish_poster_from_staging(
+    slug: str,
+    lang: str,
+    poster_dir: str = "poster",
+) -> None:
+    """删 staging 端 `Drama/staging/{slug}/{poster_dir}/{lang}.*`（任意扩展名）。
 
     用于 poster 替换前清掉旧扩展、或单语言海报删除时。Idempotent。
     """
     prov = _provider()
     pattern = re.compile(rf"^{re.escape(lang)}(?:-v\d+)?\.[^.]+$")
     keys = [
-        k for k in prov.list_with_prefix(f"{prov.staging_prefix}/{slug}/poster/{lang}")
+        k for k in prov.list_with_prefix(f"{prov.staging_prefix}/{slug}/{poster_dir}/{lang}")
         if pattern.match(k.rsplit("/", 1)[-1])
     ]
     prov.batch_delete(keys)
 
 
-def unpublish_poster_from_prod(slug: str, lang: str) -> None:
-    """删 prod 端 `Drama/prod/{slug}/poster/{lang}.*`。Idempotent。"""
+def unpublish_poster_from_prod(
+    slug: str,
+    lang: str,
+    poster_dir: str = "poster",
+) -> None:
+    """删 prod 端 `Drama/prod/{slug}/{poster_dir}/{lang}.*`。Idempotent。"""
     prov = _provider()
     pattern = re.compile(rf"^{re.escape(lang)}(?:-v\d+)?\.[^.]+$")
     keys = [
-        k for k in prov.list_with_prefix(f"{prov.prod_prefix}/{slug}/poster/{lang}")
+        k for k in prov.list_with_prefix(f"{prov.prod_prefix}/{slug}/{poster_dir}/{lang}")
         if pattern.match(k.rsplit("/", 1)[-1])
     ]
     prov.batch_delete(keys)

@@ -7,6 +7,7 @@
 {% set default_name = default_trans.get('name') or drama.slug %}
 {% set default_synopsis = default_trans.get('synopsis') or '' %}
 {% set default_poster = default_trans.get('poster') %}
+{% set default_poster_landscape = default_trans.get('poster_landscape') %}
 
 <nav class="mb-4 text-body-sm">
     <a href="/admin" class="inline-flex items-center gap-1 text-on-surface-variant hover:text-secondary-fixed-dim transition-colors">
@@ -82,6 +83,23 @@
                     </option>
                     {% endfor %}
                 </select>
+                <div class="mt-3">
+                    <div class="text-[11px] uppercase tracking-wider text-on-surface-variant mb-1">横版海报</div>
+                    <div class="relative aspect-[3/2] bg-surface-container-lowest rounded-md overflow-hidden border border-outline-variant">
+                        {% if default_poster_landscape %}
+                        <img id="poster-landscape-img" class="absolute inset-0 w-full h-full object-cover"
+                             src="{{ default_poster_landscape }}?t={{ drama.updated_at }}" alt="">
+                        <div id="poster-landscape-placeholder" class="absolute inset-0 hidden items-center justify-center text-on-surface-variant/50">
+                            <span class="material-symbols-outlined text-[24px]">panorama</span>
+                        </div>
+                        {% else %}
+                        <img id="poster-landscape-img" class="absolute inset-0 w-full h-full object-cover hidden" src="" alt="">
+                        <div id="poster-landscape-placeholder" class="absolute inset-0 flex items-center justify-center text-on-surface-variant/50">
+                            <span class="material-symbols-outlined text-[24px]">panorama</span>
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -458,6 +476,14 @@ function renderTrEditor() {
         ? `<img class="rounded-md border border-outline-variant" src="${posterUrl}?t=${Date.now()}" alt="" style="width:60px;height:auto">`
         : '<span class="meta inline-flex items-center justify-center w-[60px] h-[90px] rounded-md border border-dashed border-outline-variant">无海报</span>';
     const posterNote = inherited ? '<span class="text-[11px] text-on-surface-variant/60">默认语言海报</span>' : '';
+    const ownLandscape = t.poster_landscape;
+    const defLandscape = (trans[DRAMA.default_lang] || {}).poster_landscape;
+    const landscapeUrl = ownLandscape || defLandscape;
+    const landscapeInherited = !ownLandscape && !!defLandscape;
+    const landscapeImg = landscapeUrl
+        ? `<img class="rounded-md border border-outline-variant" src="${landscapeUrl}?t=${Date.now()}" alt="" style="width:96px;height:64px;object-fit:cover">`
+        : '<span class="meta inline-flex items-center justify-center w-[96px] h-[64px] rounded-md border border-dashed border-outline-variant">无横版</span>';
+    const landscapeNote = landscapeInherited ? '<span class="text-[11px] text-on-surface-variant/60">默认语言横版</span>' : '';
 
     editor.innerHTML = `
         <div class="grid grid-cols-1 md:grid-cols-[80px_1fr] gap-2 items-center mb-3">
@@ -472,12 +498,24 @@ function renderTrEditor() {
             <label class="text-body-sm text-on-surface-variant">海报</label>
             ${posterImg}
             <div class="flex items-center gap-2 flex-wrap">
-                <input type="file" class="poster-file" accept="image/jpeg,image/png,image/webp">
+                <input type="file" class="poster-file poster-file-portrait" accept="image/jpeg,image/png,image/webp">
                 ${posterNote}
             </div>
             <div class="flex items-center gap-2">
-                <button class="btn btn-sm btn-secondary" data-action="upload-poster"><span class="material-symbols-outlined text-[14px]">upload</span>上传</button>
-                ${ownPoster ? '<button class="btn btn-sm btn-ghost" data-action="del-poster" title="删海报"><span class="material-symbols-outlined text-[14px]">delete</span></button>' : ''}
+                <button class="btn btn-sm btn-secondary" data-action="upload-poster" data-variant="portrait"><span class="material-symbols-outlined text-[14px]">upload</span>上传</button>
+                ${ownPoster ? '<button class="btn btn-sm btn-ghost" data-action="del-poster" data-variant="portrait" title="删海报"><span class="material-symbols-outlined text-[14px]">delete</span></button>' : ''}
+            </div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-[80px_96px_1fr_auto] gap-2 items-center mt-3">
+            <label class="text-body-sm text-on-surface-variant">横版</label>
+            ${landscapeImg}
+            <div class="flex items-center gap-2 flex-wrap">
+                <input type="file" class="poster-file poster-file-landscape" accept="image/jpeg,image/png,image/webp">
+                ${landscapeNote}
+            </div>
+            <div class="flex items-center gap-2">
+                <button class="btn btn-sm btn-secondary" data-action="upload-poster" data-variant="landscape"><span class="material-symbols-outlined text-[14px]">upload</span>上传</button>
+                ${ownLandscape ? '<button class="btn btn-sm btn-ghost" data-action="del-poster" data-variant="landscape" title="删横版"><span class="material-symbols-outlined text-[14px]">delete</span></button>' : ''}
             </div>
         </div>
         <div class="flex justify-end mt-3">
@@ -687,24 +725,26 @@ document.getElementById('translations-panel').addEventListener('click', async (e
             flash('该语言翻译已删除', 'info');
         } catch (e) { flash('删除出错: ' + e, 'error'); }
     } else if (action === 'upload-poster') {
-        const f = editor.querySelector('.poster-file').files[0];
-        if (!f) { flash('请先选择海报文件', 'warn'); return; }
+        const variant = target.dataset.variant || 'portrait';
+        const f = editor.querySelector(`.poster-file-${variant}`)?.files[0];
+        if (!f) { flash(variant === 'landscape' ? '请先选择横版海报文件' : '请先选择海报文件', 'warn'); return; }
         const fd = new FormData(); fd.append('file', f);
         try {
-            const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/poster?lang=${encodeURIComponent(lang)}`, { method: 'POST', body: fd });
+            const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/poster?lang=${encodeURIComponent(lang)}&variant=${encodeURIComponent(variant)}`, { method: 'POST', body: fd });
             if (!res.ok) { flash(`上传失败 (${res.status}): ${await res.text()}`, 'error'); return; }
             await refreshDrama(); await renderTranslationsPanel();
             if (lang === document.getElementById('poster-lang').value) updatePosterImg();
-            flash('海报已上传', 'info');
+            flash(variant === 'landscape' ? '横版海报已上传' : '海报已上传', 'info');
         } catch (e) { flash('上传出错: ' + e, 'error'); }
     } else if (action === 'del-poster') {
-        if (!confirm(`删除 "${lang}" 的海报？`)) return;
+        const variant = target.dataset.variant || 'portrait';
+        if (!confirm(`删除 "${lang}" 的${variant === 'landscape' ? '横版海报' : '海报'}？`)) return;
         try {
-            const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/poster?lang=${encodeURIComponent(lang)}`, { method: 'DELETE' });
+            const res = await fetch(`/admin/dramas/${encodeURIComponent(SLUG)}/poster?lang=${encodeURIComponent(lang)}&variant=${encodeURIComponent(variant)}`, { method: 'DELETE' });
             if (res.status !== 204) { flash(`删除失败 (${res.status})`, 'error'); return; }
             await refreshDrama(); await renderTranslationsPanel();
             if (lang === document.getElementById('poster-lang').value) updatePosterImg();
-            flash('海报已删除', 'info');
+            flash(variant === 'landscape' ? '横版海报已删除' : '海报已删除', 'info');
         } catch (e) { flash('删除出错: ' + e, 'error'); }
     }
 });
@@ -893,6 +933,7 @@ function updatePosterImg() {
     const lang = document.getElementById('poster-lang').value;
     // Fall back to the default-language poster when the selected language has none.
     const url = DRAMA.translations?.[lang]?.poster || DRAMA.translations?.[DRAMA.default_lang]?.poster;
+    const landscapeUrl = DRAMA.translations?.[lang]?.poster_landscape || DRAMA.translations?.[DRAMA.default_lang]?.poster_landscape;
     const img = document.getElementById('poster-img');
     const ph = document.getElementById('poster-placeholder');
     if (url) {
@@ -902,6 +943,16 @@ function updatePosterImg() {
     } else {
         img.classList.add('hidden');
         if (ph) ph.classList.remove('hidden');
+    }
+    const landscapeImg = document.getElementById('poster-landscape-img');
+    const landscapePh = document.getElementById('poster-landscape-placeholder');
+    if (landscapeUrl) {
+        landscapeImg.src = landscapeUrl + '?t=' + Date.now();
+        landscapeImg.classList.remove('hidden');
+        if (landscapePh) landscapePh.classList.add('hidden');
+    } else {
+        landscapeImg.classList.add('hidden');
+        if (landscapePh) landscapePh.classList.remove('hidden');
     }
 }
 

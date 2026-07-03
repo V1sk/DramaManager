@@ -1,12 +1,12 @@
 # drama-meta-translations
 
-剧 (drama) 元信息多语言化：drama 的 `name` / `synopsis` / `poster` 改由 `translations` 表存储，新增 drama 翻译 / 海报上传 / 列表 / 删除等管理端点。
+剧 (drama) 元信息多语言化：drama 的 `name` / `synopsis` / `poster` / `poster_landscape` 改由 `translations` 表存储，新增 drama 翻译 / 海报上传 / 列表 / 删除等管理端点。
 
 ## Requirements
 
 ### Requirement: drama translations storage
 
-The service SHALL store every drama's translatable fields in the `translations` table with `entity_type='drama'`, `entity_id=<dramas.slug>`, `lang_code=<existing language code>`, `field` ∈ `{'name', 'synopsis', 'poster'}`. The `dramas` table SHALL NOT carry `name`, `synopsis`, or `poster_url` columns. Drama identity is the `(slug, default_lang)` pair plus translation rows.
+The service SHALL store every drama's translatable fields in the `translations` table with `entity_type='drama'`, `entity_id=<dramas.slug>`, `lang_code=<existing language code>`, `field` ∈ `{'name', 'synopsis', 'poster', 'poster_landscape'}`. The `dramas` table SHALL NOT carry `name`, `synopsis`, or `poster_url` columns. Drama identity is the `(slug, default_lang)` pair plus translation rows.
 
 #### Scenario: dramas schema does not include name / synopsis / poster columns
 - **WHEN** `init_db()` runs
@@ -20,7 +20,7 @@ The service SHALL store every drama's translatable fields in the `translations` 
 
 ### Requirement: drama poster file storage convention
 
-Drama poster files SHALL be stored at `OUT_DIR/{slug}/poster/{lang_code}.{ext}` where `{ext}` is determined by the uploaded MIME type. Accepted MIME types: `image/jpeg` → `jpg`, `image/png` → `png`, `image/webp` → `webp`. The corresponding URL persisted in `translations.value` SHALL be `/videos/{slug}/poster/{lang_code}.{ext}` (host-relative, served by the existing `/videos/` static mount).
+Drama portrait poster files SHALL be stored at `OUT_DIR/{slug}/poster/{lang_code}.{ext}`. Drama landscape poster files SHALL be stored at `OUT_DIR/{slug}/poster-landscape/{lang_code}.{ext}`. `{ext}` is determined by the uploaded MIME type. Accepted MIME types: `image/jpeg` → `jpg`, `image/png` → `png`, `image/webp` → `webp`. The corresponding URL persisted in `translations.value` SHALL be `/videos/{slug}/poster/{lang_code}.{ext}` for `field='poster'` and `/videos/{slug}/poster-landscape/{lang_code}.{ext}` for `field='poster_landscape'` (host-relative, served by the existing `/videos/` static mount).
 
 When a poster is re-uploaded with a different MIME type, the prior file with the old extension SHALL be removed before the new file is written, so each `(slug, lang_code)` has at most one poster file on disk at any time.
 
@@ -65,7 +65,7 @@ The drama SHALL exist (else 404). The lang_code SHALL reference an active langua
 
 For each present field, the service SHALL upsert the row `(entity_type='drama', entity_id=slug, lang_code, field=<field>, value=<value>)`. Absent fields SHALL NOT be touched.
 
-The response is 200 with the resulting per-language content `{lang_code, name?, synopsis?, poster?}`.
+The response is 200 with the resulting per-language content `{lang_code, name?, synopsis?, poster?, poster_landscape?}`.
 
 #### Scenario: upsert name and synopsis together
 - **GIVEN** drama `ly` exists with `default_lang='zh-rCN'` and `name` already in `zh-rCN`
@@ -90,7 +90,7 @@ The response is 200 with the resulting per-language content `{lang_code, name?, 
 
 The service SHALL provide `DELETE /admin/dramas/{slug}/translations/{lang_code}`. If the drama is unknown the response is 404. If `lang_code` equals the drama's `default_lang` the response is 409. Otherwise the service SHALL atomically:
 1. Delete every `translations` row matching `(entity_type='drama', entity_id=slug, lang_code=lang_code)`.
-2. Delete the on-disk poster file `OUT_DIR/{slug}/poster/{lang_code}.{ext}` (any extension). File-not-found is tolerated; other OSError → log warning + include in response `warnings`.
+2. Delete the on-disk poster files `OUT_DIR/{slug}/poster/{lang_code}.{ext}` and `OUT_DIR/{slug}/poster-landscape/{lang_code}.{ext}` (any extension). File-not-found is tolerated; other OSError → log warning + include in response `warnings`.
 
 The response is `200 {"ok": true, "warnings": [...]}` on success.
 
@@ -110,7 +110,7 @@ The response is `200 {"ok": true, "warnings": [...]}` on success.
 
 ### Requirement: drama poster upload endpoint
 
-The service SHALL provide `POST /admin/dramas/{slug}/poster?lang={lang_code}` accepting a multipart upload with a `file` part. Acceptable content types: `image/jpeg`, `image/png`, `image/webp`. Other types SHALL respond 400.
+The service SHALL provide `POST /admin/dramas/{slug}/poster?lang={lang_code}&variant={portrait|landscape}` accepting a multipart upload with a `file` part. `variant` defaults to `portrait` for compatibility. Acceptable content types: `image/jpeg`, `image/png`, `image/webp`. Other types SHALL respond 400.
 
 The drama SHALL exist (else 404). The lang_code SHALL reference an active language (else 400). The drama SHALL already have a `name` translation in this lang_code (else 400 — poster cannot exist for a language with no name).
 
@@ -118,7 +118,7 @@ The handler SHALL:
 1. Determine the new file extension from MIME.
 2. Determine the next poster asset version for this `(slug, lang_code)`: the first upload MAY use `{lang_code}.{ext}`, and later uploads SHALL use `{lang_code}-v{N}.{ext}`.
 3. Write the upload to `OUT_DIR/{slug}/poster/{versioned_filename}` without deleting earlier versions.
-4. Upsert `translations` with `field='poster'`, `value='/videos/{slug}/poster/{versioned_filename}'`.
+4. Upsert `translations` with `field='poster'` for `variant=portrait` or `field='poster_landscape'` for `variant=landscape`.
 
 If step 3 fails the handler SHALL respond 500 and remove the partially written file if present. The response on success is 200 with the new poster URL.
 
@@ -149,7 +149,7 @@ If step 3 fails the handler SHALL respond 500 and remove the partially written f
 
 ### Requirement: drama poster deletion endpoint
 
-The service SHALL provide `DELETE /admin/dramas/{slug}/poster?lang={lang_code}`. If the drama is unknown the response is 404. If no poster translation exists for `(slug, lang_code)` the response is 404 (with a different message: poster not found).
+The service SHALL provide `DELETE /admin/dramas/{slug}/poster?lang={lang_code}&variant={portrait|landscape}`. `variant` defaults to `portrait`. If the drama is unknown the response is 404. If no poster translation exists for `(slug, lang_code, variant)` the response is 404 (with a different message: poster not found).
 
 Otherwise the service SHALL delete the translation row + the on-disk file (any extension). The response is 204 No Content.
 
@@ -174,8 +174,8 @@ The service SHALL provide `GET /admin/dramas/{slug}/translations` returning a JS
 
 ```
 {
-  "zh-rCN": {"name": "...", "synopsis": "...", "poster": "/videos/.../zh-rCN.jpg"},
-  "en":     {"name": "...", "synopsis": null,  "poster": null}
+  "zh-rCN": {"name": "...", "synopsis": "...", "poster": "/videos/ly/poster/zh-rCN.jpg", "poster_landscape": "/videos/ly/poster-landscape/zh-rCN.jpg"},
+  "en":     {"name": "...", "synopsis": null,  "poster": null, "poster_landscape": null}
 }
 ```
 

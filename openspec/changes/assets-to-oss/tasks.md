@@ -101,3 +101,10 @@
 
 - [x] 16.1 `openspec validate assets-to-oss --strict` passes.
 - [x] 16.2 If prior changes have been archived, re-validate to ensure MODIFIED references resolve.
+
+## 17. Landscape posters
+
+- [x] 17.1 Add a horizontal drama poster variant stored as `translations.field='poster_landscape'`.
+- [x] 17.2 Store horizontal poster files under `OUT_DIR/{slug}/poster-landscape/{lang}[-vN].{ext}` and upload them to `Drama/prod/{slug}/poster-landscape/`.
+- [x] 17.3 Extend `POST/DELETE /admin/dramas/{slug}/poster` with `variant=portrait|landscape`, defaulting to `portrait` for compatibility.
+- [x] 17.4 Extend drama sync payloads with `translations[lang].poster_landscape_key`.

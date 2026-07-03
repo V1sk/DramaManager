@@ -86,6 +86,7 @@ def build_drama_payload(
     slug: str,
     *,
     poster_prod_keys: dict[str, str] | None = None,
+    poster_landscape_prod_keys: dict[str, str] | None = None,
 ) -> dict:
     """Assemble the `POST /sync/dramas` body for this drama.
 
@@ -108,6 +109,7 @@ def build_drama_payload(
         raise RuntimeError(f"build_drama_payload: drama '{slug}' not found")
 
     poster_prod_keys = poster_prod_keys or {}
+    poster_landscape_prod_keys = poster_landscape_prod_keys or {}
 
     # Per-language: name / synopsis / poster_key.
     # poster_key is the prod bucket object key when storage sync is in effect;
@@ -118,10 +120,15 @@ def build_drama_payload(
             poster_key = poster_prod_keys[lang_code]
         else:
             poster_key = fields.get("poster")  # null or relative /videos/... path
+        if lang_code in poster_landscape_prod_keys:
+            poster_landscape_key = poster_landscape_prod_keys[lang_code]
+        else:
+            poster_landscape_key = fields.get("poster_landscape")
         translations[lang_code] = {
             "name": fields.get("name"),
             "synopsis": fields.get("synopsis"),
             "poster_key": poster_key,
+            "poster_landscape_key": poster_landscape_key,
         }
 
     # Tags (with all their translation rows)
@@ -406,27 +413,38 @@ async def handle_drama_sync(slug: str) -> None:
         # (e.g. staging object missing because never uploaded) → sync_failed
         # without calling the business server.
         poster_prod_keys: dict[str, str] = {}
+        poster_landscape_prod_keys: dict[str, str] = {}
         if settings.storage_enabled:
             translations_view = db.list_drama_translations(slug)
             for lang_code, fields in translations_view.items():
-                rel_url = fields.get("poster")
-                if not rel_url:
-                    continue
-                # rel_url is like "/videos/{slug}/poster/{lang}.jpg" or
-                # "/videos/{slug}/poster/{lang}-v2.jpg"; publish by exact
-                # filename so versioned poster keys are preserved.
-                tail = rel_url.rsplit("/", 1)[-1]   # "{lang}.{ext}"
-                if "." not in tail:
-                    log.warning(
-                        "skipping malformed poster rel_url for sync: %s", rel_url,
+                for field_name, poster_dir, out in (
+                    ("poster", "poster", poster_prod_keys),
+                    ("poster_landscape", "poster-landscape", poster_landscape_prod_keys),
+                ):
+                    rel_url = fields.get(field_name)
+                    if not rel_url:
+                        continue
+                    # rel_url is like "/videos/{slug}/{poster_dir}/{lang}.jpg" or
+                    # "/videos/{slug}/{poster_dir}/{lang}-v2.jpg"; publish by exact
+                    # filename so versioned poster keys are preserved.
+                    tail = rel_url.rsplit("/", 1)[-1]   # "{lang}.{ext}"
+                    if "." not in tail:
+                        log.warning(
+                            "skipping malformed %s rel_url for sync: %s",
+                            field_name, rel_url,
+                        )
+                        continue
+                    prod_key = await asyncio.to_thread(
+                        publish.publish_poster_to_prod,
+                        slug, lang_code, tail, poster_dir,
                     )
-                    continue
-                prod_key = await asyncio.to_thread(
-                    publish.publish_poster_to_prod, slug, lang_code, tail,
-                )
-                poster_prod_keys[lang_code] = prod_key
+                    out[lang_code] = prod_key
 
-        payload = build_drama_payload(slug, poster_prod_keys=poster_prod_keys)
+        payload = build_drama_payload(
+            slug,
+            poster_prod_keys=poster_prod_keys,
+            poster_landscape_prod_keys=poster_landscape_prod_keys,
+        )
         await sync_client.call_business("POST", "/sync/dramas", json=payload)
         db.set_drama_sync_status(slug, "clean", last_synced_at=_now_iso())
         log.info("drama sync ok slug=%s", slug)

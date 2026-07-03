@@ -22,8 +22,7 @@ from app.config import settings  # noqa: E402
 
 
 def _backfill_posters() -> tuple[int, int, int]:
-    """For every drama, walk OUT_DIR/{slug}/poster/* and upload files whose
-    `(slug, lang, 'poster')` translation row exists.
+    """For every drama, upload current poster files recorded in translations.
 
     Returns (uploaded, skipped_no_row, failed).
     """
@@ -32,31 +31,27 @@ def _backfill_posters() -> tuple[int, int, int]:
     failed = 0
     for drama in db.list_dramas():
         slug = drama["slug"]
-        poster_dir = settings.out_dir / slug / "poster"
-        if not poster_dir.is_dir():
-            continue
-        # Translations with field='poster' for this drama → set of valid langs
-        valid_langs = {
-            lang_code
-            for lang_code, fields in db.list_drama_translations(slug).items()
-            if fields.get("poster")
-        }
-        for f in poster_dir.iterdir():
-            if not f.is_file():
-                continue
-            # filename like "{lang}.{ext}"
-            stem = f.stem
-            if stem not in valid_langs:
-                print(f"[skip-no-row] poster {slug}/{f.name}")
-                skipped += 1
-                continue
-            try:
-                publish.upload_poster_to_staging(slug, stem, f)
-                print(f"[ok] poster {slug}/{f.name}")
-                uploaded += 1
-            except Exception as e:  # noqa: BLE001
-                print(f"[fail] poster {slug}/{f.name}: {e}", file=sys.stderr)
-                failed += 1
+        for lang, fields in db.list_drama_translations(slug).items():
+            for field, poster_dir in (
+                ("poster", "poster"),
+                ("poster_landscape", "poster-landscape"),
+            ):
+                rel_url = fields.get(field)
+                if not rel_url:
+                    continue
+                filename = rel_url.rsplit("/", 1)[-1]
+                f = settings.out_dir / slug / poster_dir / filename
+                if not f.is_file():
+                    print(f"[skip-no-file] {field} {slug}/{filename}")
+                    skipped += 1
+                    continue
+                try:
+                    publish.upload_poster_to_staging(slug, lang, f, filename, poster_dir)
+                    print(f"[ok] {field} {slug}/{filename}")
+                    uploaded += 1
+                except Exception as e:  # noqa: BLE001
+                    print(f"[fail] {field} {slug}/{filename}: {e}", file=sys.stderr)
+                    failed += 1
     return uploaded, skipped, failed
 
 
