@@ -25,7 +25,7 @@ Tests use `pytest` and follow the `tests/test_*.py` naming pattern. Add focused 
 
 ## Commit & Pull Request Guidelines
 
-Recent commits use bracketed conventional-style prefixes, for example `[feat]: ...`. Follow that pattern with concise, imperative summaries such as `[fix]: prevent stale sync payload`. Pull requests should describe the user-visible change, note config or migration impact, list test commands run, and include screenshots for admin UI changes.
+Recent commits use bracketed conventional-style prefixes, for example `[feat]: ...`. Follow that pattern, but write commit summaries in Chinese going forward, such as `[fix]: 修复同步字幕脏数据展示`. Pull requests should describe the user-visible change, note config or migration impact, list test commands run, and include screenshots for admin UI changes.
 
 ## Security & Configuration Tips
 
