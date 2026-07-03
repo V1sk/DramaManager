@@ -149,6 +149,8 @@ def build_drama_payload(
             "translations": db.list_translations_for_entity("tag", tag_slug, "label"),
         })
 
+    featured_categories = db.list_drama_featured_categories(slug)
+
     actors_payload: list[dict] = []
     drama_actor_rows = db.list_drama_actors(slug)
     for actor_row in drama_actor_rows:
@@ -183,6 +185,7 @@ def build_drama_payload(
         "free_episodes": drama.get("free_episodes", 3),
         "client_updated_at": drama["updated_at"],
         "translations": translations,
+        "featured_categories": featured_categories,
         "tags": tags_payload,
         "actors": actors_payload,
         "languages": languages_payload,

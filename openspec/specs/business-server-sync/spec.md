@@ -161,6 +161,7 @@ The business server (separate codebase to be built later) SHALL expose these fou
   "slug": str,                                 // matches ^[a-z0-9][a-z0-9-]*$
   "default_lang": str,                         // matches a `code` in this payload's `languages`
   "client_updated_at": str,                    // ISO 8601
+  "featured_categories": [str],                // fixed values: hot/new/exclusive
   "translations": {                            // by lang_code
     "<lang_code>": {
       "name": str,                             // required (the drama-meta-translations invariant)

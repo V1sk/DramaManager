@@ -49,6 +49,7 @@ HLS 管理服务器通过 4 个 HTTP 接口把剧 / 集 / 翻译 / 标签 / 演�
   "default_lang": "zh-rCN",
   "free_episodes": 3,
   "client_updated_at": "2026-05-19T01:23:45Z",
+  "featured_categories": ["hot", "exclusive"],
   "translations": {
     "zh-rCN": {
       "name": "琅琊榜",
@@ -90,6 +91,7 @@ HLS 管理服务器通过 4 个 HTTP 接口把剧 / 集 / 翻译 / 标签 / 演�
 | `default_lang` | str | 默认语言 code（必须在 `languages` 里） |
 | `free_episodes` | int | 前 N 集免费，第 N+1 集起付费；`0` = 全部付费 |
 | `client_updated_at` | str | HLS 端 `dramas.updated_at`，乱序保护 |
+| `featured_categories` | array[str] | 固定运营分类，可空数组；允许值：`hot`=最热，`new`=最新，`exclusive`=独家 |
 | `translations` | object | 按 `lang_code` 索引；`name` 必填，`synopsis` / `poster_key` / `poster_landscape_key` 可空 |
 | `translations[lang].poster_key` | str ∣ null | **TOS prod 对象 key**，例如 `Drama/prod/ly/poster/zh-rCN.jpg`；业务端存进 DB，给客户端时拼 `MEDIA_BASE_URL` |
 | `translations[lang].poster_landscape_key` | str ∣ null | 横版海报 **TOS prod 对象 key**，例如 `Drama/prod/ly/poster-landscape/zh-rCN.jpg`；没有上传横版时为 `null` |

@@ -360,6 +360,33 @@ def case_landscape_poster_sync_payload():
         print("OK landscape poster appears in translations and sync payload")
 
 
+def case_featured_categories_sync_payload_and_overview():
+    with tempfile.TemporaryDirectory() as td:
+        _setup_env(Path(td))
+        _reset_app_modules()
+        from app import db
+        from app.sync import build_drama_payload
+
+        db.init_db()
+        db.create_language(code="zh-rCN", display_label="简体中文")
+        db.create_drama(slug="ly", name="测试剧", default_lang="zh-rCN")
+        stored = db.replace_drama_featured_categories(
+            "ly", ["exclusive", "hot", "hot"],
+        )
+        assert stored == ["hot", "exclusive"]
+        full = db.get_drama_full("ly")
+        assert full["featured_categories"] == ["hot", "exclusive"]
+
+        payload = build_drama_payload("ly")
+        assert payload["featured_categories"] == ["hot", "exclusive"]
+
+        overview = db.list_featured_category_overview()
+        assert [r["slug"] for r in overview["hot"]] == ["ly"]
+        assert overview["new"] == []
+        assert [r["slug"] for r in overview["exclusive"]] == ["ly"]
+        print("OK fixed featured categories persist, aggregate, and sync")
+
+
 def case_default_ladder_keeps_reupload_version():
     with tempfile.TemporaryDirectory() as td:
         _setup_env(Path(td))
@@ -425,6 +452,10 @@ def test_landscape_poster_sync_payload():
     case_landscape_poster_sync_payload()
 
 
+def test_featured_categories_sync_payload_and_overview():
+    case_featured_categories_sync_payload_and_overview()
+
+
 if __name__ == "__main__":
     case_encode_artifacts_complete()
     case_publish_ladder_skip_existing()
@@ -433,5 +464,6 @@ if __name__ == "__main__":
     case_upsert_pending_computes_versioned_cover_url()
     case_missing_subtitle_file_is_hidden()
     case_landscape_poster_sync_payload()
+    case_featured_categories_sync_payload_and_overview()
     case_default_ladder_keeps_reupload_version()
     print("\nall cases passed")

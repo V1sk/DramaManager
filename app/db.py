@@ -69,6 +69,16 @@ CREATE TABLE IF NOT EXISTS drama_tags (
   FOREIGN KEY (tag_slug)   REFERENCES tags(slug)   ON DELETE CASCADE
 );
 
+-- Fixed operator-facing categories used by clients for curated sections.
+-- These are intentionally separate from the free-form tag library.
+CREATE TABLE IF NOT EXISTS drama_featured_categories (
+  drama_slug  TEXT NOT NULL,
+  category    TEXT NOT NULL CHECK(category IN ('hot','new','exclusive')),
+  updated_at  TEXT NOT NULL,
+  PRIMARY KEY (drama_slug, category),
+  FOREIGN KEY (drama_slug) REFERENCES dramas(slug) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS actors (
   slug          TEXT    PRIMARY KEY,
   default_lang  TEXT    NOT NULL,
@@ -213,6 +223,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_tjobs_inflight
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _LANG_RE = re.compile(r"^[a-z]{2,3}(-[A-Za-z0-9]{2,8})?$")
+FEATURED_CATEGORIES = ("hot", "new", "exclusive")
+FEATURED_CATEGORY_LABELS = {
+    "hot": "最热",
+    "new": "最新",
+    "exclusive": "独家",
+}
 
 
 class DramaExistsError(Exception):
@@ -1152,6 +1168,7 @@ def get_drama_full(slug: str) -> dict | None:
       - drama row: slug, default_lang, created_at, updated_at
       - translations: {lang_code: {name, synopsis, poster}, ...}
       - tags:   [{slug, label}, ...]   (label localized per tag.default_lang)
+      - featured_categories: ["hot"|"new"|"exclusive", ...]
       - actors: [{slug, name}, ...]    (name localized per actor.default_lang)
       - episodes: [{ep_number, episode_id, status, duration_ms, width, height,
                     cover_url, play_url, source_filename, error_message,
@@ -1166,6 +1183,7 @@ def get_drama_full(slug: str) -> dict | None:
     out: dict = dict(drama)
     out["translations"] = list_drama_translations(slug)
     out["tags"] = list_drama_tags(slug)
+    out["featured_categories"] = list_drama_featured_categories(slug)
     out["actors"] = list_drama_actors(slug)
 
     sql = """
@@ -1789,6 +1807,122 @@ def list_drama_tags(drama_slug: str) -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(sql, (drama_slug,)).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# fixed featured categories (运营分类)
+# ---------------------------------------------------------------------------
+
+
+def _validate_featured_categories(categories: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    allowed = set(FEATURED_CATEGORIES)
+    for raw in categories:
+        cat = str(raw).strip()
+        if cat not in allowed:
+            raise DramaValidationError(
+                "featured_categories",
+                f"invalid featured category {cat!r}; allowed: {list(FEATURED_CATEGORIES)}",
+            )
+        if cat in seen:
+            continue
+        seen.add(cat)
+        out.append(cat)
+    return out
+
+
+def replace_drama_featured_categories(drama_slug: str, categories: list[str]) -> list[str]:
+    """Replace a drama's fixed featured-category set.
+
+    Categories are stable enum values: `hot`, `new`, `exclusive`.
+    Returns the stored category list in canonical order.
+    """
+    if get_drama(drama_slug) is None:
+        raise DramaNotFoundError(f"drama '{drama_slug}' not found")
+    deduped = _validate_featured_categories(categories)
+    now = _now_iso()
+    with _connect() as conn:
+        conn.execute("BEGIN")
+        try:
+            conn.execute(
+                "DELETE FROM drama_featured_categories WHERE drama_slug=?",
+                (drama_slug,),
+            )
+            for cat in deduped:
+                conn.execute(
+                    "INSERT INTO drama_featured_categories(drama_slug, category, updated_at) "
+                    "VALUES (?, ?, ?)",
+                    (drama_slug, cat, now),
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+    return list_drama_featured_categories(drama_slug)
+
+
+def list_drama_featured_categories(drama_slug: str) -> list[str]:
+    """Return a drama's fixed featured categories in canonical display order."""
+    if get_drama(drama_slug) is None:
+        raise DramaNotFoundError(f"drama '{drama_slug}' not found")
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT category FROM drama_featured_categories WHERE drama_slug=?",
+            (drama_slug,),
+        ).fetchall()
+    found = {r["category"] for r in rows}
+    return [cat for cat in FEATURED_CATEGORIES if cat in found]
+
+
+def list_featured_category_overview() -> dict[str, list[dict]]:
+    """Return admin overview data grouped by fixed category.
+
+    Each row mirrors homepage card data enough for operations review and quick
+    navigation: slug, default-lang name/poster, ready episode counts, sync
+    status, and latest ready update time.
+    """
+    out: dict[str, list[dict]] = {cat: [] for cat in FEATURED_CATEGORIES}
+    sql = """
+      SELECT
+        fc.category,
+        d.slug                                                              AS slug,
+        d.default_lang                                                      AS default_lang,
+        d.sync_status                                                       AS sync_status,
+        d.sync_error                                                        AS sync_error,
+        d.updated_at                                                        AS drama_updated_at,
+        COALESCE(
+          (SELECT value FROM translations
+            WHERE entity_type='drama' AND entity_id=d.slug
+                  AND lang_code=d.default_lang AND field='name'),
+          d.slug
+        )                                                                   AS name,
+        (SELECT value FROM translations
+          WHERE entity_type='drama' AND entity_id=d.slug
+                AND lang_code=d.default_lang AND field='poster')            AS poster_url,
+        COALESCE(
+          (SELECT COUNT(*) FROM episodes e
+            WHERE e.drama_slug=d.slug AND e.status='ready'),
+          0)                                                                AS ep_count,
+        (SELECT MAX(e.ep_number) FROM episodes e
+          WHERE e.drama_slug=d.slug AND e.status='ready')                   AS latest_ep_number,
+        (SELECT MAX(e.updated_at) FROM episodes e
+          WHERE e.drama_slug=d.slug AND e.status='ready')                   AS latest_ready_updated_at
+      FROM drama_featured_categories fc
+      INNER JOIN dramas d ON d.slug=fc.drama_slug
+      ORDER BY fc.category ASC, latest_ready_updated_at DESC, d.updated_at DESC, d.slug ASC
+    """
+    with _connect() as conn:
+        rows = conn.execute(sql).fetchall()
+    for r in rows:
+        item = dict(r)
+        cat = item.pop("category")
+        if cat in out:
+            out[cat].append(item)
+    return out
 
 
 # ---------------------------------------------------------------------------

@@ -108,3 +108,10 @@
 - [x] 17.2 Store horizontal poster files under `OUT_DIR/{slug}/poster-landscape/{lang}[-vN].{ext}` and upload them to `Drama/prod/{slug}/poster-landscape/`.
 - [x] 17.3 Extend `POST/DELETE /admin/dramas/{slug}/poster` with `variant=portrait|landscape`, defaulting to `portrait` for compatibility.
 - [x] 17.4 Extend drama sync payloads with `translations[lang].poster_landscape_key`.
+
+## 18. Fixed featured categories
+
+- [x] 18.1 Add fixed drama categories `hot`, `new`, and `exclusive` in a dedicated drama-category junction table.
+- [x] 18.2 Add drama-detail controls to multi-select these fixed categories per drama.
+- [x] 18.3 Add an admin overview page grouped by the three fixed categories.
+- [x] 18.4 Include `featured_categories` in drama sync payloads.

@@ -53,6 +53,22 @@ async def admin_drama_new_page(request: Request) -> HTMLResponse:
     )
 
 
+@router.get("/admin/featured-categories", response_class=HTMLResponse)
+async def admin_featured_categories_page(request: Request) -> HTMLResponse:
+    """Operations overview for the fixed client-facing drama categories."""
+    groups = db.list_featured_category_overview()
+    return _TEMPLATES.TemplateResponse(
+        request,
+        "featured_categories.html",
+        {
+            "groups": groups,
+            "category_labels": db.FEATURED_CATEGORY_LABELS,
+            "category_order": db.FEATURED_CATEGORIES,
+            "nav_active": "featured",
+        },
+    )
+
+
 @router.get("/admin/dramas/{drama_slug}", response_class=HTMLResponse)
 async def admin_drama_detail_page(
     request: Request,
@@ -85,6 +101,30 @@ async def admin_drama_full(
     if full is None:
         raise HTTPException(status_code=404, detail=f"drama '{drama_slug}' not found")
     return JSONResponse(full)
+
+
+@router.put("/admin/dramas/{drama_slug}/featured-categories")
+async def admin_replace_drama_featured_categories(
+    drama_slug: str = PathParam(..., pattern=r"^[a-z0-9][a-z0-9-]*$"),
+    payload: list[str] = Body(...),
+) -> JSONResponse:
+    if not isinstance(payload, list):
+        raise HTTPException(status_code=400, detail="body must be a JSON array")
+    try:
+        categories = db.replace_drama_featured_categories(drama_slug, payload)
+    except db.DramaNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except db.DramaValidationError as e:
+        raise HTTPException(status_code=400, detail=f"{e.field}: {e}")
+    db.mark_drama_dirty(drama_slug)
+    log.info(
+        "updated featured categories slug=%s categories=%s",
+        drama_slug, categories,
+    )
+    return JSONResponse({
+        "slug": drama_slug,
+        "featured_categories": categories,
+    })
 
 
 @router.get("/admin/dramas/{drama_slug}/episodes/{ep}", response_class=HTMLResponse)

@@ -1,0 +1,73 @@
+{% extends "_base.html" %}
+{% block title %}HLS 管理 · 运营分类{% endblock %}
+
+{% block content %}
+<header class="flex items-end justify-between gap-4 mb-6 pb-4 border-b border-outline-variant">
+    <div>
+        <h1 class="text-headline-lg text-on-surface">运营分类</h1>
+        <p class="text-body-md text-on-surface-variant mt-1">查看客户端固定分类：最热、最新、独家。</p>
+    </div>
+</header>
+
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-gutter items-start">
+    {% for cat in category_order %}
+    {% set rows = groups.get(cat, []) %}
+    <section class="bg-surface-container-high border border-outline-variant rounded-lg overflow-hidden">
+        <div class="px-4 py-3 border-b border-outline-variant bg-surface-container flex items-center justify-between">
+            <h2 class="text-headline-sm flex items-center gap-2">
+                {% if cat == 'hot' %}
+                <span class="material-symbols-outlined text-tertiary text-[18px]">local_fire_department</span>
+                {% elif cat == 'new' %}
+                <span class="material-symbols-outlined text-secondary-fixed-dim text-[18px]">new_releases</span>
+                {% else %}
+                <span class="material-symbols-outlined text-primary text-[18px]">workspace_premium</span>
+                {% endif %}
+                {{ category_labels.get(cat, cat) }}
+            </h2>
+            <span class="meta">{{ rows|length }} 部</span>
+        </div>
+
+        {% if rows %}
+        <div class="divide-y divide-outline-variant">
+            {% for d in rows %}
+            <a href="/admin/dramas/{{ d.slug|e }}"
+               class="flex gap-3 p-3 hover:bg-surface-container transition-colors">
+                {% if d.poster_url %}
+                <img class="w-14 aspect-[2/3] object-cover rounded-md bg-surface-container-lowest border border-outline-variant"
+                     src="{{ d.poster_url|e }}?t={{ d.latest_ready_updated_at or d.drama_updated_at }}" alt="">
+                {% else %}
+                <div class="w-14 aspect-[2/3] rounded-md bg-surface-container-lowest border border-outline-variant flex items-center justify-center text-on-surface-variant/50">
+                    <span class="material-symbols-outlined text-[20px]">photo_library</span>
+                </div>
+                {% endif %}
+                <div class="min-w-0 flex-1">
+                    <div class="flex items-center gap-2 min-w-0">
+                        <span class="text-body-md font-semibold text-on-surface truncate">{{ d.name|e }}</span>
+                        <span class="sync-badge {{ d.sync_status }}" title="{{ d.sync_error or '' }}">{{ d.sync_status }}</span>
+                    </div>
+                    <div class="mt-1 text-[11px] text-on-surface-variant/70 mono truncate">{{ d.slug }}</div>
+                    <div class="mt-2 flex items-center gap-2 text-[11px] text-on-surface-variant/70">
+                        {% if d.ep_count and d.ep_count > 0 %}
+                        <span>{{ d.ep_count }} 集</span>
+                        {% if d.latest_ep_number %}
+                        <span class="opacity-60">·</span>
+                        <span>EP{{ d.latest_ep_number }}</span>
+                        {% endif %}
+                        {% else %}
+                        <span>暂无已就绪集</span>
+                        {% endif %}
+                    </div>
+                </div>
+            </a>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="p-8 text-center text-on-surface-variant">
+            <span class="material-symbols-outlined text-[32px] opacity-60">category</span>
+            <p class="mt-2 text-body-sm">暂无剧集</p>
+        </div>
+        {% endif %}
+    </section>
+    {% endfor %}
+</div>
+{% endblock %}

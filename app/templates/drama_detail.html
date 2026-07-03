@@ -37,6 +37,9 @@
             <button class="btn btn-secondary btn-sm" data-toggle="tags-panel">
                 <span class="material-symbols-outlined text-[16px]">sell</span>编辑标签
             </button>
+            <button class="btn btn-secondary btn-sm" data-toggle="featured-panel">
+                <span class="material-symbols-outlined text-[16px]">local_fire_department</span>运营分类
+            </button>
             <button class="btn btn-secondary btn-sm" data-toggle="actors-panel">
                 <span class="material-symbols-outlined text-[16px]">person</span>编辑演员
             </button>
@@ -199,6 +202,42 @@
             </div>
         </section>
 
+        <!-- Featured categories editor (collapsible) -->
+        <section id="featured-panel" class="bg-surface-container-high border border-outline-variant rounded-lg overflow-hidden hidden">
+            <div class="px-4 py-3 border-b border-outline-variant bg-surface-container flex items-center justify-between">
+                <h3 class="text-headline-sm flex items-center gap-2">
+                    <span class="material-symbols-outlined text-secondary-fixed-dim text-[18px]">local_fire_department</span>
+                    运营分类
+                </h3>
+                <button class="btn btn-xs btn-ghost" data-toggle="featured-panel"><span class="material-symbols-outlined text-[16px]">close</span></button>
+            </div>
+            <div class="p-4">
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <label class="flex items-center gap-2 rounded-md border border-outline-variant bg-surface-container-low px-3 py-2">
+                        <input type="checkbox" class="featured-category" value="hot">
+                        <span class="material-symbols-outlined text-[16px] text-tertiary">local_fire_department</span>
+                        <span>最热</span>
+                    </label>
+                    <label class="flex items-center gap-2 rounded-md border border-outline-variant bg-surface-container-low px-3 py-2">
+                        <input type="checkbox" class="featured-category" value="new">
+                        <span class="material-symbols-outlined text-[16px] text-secondary-fixed-dim">new_releases</span>
+                        <span>最新</span>
+                    </label>
+                    <label class="flex items-center gap-2 rounded-md border border-outline-variant bg-surface-container-low px-3 py-2">
+                        <input type="checkbox" class="featured-category" value="exclusive">
+                        <span class="material-symbols-outlined text-[16px] text-primary">workspace_premium</span>
+                        <span>独家</span>
+                    </label>
+                </div>
+                <div class="mt-3 flex items-center gap-3">
+                    <button class="btn btn-primary" id="save-featured-btn">
+                        <span class="material-symbols-outlined text-[16px]">save</span>保存分类
+                    </button>
+                    <span class="meta">用于客户端首页分类展示，可多选</span>
+                </div>
+            </div>
+        </section>
+
         <!-- Actors editor (collapsible) -->
         <section id="actors-panel" class="bg-surface-container-high border border-outline-variant rounded-lg overflow-hidden hidden">
             <div class="px-4 py-3 border-b border-outline-variant bg-surface-container flex items-center justify-between">
@@ -293,7 +332,7 @@ const SLUG = DRAMA.slug;
 
 // --- Panel toggles (all buttons with data-toggle="xxx" toggle the panel section) ---
 // These three are mutually exclusive — opening one collapses the others.
-const EXCLUSIVE_PANELS = ['translations-panel', 'tags-panel', 'actors-panel'];
+const EXCLUSIVE_PANELS = ['translations-panel', 'tags-panel', 'featured-panel', 'actors-panel'];
 document.querySelectorAll('[data-toggle]').forEach(btn => {
     btn.addEventListener('click', () => {
         const target = document.getElementById(btn.dataset.toggle);
@@ -312,6 +351,8 @@ document.querySelectorAll('[data-toggle]').forEach(btn => {
                 renderTranslationsPanel().then(() => { document.getElementById('translations-rows').dataset.loaded = '1'; });
             } else if (btn.dataset.toggle === 'tags-panel' && !document.getElementById('tags-multi').dataset.loaded) {
                 renderTagsPanel().then(() => { document.getElementById('tags-multi').dataset.loaded = '1'; });
+            } else if (btn.dataset.toggle === 'featured-panel') {
+                renderFeaturedPanel();
             } else if (btn.dataset.toggle === 'actors-panel' && !document.getElementById('actors-multi').dataset.loaded) {
                 renderActorsPanel().then(() => { document.getElementById('actors-multi').dataset.loaded = '1'; });
             }
@@ -410,6 +451,13 @@ function renderActorsPanel() {
             if (used.has(a.slug)) opt.selected = true;
             sel.appendChild(opt);
         }
+    });
+}
+
+function renderFeaturedPanel() {
+    const used = new Set(DRAMA.featured_categories || []);
+    document.querySelectorAll('.featured-category').forEach(cb => {
+        cb.checked = used.has(cb.value);
     });
 }
 
@@ -539,6 +587,9 @@ async function refreshDrama() {
         if (feDisplay && DRAMA.free_episodes != null && feInput.classList.contains('hidden')) {
             feDisplay.textContent = String(DRAMA.free_episodes);
             feDisplay.dataset.value = String(DRAMA.free_episodes);
+        }
+        if (!document.getElementById('featured-panel').classList.contains('hidden')) {
+            renderFeaturedPanel();
         }
     } catch (e) {
         console.error('refresh failed', e);
@@ -844,6 +895,19 @@ document.getElementById('save-tags-btn').addEventListener('click', async () => {
         flash('标签已保存', 'info');
         location.reload();
     } catch (e) { flash(`保存失败: ${e.body?.detail || e}`, 'error'); }
+});
+
+document.getElementById('save-featured-btn').addEventListener('click', async () => {
+    const cats = Array.from(document.querySelectorAll('.featured-category:checked')).map(cb => cb.value);
+    try {
+        await fetchJSON(`/admin/dramas/${encodeURIComponent(SLUG)}/featured-categories`, {
+            method: 'PUT', body: cats,
+        });
+        await refreshDrama();
+        flash('运营分类已保存', 'info');
+    } catch (e) {
+        flash(`保存分类失败: ${e.body?.detail || e}`, 'error');
+    }
 });
 
 document.getElementById('save-actors-btn').addEventListener('click', async () => {
