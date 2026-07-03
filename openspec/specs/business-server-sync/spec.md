@@ -239,7 +239,7 @@ The business server MUST: validate the API key; ensure the drama exists (else 40
 - **GIVEN** episode `ly-ep-3` has `upload_version=2`
 - **WHEN** the HLS sync worker calls `POST /sync/episodes`
 - **THEN** playlist object keys, `payload.cover_key`, and subtitle keys use the `Drama/prod/ly/ep-3-v2/...` prefix
-- **AND** if legacy staging cover/subtitle objects only exist under `Drama/staging/ly/ep-3/...`, the sync worker may copy those bytes into the versioned prod prefix for compatibility
+- **AND** the sync worker does not copy legacy staging objects for compatibility; missing prod objects are caught by offline audit
 
 #### Scenario: API key mismatch returns 401
 - **GIVEN** the business server is running with a different `X-API-Key` than the HLS server is sending

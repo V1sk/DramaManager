@@ -9,7 +9,7 @@
 - **CDN 不友好**：海报 / 封面是客户端高频展示的小图，应该走 OSS 加速；现在每次都从业务服务器本地磁盘 serve。
 - **职责漂移**：业务服务器既要存元数据又要存二进制资产，职责模糊。
 
-把这三类资源对齐到视频切片的处理方式：HLS 端在写盘时**同时上传 OSS staging**，sync 时**OSS 服务端拷贝到 prod**，payload 直接给 prod 端绝对 URL，业务服务器只记 URL 不取字节。
+把这三类资源对齐到视频切片的处理方式：HLS 端在写盘时**同时上传 OSS prod**，sync 时直接给 prod 端对象 key / URL，业务服务器只记 URL 不取字节。历史 staging 前缀只作为已迁移数据的遗留区域，不再参与正常 sync。
 
 ## What Changes
 
@@ -36,8 +36,8 @@ photobundle/
 
 ### 同步路径
 
-- 同步 drama 时：海报 staging→prod server-side copy（每个语言一个对象）。
-- 同步 episode 时：集封面 + 全部字幕 staging→prod server-side copy。
+- 同步 drama 时：按当前 DB 海报 URL 拼出 prod object key（每个语言一个对象）。
+- 同步 episode 时：按当前集版本拼出集封面 + 全部字幕 prod object key。
 - 同步 delete 时：`unpublish_*_from_prod` 已经按前缀删，自动覆盖这些新增对象。
 
 ### Wire 协议变更（**BREAKING**）
@@ -75,16 +75,16 @@ photobundle/
 - `drama-meta-translations`：`POST /admin/dramas/{slug}/poster` 在本地写盘后 SHALL 立即上传到 OSS staging；`DELETE` 同时清理 staging OSS。响应 / 错误语义不变。
 - `episode-subtitles`：`POST /admin/episodes/{slug}/{ep}/subtitles` 写盘后 SHALL 立即上传 OSS staging；`DELETE` 同时清理。响应不变。
 - `hls-management-server`：cover 提取（pipeline）和 cover 替换（`POST /api/episodes/{slug}/{ep}/cover`）写盘后 SHALL 立即上传 OSS staging。
-- `business-server-sync`：`POST /sync/dramas` 和 `POST /sync/episodes` payload 中的 `poster_url` / `cover_url` / `subtitles[].url` 切换为**绝对 prod OSS URL**；删除业务服务器 URL 拉取语义和对应 502 错误码。Sync worker 在调用 `/sync/episodes` 之前先把 staging→prod server-side copy 这些资产；sync delete 流程的 `unpublish_*_from_prod` 自动覆盖这些新对象（前缀级清理）。
+- `business-server-sync`：`POST /sync/dramas` 和 `POST /sync/episodes` payload 中的 `poster_url` / `cover_url` / `subtitles[].url` 切换为**绝对 prod OSS URL**；删除业务服务器 URL 拉取语义和对应 502 错误码。Sync worker 不再做 staging→prod server-side copy 或逐对象存在性检查；sync delete 流程的 `unpublish_*_from_prod` 自动覆盖这些新对象（前缀级清理）。
 
 ## Impact
 
 - **代码**：
-  - `app/publish.py`：新增 `publish_poster_to_prod(slug, lang) -> str`、`publish_cover_to_prod(slug, ep_dir) -> str`、`publish_subtitle_to_prod(slug, ep_dir, lang) -> str`（返回 prod URL，工作方式同 `publish_ladder_to_prod`）；新增 `upload_poster_to_staging` / `upload_cover_to_staging` / `upload_subtitle_to_staging`（被 router 在写盘后调用）；新增 `unpublish_poster_from_*` 等针对单个对象的 helpers（删除单个海报 / 字幕 / 替换封面时用）。
+  - `app/publish.py`：新增 `publish_poster_to_prod(slug, lang) -> str`、`publish_cover_to_prod(slug, ep_dir) -> str`、`publish_subtitle_to_prod(slug, ep_dir, lang) -> str`（返回 prod object key）；新增 `upload_poster_to_staging` / `upload_cover_to_staging` / `upload_subtitle_to_staging`（历史命名保留，实际写 prod，被 router 在写盘后调用）；新增 `unpublish_poster_from_*` 等针对单个对象的 helpers（删除单个海报 / 字幕 / 替换封面时用）。
   - `app/routers/admin.py`：海报 upload/delete handler、字幕 upload/delete handler 增加 OSS 调用。
   - `app/routers/api.py`：cover 替换 handler 增加 OSS 调用。
   - `app/queue.py`：worker 在 cover 提取之后增加 OSS 上传步骤。
-  - `app/sync.py`：`build_drama_payload` / `build_episode_payload` 改为吐绝对 prod URL；`handle_drama_sync` / `handle_episode_sync` 在调用业务服务器之前先 server-side copy 这些资产到 prod。
+  - `app/sync.py`：`build_drama_payload` / `build_episode_payload` 改为吐绝对 prod URL；`handle_drama_sync` / `handle_episode_sync` 在调用业务服务器之前生成这些资产的 prod key。
 - **Schema**：无变化（DB 列保持现状；对应 URL 字段在 `episodes.cover_url` / translations `field='poster'` 仍存相对路径，作为本地落盘位置；OSS URL 由 sync worker 即时拼）。
 - **外部契约**：
   - 业务服务器侧 `/sync/*` 处理流程**简化** — 不再做 URL 拉取。
@@ -92,5 +92,5 @@ photobundle/
   - 客户端 SDK：m3u8 已经引用 OSS 绝对 URL，加上 cover / poster / subtitle 也变成绝对 URL，整体上 SDK 的 HTTP 端点数从"业务服务器 + OSS"变成更倾向"主体 OSS + 业务服务器只做元数据 + DRM key"，CDN 命中率提升。
 - **OSS 写量**：编辑频率高的资源（封面 / 字幕）每次保存多一次 OSS PUT。同一个 slug+lang 的 PUT 是覆盖（OSS 计费没有惩罚），可接受。
 - **CORS**：bucket CORS 原本就允许公开 GET，新增对象类型（图片 / vtt）也满足。
-- **迁移**：升级前已有的剧集需要 backfill —— 提供 `scripts/backfill_assets_to_oss.py` 一次性把 `/videos/.../poster/`、`/videos/.../cover.jpg`、`/videos/.../subtitles/` 下所有现存文件上传到 staging。幂等。
+- **迁移**：升级前已有的剧集需要 backfill —— 提供 `scripts/backfill_assets_to_oss.py` 一次性把 `/videos/.../poster/`、`/videos/.../cover.jpg`、`/videos/.../subtitles/` 下所有现存文件上传到 prod。迁移后可运行 `scripts/audit_prod_assets.py` 离线校验 DB 当前引用的 prod 对象是否齐全。
 - **文档**：更新 `docs/business-server-integration.md`（删 §5 URL 拉取 contract，第 7 节 OSS 路径表加新增项，第 12 节时序图简化业务服务器侧的拉取分支），更新 `CLAUDE.md` OSS 拓扑章节。

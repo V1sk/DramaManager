@@ -317,8 +317,8 @@ def _ingest_episode_from_file(
     untouched.
 
     Cover.jpg follows the same versioned episode directory as the media
-    artifacts (`ep-{n}` for v1, `ep-{n}-v{V}` for v2+), so sync can copy the
-    current version's full asset set without looking in mixed prefixes.
+    artifacts (`ep-{n}` for v1, `ep-{n}-v{V}` for v2+), so sync can publish the
+    current version's prod keys without looking in mixed prefixes.
 
     Raises HTTPException on validation/IO failure.
     """
@@ -438,8 +438,8 @@ def _copy_existing_subtitles_to_version(
 
     Subtitles are keyed by stable episode_id + lang in SQLite, but the actual
     bucket/local path must follow the current media version so sync can publish
-    a self-contained `ep-N-vV/` prefix. Missing legacy files are ignored; sync
-    has a staging fallback for already-deployed rows.
+    a self-contained `ep-N-vV/` prefix. Missing legacy files are ignored; the
+    audit script can catch any prod object gaps after migration.
     """
     ep_dir = db.episode_ep_dir(ep_number, upload_version)
     episode_id = f"{drama_slug}-ep-{ep_number}"

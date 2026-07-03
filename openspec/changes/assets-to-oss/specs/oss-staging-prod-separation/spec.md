@@ -2,7 +2,7 @@
 
 ### Requirement: staging vs prod path layout
 
-OSS objects representing each drama's full asset set SHALL be stored under two parallel prefixes within the same bucket:
+OSS objects representing each drama's full asset set SHALL be stored under the prod prefix within the same bucket. The staging prefix MAY still exist for historical data and cleanup compatibility, but it is no longer part of the normal publish path.
 
 **Per-rung media files (existing)**:
 - `Drama/staging/{slug}/{ep_dir}/{ladder}/init-{ladder}.mp4`
@@ -22,34 +22,30 @@ OSS objects representing each drama's full asset set SHALL be stored under two p
 - `Drama/staging/{slug}/{ep_dir}/subtitles/{lang_code}.vtt`
 - `Drama/prod/{slug}/{ep_dir}/subtitles/{lang_code}.vtt`
 
-The encoder pipeline + admin handlers (this server) SHALL only ever write under `Drama/staging/`. The `Drama/prod/` subtree is populated exclusively by sync-time copy operations (`publish_ladder_to_prod`, `publish_poster_to_prod`, `publish_cover_to_prod`, `publish_subtitle_to_prod`).
+The encoder pipeline + admin handlers (this server) SHALL write current assets directly under `Drama/prod/`. Sync-time helpers (`publish_ladder_to_prod`, `publish_poster_to_prod`, `publish_cover_to_prod`, `publish_subtitle_to_prod`) SHALL generate prod object keys / playlist text and MUST NOT list/copy staging objects in the normal sync path.
 
 The constants `OSS_STAGING_PREFIX` (= `"Drama/staging"`) and `OSS_PROD_PREFIX` (= `"Drama/prod"`) SHALL be defined in `app/oss_upload.py` and used by all callers; the strings SHALL NOT be re-hardcoded elsewhere.
 
-#### Scenario: encoder writes media to staging only
+#### Scenario: encoder writes media to prod
 - **GIVEN** OSS mode enabled and an episode `(slug='ly', ep=3)` reaching pipeline completion
 - **WHEN** worker runs `publish_ladder('ly', 'ep-3', '720p')`
-- **THEN** the OSS object `Drama/staging/ly/ep-3/720p/init-720p.mp4` exists
-- **AND** at least one `Drama/staging/ly/ep-3/720p/seg-720p-N.m4s` exists
-- **AND** no objects under `Drama/prod/ly/...` were created by this call
+- **THEN** the OSS object `Drama/prod/ly/ep-3/720p/init-720p.mp4` exists
+- **AND** at least one `Drama/prod/ly/ep-3/720p/seg-720p-N.m4s` exists
 
-#### Scenario: poster upload writes to staging only
+#### Scenario: poster upload writes to prod
 - **GIVEN** OSS mode enabled and an existing drama `ly` with `name` translation in `zh-rCN`
 - **WHEN** the operator POSTs `image/jpeg` to `/admin/dramas/ly/poster?lang=zh-rCN`
-- **THEN** the OSS object `Drama/staging/ly/poster/zh-rCN.jpg` exists with the uploaded bytes
-- **AND** no objects under `Drama/prod/ly/poster/` were created by this call
+- **THEN** the OSS object `Drama/prod/ly/poster/zh-rCN.jpg` exists with the uploaded bytes
 
-#### Scenario: cover extraction writes to staging only
+#### Scenario: cover extraction writes to prod
 - **GIVEN** OSS mode enabled and an episode upload reaching pipeline completion
 - **WHEN** worker uploads the extracted cover via `upload_cover_to_staging('ly', 'ep-3')`
-- **THEN** the OSS object `Drama/staging/ly/ep-3/cover.jpg` exists
-- **AND** no `Drama/prod/ly/ep-3/cover.jpg` was created by this call
+- **THEN** the OSS object `Drama/prod/ly/ep-3/cover.jpg` exists
 
-#### Scenario: subtitle upload writes to staging only
+#### Scenario: subtitle upload writes to prod
 - **GIVEN** OSS mode enabled and an existing episode `ly-ep-3`
 - **WHEN** the operator POSTs `text/vtt` to `/admin/episodes/ly/3/subtitles?lang=en`
-- **THEN** the OSS object `Drama/staging/ly/ep-3/subtitles/en.vtt` exists with the uploaded bytes
-- **AND** no objects under `Drama/prod/ly/ep-3/subtitles/` were created by this call
+- **THEN** the OSS object `Drama/prod/ly/ep-3/subtitles/en.vtt` exists with the uploaded bytes
 
 ### Requirement: unpublish primitives for prod and staging
 
@@ -139,35 +135,25 @@ When `settings.oss_enabled` is `false`, these primitives MUST NOT be called; beh
 
 ### Requirement: prod-publish primitives for non-segment assets
 
-`app/publish.py` SHALL expose three publish helpers that copy a single staging asset to its prod sibling and return the prod URL:
+`app/publish.py` SHALL expose three publish helpers that return the prod object key for the current asset:
 
-- `publish_poster_to_prod(slug: str, lang: str, ext: str) -> str`: server-side copy `Drama/staging/{slug}/poster/{lang}.{ext}` → `Drama/prod/{slug}/poster/{lang}.{ext}`. Returns `oss_prod_public_base_url/...`. Raises `PublishError` if the staging object is missing.
-- `publish_cover_to_prod(slug: str, ep_dir: str) -> str`: copy `Drama/staging/{slug}/{ep_dir}/cover.jpg` → prod sibling. Returns prod URL. Raises if staging missing.
-- `publish_subtitle_to_prod(slug: str, ep_dir: str, lang: str) -> str`: copy `Drama/staging/{slug}/{ep_dir}/subtitles/{lang}.vtt` → prod sibling. Returns prod URL. Raises if staging missing.
+- `publish_poster_to_prod(slug: str, lang: str, ext: str) -> str`: returns `Drama/prod/{slug}/poster/{lang}.{ext}`.
+- `publish_cover_to_prod(slug: str, ep_dir: str) -> str`: returns `Drama/prod/{slug}/{ep_dir}/cover.jpg`.
+- `publish_subtitle_to_prod(slug: str, ep_dir: str, lang: str) -> str`: returns `Drama/prod/{slug}/{ep_dir}/subtitles/{lang}.vtt`.
 
-These mirror `publish_ladder_to_prod` semantically: same idempotent overwrite behavior; same `PublishError` raising; called only by the sync worker.
+These mirror `publish_ladder_to_prod` semantically after migration: called by the sync worker, but no remote `list_with_prefix` / `copy_object` is performed.
 
-#### Scenario: poster publish-to-prod copies single object
-- **GIVEN** `Drama/staging/ly/poster/zh-rCN.jpg` exists (200 KB)
+#### Scenario: poster publish-to-prod returns prod key
+- **GIVEN** drama `ly` has a `zh-rCN` poster filename `zh-rCN.jpg`
 - **WHEN** the sync worker calls `publish_poster_to_prod('ly', 'zh-rCN', 'jpg')`
-- **THEN** `Drama/prod/ly/poster/zh-rCN.jpg` exists with byte-identical content
-- **AND** the function returns `"https://photobundle.oss-ap-southeast-1.aliyuncs.com/Drama/prod/ly/poster/zh-rCN.jpg"`
-- **AND** the staging object is unchanged
+- **THEN** the function returns `"Drama/prod/ly/poster/zh-rCN.jpg"`
 
-#### Scenario: cover publish-to-prod copies single object
-- **GIVEN** `Drama/staging/ly/ep-3/cover.jpg` exists
+#### Scenario: cover publish-to-prod returns prod key
+- **GIVEN** episode `ly` / `ep-3` is ready
 - **WHEN** the sync worker calls `publish_cover_to_prod('ly', 'ep-3')`
-- **THEN** `Drama/prod/ly/ep-3/cover.jpg` exists
-- **AND** the function returns the prod URL
+- **THEN** the function returns `"Drama/prod/ly/ep-3/cover.jpg"`
 
-#### Scenario: subtitle publish-to-prod copies single object
-- **GIVEN** `Drama/staging/ly/ep-3/subtitles/en.vtt` exists
+#### Scenario: subtitle publish-to-prod returns prod key
+- **GIVEN** episode `ly` / `ep-3` has an `en` subtitle row
 - **WHEN** the sync worker calls `publish_subtitle_to_prod('ly', 'ep-3', 'en')`
-- **THEN** `Drama/prod/ly/ep-3/subtitles/en.vtt` exists
-- **AND** the function returns the prod URL
-
-#### Scenario: publish-to-prod with missing staging raises
-- **GIVEN** no object at `Drama/staging/ly/poster/never.jpg`
-- **WHEN** the sync worker calls `publish_poster_to_prod('ly', 'never', 'jpg')`
-- **THEN** the function raises `PublishError`
-- **AND** no `Drama/prod/ly/poster/never.jpg` is created
+- **THEN** the function returns `"Drama/prod/ly/ep-3/subtitles/en.vtt"`

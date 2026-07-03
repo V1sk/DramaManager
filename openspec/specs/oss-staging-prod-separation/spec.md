@@ -65,35 +65,34 @@ These primitives SHALL be used only by `app/publish.py`; routers and other modul
 - **THEN** no OSS calls are made
 - **AND** the function returns without error
 
-### Requirement: publish_ladder_to_prod copies and returns prod-flavored m3u8
+### Requirement: publish_ladder_to_prod returns prod-flavored m3u8 without remote copy
 
 `app/publish.py` SHALL expose `publish_ladder_to_prod(slug: str, ep_dir: str, ladder: str) -> str` that:
 
-1. Lists every key under `Drama/staging/{slug}/{ep_dir}/{ladder}/`. If the list is empty, raises `PublishError` with a clear message ("no staging objects; publish_ladder must run first").
-2. For every key in that list ending with `.mp4` or `.m4s`, copies it to the corresponding `Drama/prod/{slug}/{ep_dir}/{ladder}/` location via `copy_object`. Other extensions are skipped (defensive — should not exist).
-3. Reads the local file at `OUT_DIR/{slug}/{ep_dir}/{ladder}/media-{ladder}.m3u8`. If missing, raises `PublishError`.
-4. Returns the local m3u8 text with `oss_staging_public_base_url + "/"` replaced by `oss_prod_public_base_url + "/"` everywhere it occurs. The `#EXT-X-KEY:URI` line (which contains a `/drm/...` relative path) is unaffected.
+1. Reads the local file at `OUT_DIR/{slug}/{ep_dir}/{ladder}/media-{ladder}.m3u8`. If missing, raises `PublishError`.
+2. Returns the local m3u8 text with relative init/segment references rewritten to `Drama/prod/{slug}/{ep_dir}/{ladder}/{filename}` object keys. The `#EXT-X-KEY:URI` line (which contains a `/drm/...` relative path) is unaffected.
+3. MUST NOT list prod/staging objects or call `copy_object` during normal sync.
 
-The function is idempotent: re-runs overwrite prod objects with the (likely identical) staging copies and re-derive the same m3u8 text.
+The function is idempotent: re-runs re-derive the same m3u8 text.
 
 #### Scenario: full ladder publish to prod returns rewritten m3u8
-- **GIVEN** staging has `Drama/staging/ly/ep-3/720p/init-720p.mp4` and 60 `seg-720p-N.m4s` objects, and the local m3u8 references `https://photobundle.../Drama/staging/ly/ep-3/720p/...` URLs
+- **GIVEN** local m3u8 references relative `init-720p.mp4` and `seg-720p-N.m4s` filenames
 - **WHEN** the application calls `publish_ladder_to_prod('ly', 'ep-3', '720p')`
-- **THEN** all 61 objects exist under `Drama/prod/ly/ep-3/720p/...`
-- **AND** the function returns a string where every occurrence of `https://photobundle.../Drama/staging/ly/ep-3/720p/` has been replaced by `https://photobundle.../Drama/prod/ly/ep-3/720p/`
+- **THEN** no object-storage list/copy call is made
+- **AND** the function returns a string where those references use `Drama/prod/ly/ep-3/720p/`
 - **AND** the line `#EXT-X-KEY:METHOD=AES-128,URI="/drm/ly/ep-3/key",IV=0x...` is byte-identical to the local m3u8
 
 #### Scenario: prod m3u8 still passes idempotent rewrite
 - **GIVEN** the prod m3u8 returned from a successful call
 - **WHEN** `publish_ladder_to_prod` runs a second time for the same `(slug, ep_dir, ladder)`
 - **THEN** the returned text is byte-equal to the previous return value
-- **AND** the prod objects are overwritten in place (same content)
+- **AND** no object-storage copy is performed
 
-#### Scenario: staging absent → PublishError
-- **GIVEN** no objects under `Drama/staging/never/ep-1/720p/`
+#### Scenario: local playlist absent → PublishError
+- **GIVEN** no local playlist at `OUT_DIR/never/ep-1/720p/media-720p.m3u8`
 - **WHEN** the application calls `publish_ladder_to_prod('never', 'ep-1', '720p')`
 - **THEN** the function raises `PublishError`
-- **AND** no objects are created under `Drama/prod/never/`
+- **AND** no object-storage call is made
 
 ### Requirement: unpublish primitives for prod and staging
 

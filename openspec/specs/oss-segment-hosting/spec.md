@@ -42,7 +42,7 @@ OSS 模式启用时，worker 在 `pipeline.sh` 三个 stage 全部成功后、`s
 
 任一档的上传或改写失败时，worker MUST `set_status('failed', error_message=...)` 并保留本地产物供事后排查；MUST NOT 把 episode 状态置为 `ready`。
 
-历史 staging 对象 MAY exist for dirty legacy rows; sync 阶段只在 prod 对象缺失时 fallback copy staging 对象。
+历史 staging 对象 MAY exist for legacy rows, but after the online migration the sync stage MUST NOT fallback copy staging objects. Prod-object completeness is verified by offline audit.
 
 #### Scenario: 三档全部成功后 episode 进入 ready
 - **GIVEN** OSS 模式启用，worker 已完成 pipeline 三个 stage
@@ -60,12 +60,12 @@ OSS 模式启用时，worker 在 `pipeline.sh` 三个 stage 全部成功后、`s
 - **AND** 本地 `out/{slug}/ep-{n}/` 目录与 keys 文件 MUST 保留，未被清理
 - **AND** 已上传到 staging 的对象 MAY 残留（清理由人工 / `unpublish_episode_from_staging` 处理）
 
-#### Scenario: oss_path 形态符合 staging 前缀约定
+#### Scenario: oss_path 形态符合 prod 前缀约定
 - **GIVEN** OSS 模式启用，正在上传 `drama_slug=zhetian, ep_number=1, ladder=720p` 的第 0 个切片
 - **WHEN** 调用 `upload_file(oss_path, local_file_path)`
-- **THEN** `oss_path == "Drama/staging/zhetian/ep-1/720p/seg-720p-0.m4s"`
+- **THEN** `oss_path == "Drama/prod/zhetian/ep-1/720p/seg-720p-0.m4s"`
 - **AND** `oss_path` MUST NOT 以 `/` 开头
-- **AND** 同档对应 init 的上传调用使用 `oss_path == "Drama/staging/zhetian/ep-1/720p/init-720p.mp4"`
+- **AND** 同档对应 init 的上传调用使用 `oss_path == "Drama/prod/zhetian/ep-1/720p/init-720p.mp4"`
 
 ### Requirement: m3u8 改写规则
 

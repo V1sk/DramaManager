@@ -411,10 +411,8 @@ async def handle_drama_sync(slug: str) -> None:
 
     db.set_drama_sync_status(slug, "syncing")
     try:
-        # storage-to-bucket: copy each per-language poster staging→prod first; the
-        # returned prod object keys go into the payload. PublishError here
-        # (e.g. staging object missing because never uploaded) → sync_failed
-        # without calling the business server.
+        # storage-to-bucket: derive each per-language poster prod object key for
+        # the payload. Upload handlers already wrote those objects to prod.
         poster_prod_keys: dict[str, str] = {}
         poster_landscape_prod_keys: dict[str, str] = {}
         if settings.storage_enabled:
@@ -527,7 +525,7 @@ async def handle_episode_sync(slug: str, ep_number: int) -> None:
                 playlists[ladder] = await asyncio.to_thread(
                     publish.publish_ladder_to_prod, slug, ep_dir, ladder,
                 )
-            # storage-to-bucket: cover + subtitles staging→prod (return keys).
+            # storage-to-bucket: cover + subtitles prod keys.
             cover_prod_key = await asyncio.to_thread(
                 publish.publish_cover_to_prod, slug, ep_dir,
             )

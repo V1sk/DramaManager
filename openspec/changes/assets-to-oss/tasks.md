@@ -115,3 +115,9 @@
 - [x] 18.2 Add drama-detail controls to multi-select these fixed categories per drama.
 - [x] 18.3 Add an admin overview page grouped by the three fixed categories.
 - [x] 18.4 Include `featured_categories` in drama sync payloads.
+
+## 19. Post-migration direct-prod sync
+
+- [x] 19.1 Remove sync-time prod/staging existence checks and staging→prod fallback copy from `publish_*_to_prod`.
+- [x] 19.2 Add `scripts/audit_prod_assets.py` to verify current DB rows against prod object keys by prefix.
+- [x] 19.3 Update docs/specs to describe direct-prod upload and offline prod-asset audit.

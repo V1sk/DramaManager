@@ -2,7 +2,9 @@
 
 1. Retry resume: `_encode_artifacts_complete` detects a fully-encoded ep_dir so
    the worker can skip re-encoding, and `publish_ladder(skip_existing=True)`
-   only re-uploads the segments that never made it to the bucket.
+   only re-uploads the segments that never made it to the bucket. Sync-time
+   `publish_*_to_prod` helpers only return prod keys and do not re-check/copy
+   staging objects.
 2. Episode numbering: `_next_ep_number` excludes `pending_delete` rows so a
    re-upload after deleting the only (synced) episode reuses ep 1 instead of
    jumping to ep 2.
@@ -163,28 +165,20 @@ def case_publish_ladder_skip_existing():
             f"{staging_prefix}/seg-720p-1.m4s",
         ])
         storage_mod.provider = prov3
-        publish.publish_ladder_to_prod("ly", "ep-1", "720p")
-        assert len(prov3.copied) == 3
-        assert (
-            f"{staging_prefix}/seg-720p-1.m4s",
-            "Drama/prod/ly/ep-1/720p/seg-720p-1.m4s",
-        ) in prov3.copied
-        print("OK publish_ladder direct-prod resume + legacy staging fallback")
+        playlist3 = publish.publish_ladder_to_prod("ly", "ep-1", "720p")
+        assert "Drama/prod/ly/ep-1/720p/seg-720p-1.m4s" in playlist3
+        assert prov3.copied == []
+        print("OK publish_ladder direct-prod resume + sync-time no-copy")
 
 
-def case_versioned_asset_publish_fallbacks():
+def case_versioned_asset_publish_keys():
     with tempfile.TemporaryDirectory() as td:
         _setup_env(Path(td))
         _reset_app_modules()
         import app.storage as storage_mod
         from app import publish
 
-        direct = _FakeProvider(existing=[
-            "Drama/prod/ly/ep-1-v2/cover.jpg",
-            "Drama/prod/ly/ep-1-v2/subtitles/zh-rCN.vtt",
-            "Drama/prod/ly/poster/zh-rCN-v2.jpg",
-            "Drama/prod/ly/poster-landscape/zh-rCN-v2.jpg",
-        ])
+        direct = _FakeProvider(existing=[])
         storage_mod.provider = direct
         assert publish.publish_cover_to_prod("ly", "ep-1-v2") == "Drama/prod/ly/ep-1-v2/cover.jpg"
         assert publish.publish_subtitle_to_prod("ly", "ep-1-v2", "zh-rCN") == (
@@ -208,33 +202,18 @@ def case_versioned_asset_publish_fallbacks():
 
         cover_key = publish.publish_cover_to_prod("ly", "ep-1-v2")
         assert cover_key == "Drama/prod/ly/ep-1-v2/cover.jpg"
-        assert (
-            "Drama/staging/ly/ep-1/cover.jpg",
-            "Drama/prod/ly/ep-1-v2/cover.jpg",
-        ) in prov.copied
 
         sub_key = publish.publish_subtitle_to_prod("ly", "ep-1-v2", "zh-rCN")
         assert sub_key == "Drama/prod/ly/ep-1-v2/subtitles/zh-rCN.vtt"
-        assert (
-            "Drama/staging/ly/ep-1/subtitles/zh-rCN.vtt",
-            "Drama/prod/ly/ep-1-v2/subtitles/zh-rCN.vtt",
-        ) in prov.copied
 
         poster_key = publish.publish_poster_to_prod("ly", "zh-rCN", "zh-rCN-v2.jpg")
         assert poster_key == "Drama/prod/ly/poster/zh-rCN-v2.jpg"
-        assert (
-            "Drama/staging/ly/poster/zh-rCN-v2.jpg",
-            "Drama/prod/ly/poster/zh-rCN-v2.jpg",
-        ) in prov.copied
         landscape_key = publish.publish_poster_to_prod(
             "ly", "zh-rCN", "zh-rCN-v2.jpg", "poster-landscape",
         )
         assert landscape_key == "Drama/prod/ly/poster-landscape/zh-rCN-v2.jpg"
-        assert (
-            "Drama/staging/ly/poster-landscape/zh-rCN-v2.jpg",
-            "Drama/prod/ly/poster-landscape/zh-rCN-v2.jpg",
-        ) in prov.copied
-        print("OK versioned cover/subtitle fallback + versioned poster publish")
+        assert prov.copied == []
+        print("OK versioned cover/subtitle/poster prod-key publish without sync copy")
 
 
 def case_next_ep_excludes_pending_delete():
@@ -436,8 +415,8 @@ def test_default_ladder_keeps_reupload_version():
     case_default_ladder_keeps_reupload_version()
 
 
-def test_versioned_asset_publish_fallbacks():
-    case_versioned_asset_publish_fallbacks()
+def test_versioned_asset_publish_keys():
+    case_versioned_asset_publish_keys()
 
 
 def test_upsert_pending_computes_versioned_cover_url():
@@ -459,7 +438,7 @@ def test_featured_categories_sync_payload_and_overview():
 if __name__ == "__main__":
     case_encode_artifacts_complete()
     case_publish_ladder_skip_existing()
-    case_versioned_asset_publish_fallbacks()
+    case_versioned_asset_publish_keys()
     case_next_ep_excludes_pending_delete()
     case_upsert_pending_computes_versioned_cover_url()
     case_missing_subtitle_file_is_hidden()

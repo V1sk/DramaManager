@@ -35,21 +35,20 @@
 │                            │         │                            │
 └──────────┬─────────────────┘         └──────────┬─────────────────┘
            │                                      │
-           │ 写 staging                           │ 读 prod
-           │ Drama/staging/...                    │ Drama/prod/...
+           │ 写 prod                              │ 读 prod
+           │ Drama/prod/...                       │ Drama/prod/...
            │                                      │
            ▼                                      ▼
         ┌──────────────────────────────────────────┐
         │  阿里云 OSS (photobundle bucket)          │
-        │   Drama/staging/{slug}/{ep_dir}/...      │
         │   Drama/prod/{slug}/{ep_dir}/...         │
         └──────────────────────────────────────────┘
 ```
 
-- **OSS bucket 共享**。staging 和 prod 共用 `photobundle` bucket、共用一套凭证；只是路径前缀不同。
-- **同步即"OSS 内服务端拷贝 + HTTP 通知"**。HLS 服务器在调你们 `/sync/episodes` 之前，会先用 `bucket.copy_object` 把 `Drama/staging/{...}` 拷一份到 `Drama/prod/{...}`（不下载到本地、不重传）。
+- **OSS bucket 共享**。历史 staging 和 prod 共用 `photobundle` bucket、共用一套凭证；迁移完成后，新上传资产直接写 `Drama/prod/...`。
+- **同步即"生成 prod key + HTTP 通知"**。HLS 服务器在调你们 `/sync/*` 时不再逐对象查询或 `copy_object`；缺失对象通过 `scripts/audit_prod_assets.py` 离线审计。
 - **m3u8 文本由 HTTP body 传给你们**，不通过 OSS。你们写到自己的本地磁盘 / OSS / CDN 都行。
-- **海报 / 封面 / 字幕**（v2.0 起）：和切片同等对待，HLS 端在 sync 时已经把它们 server-side copy 到 `Drama/prod/...` 前缀，sync payload 里给你们的就是绝对 OSS URL。**业务服务器 opaque 存储不主动拉**；客户端按 `EpisodeInfo` / `DramaSummary` 里的 URL 直连 OSS（CDN 友好）。
+- **海报 / 封面 / 字幕**（v2.0 起）：和切片同等对待，HLS 端上传时已经把它们写到 `Drama/prod/...` 前缀，sync payload 里给你们的就是绝对 OSS URL。**业务服务器 opaque 存储不主动拉**；客户端按 `EpisodeInfo` / `DramaSummary` 里的 URL 直连 OSS（CDN 友好）。
 
 ---
 
@@ -228,7 +227,7 @@ HLS 端在收到 2xx 后会**额外**调用 `unpublish_drama_from_prod(slug)` �
 5. 遍历 `video_tracks`，把每档的 `playlist` 文本写到 `<biz_OUT_DIR>/{slug}/ep-{n}/{ladder}/media-{ladder}.m3u8`（`{ladder}` 取该档的 `video_tracks[].ladder`）。
 6. Upsert `episodes` 行（drama_slug, ep_number 联合主键）：把每档 `video_tracks[].{id,width,height}` 存进 DB（给客户端时直接拼 `videoTracks`），`cover_url` / `subtitles[].url` 的 OSS 绝对 URL 作为 opaque 字符串存。
 
-**注意**：m3u8 里引用的 `init-{ladder}.mp4` 和 `seg-{ladder}-N.m4s`、payload 里的 `cover_url` / `subtitles[].url` 已经由 HLS 端**通过 OSS server-side copy** 放在了 `Drama/prod/{slug}/ep-{n}/...` 下。**你们什么都不用做** —— 客户端按 m3u8 / `EpisodeInfo` 里的绝对 OSS URL 直接走 OSS（CDN）拿。
+**注意**：m3u8 里引用的 `init-{ladder}.mp4` 和 `seg-{ladder}-N.m4s`、payload 里的 `cover_url` / `subtitles[].url` 已经由 HLS 端上传/编码路径放在了 `Drama/prod/{slug}/ep-{n}/...` 下。**你们什么都不用做** —— 客户端按 m3u8 / `EpisodeInfo` 里的绝对 OSS URL 直接走 OSS（CDN）拿。
 
 **响应**：
 
@@ -266,11 +265,11 @@ HLS 端在收到 2xx 后会调用 `unpublish_episode_from_prod(slug, ep_dir)` �
 
 > v1.0 → v2.0 BREAKING：海报 / 封面 / 字幕从"业务服务器主动拉 HLS 服务器"改为"OSS 直发"。详见 §13。
 
-四类资产由 HLS 端直接写入 OSS prod 前缀；sync 阶段只把 prod object key 推给业务服务器。旧 staging 对象仅作为历史 dirty 数据的 fallback。
+四类资产由 HLS 端直接写入 OSS prod 前缀；sync 阶段只把 prod object key 推给业务服务器。迁移完成后，sync 阶段不再逐对象检查 prod/staging，也不再做 staging fallback copy。
 
 | 资产 | OSS prod 路径 | sync 时如何处理 |
 |---|---|---|
-| init / segment | `Drama/prod/{slug}/{ep_dir}/{ladder}/...` | 校验 prod 对象存在，生成 prod-flavored m3u8 |
+| init / segment | `Drama/prod/{slug}/{ep_dir}/{ladder}/...` | 生成 prod-flavored m3u8 |
 | 海报 | `Drama/prod/{slug}/poster/{lang}[-vN].{ext}` | 返回 prod object key |
 | 集封面 | `Drama/prod/{slug}/{ep_dir}/cover.jpg` | 返回 prod object key |
 | 字幕 | `Drama/prod/{slug}/{ep_dir}/subtitles/{lang}.vtt` | 返回 prod object key |
@@ -442,14 +441,12 @@ pending_delete ──► syncing ──► (HLS 端的行物理删除)
   │                      │ upload_cover_to_staging│                    │
   │                      │ upload_poster_to_staging × N                │
   │                      │ upload_subtitle_to_staging × N              │
-  │                      ├──────────────────────────────────────────►  │ Drama/staging/...
+  │                      ├──────────────────────────────────────────►  │ Drama/prod/...
   │                      │ episode / drama 行 sync_status=dirty        │
   │                      │                        │                    │
   │ 点击"[同步整部剧]"   │                        │                    │
   ├─────────────────────►│                        │                    │
-  │                      │ publish_*_to_prod (server-side copy 全部资产)│
-  │                      ├──────────────────────────────────────────►  │ Drama/prod/...
-  │                      │   (不走本机网卡，OSS 内部拷贝)              │
+  │                      │ publish_*_to_prod (生成 prod key / m3u8)    │
   │                      │                        │                    │
   │                      │ POST /sync/dramas      │                    │
   │                      │   (含 prod 海报绝对 URL) │                  │

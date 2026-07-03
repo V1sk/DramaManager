@@ -61,7 +61,7 @@ class TOSProvider:
 
     def copy_object(self, src_key: str, dst_key: str) -> None:
         # TOS copy_object signature: (dst_bucket, dst_key, src_bucket, src_key).
-        # Same bucket on both sides for our staging→prod use case.
+        # Same bucket on both sides for our object migration / cleanup tools.
         self._client.copy_object(
             self._bucket_name, dst_key, self._bucket_name, src_key,
         )

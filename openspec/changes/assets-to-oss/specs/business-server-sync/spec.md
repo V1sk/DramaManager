@@ -8,7 +8,7 @@ For `SyncDramaJob`:
 1. Read drama row.
 2. If `sync_status='pending_delete'`: call `DELETE /sync/dramas/{slug}` against the business server; on 2xx, call `unpublish_drama_from_prod(slug)` (prefix sweep — covers all assets including posters), then physically delete the drama row from the local DB. On non-2xx, set `sync_status='sync_failed'` with the error.
 3. Otherwise (status=`syncing`):
-   a. For each `(lang, ext)` poster present in this drama's translations, call `publish.publish_poster_to_prod(slug, lang, ext)`. Collect the returned prod URLs.
+   a. For each `(lang, ext)` poster present in this drama's translations, call `publish.publish_poster_to_prod(slug, lang, ext)`. Collect the returned prod keys.
    b. Build the `POST /sync/dramas` payload (drama row + translations + tags inline + actors inline + languages-used-by-drama inline). The `translations[lang].poster_url` field SHALL be the absolute prod OSS URL returned by step 3a (not a relative path). Languages without a poster keep `poster_url=null`.
    c. Call the business server. On 2xx, set `sync_status='clean'`, refresh `last_synced_at`. On non-2xx, set `sync_status='sync_failed'` with the error and stop (do not enqueue child episodes).
 4. After a successful drama upsert, enqueue a `SyncEpisodeJob` for every episode of this drama whose `sync_status ∈ {dirty, pending_delete}`.
@@ -19,20 +19,19 @@ For `SyncEpisodeJob`:
 3. If episode's `sync_status='pending_delete'`: call `DELETE /sync/episodes/{slug}/{ep}`; on 2xx, call `unpublish_episode_from_prod(slug, "ep-{ep}")` (single prefix sweep covering all ladders, cover, subtitles), then physically delete the episode row.
 4. Otherwise:
    a. Call `publish_ladder_to_prod` for each ladder (collect prod-flavored m3u8 strings).
-   b. Call `publish.publish_cover_to_prod(slug, "ep-{ep}")` to copy the cover staging→prod. Collect the returned prod URL.
-   c. For each subtitle row, call `publish.publish_subtitle_to_prod(slug, "ep-{ep}", lang)`. Collect the returned prod URLs.
+   b. Call `publish.publish_cover_to_prod(slug, ep_dir)` to derive the cover prod key. Collect the returned prod key.
+   c. For each subtitle row, call `publish.publish_subtitle_to_prod(slug, ep_dir, lang)`. Collect the returned prod keys.
    d. Build the `POST /sync/episodes` payload. `cover_url` SHALL be the absolute prod URL from step 4b. Each `subtitles[].url` SHALL be the absolute prod URL from step 4c. Each `playlists[ladder]` is the prod m3u8 text from 4a (already references prod OSS URLs).
    e. Call the business server. On 2xx, set `sync_status='clean'`, refresh `last_synced_at`. On non-2xx, set `sync_status='sync_failed'`.
 
-If any `publish_*_to_prod` call raises `PublishError` (e.g. staging object missing because the operator deleted it locally without re-uploading), the worker SHALL set `sync_status='sync_failed'` with a descriptive error and SHALL NOT call the business server.
+`publish_*_to_prod` SHALL NOT perform remote prod/staging existence checks or staging→prod copies during normal sync. If a helper raises for a local precondition (for example missing local playlist text), the worker SHALL set `sync_status='sync_failed'` with a descriptive error and SHALL NOT call the business server. Missing prod objects are detected by `scripts/audit_prod_assets.py`, not by the operator sync path.
 
 The worker SHALL handle exceptions per-job — a failure in one job MUST NOT crash the worker. The worker MUST mark the job's row `sync_failed` with a useful error before continuing.
 
-#### Scenario: drama sync copies posters to prod before HTTP call
+#### Scenario: drama sync derives poster prod keys before HTTP call
 - **GIVEN** drama `ly` `dirty` with poster translations in `zh-rCN` (`.jpg`) and `en` (`.png`)
 - **WHEN** the worker handles `SyncDramaJob('ly')`
-- **THEN** OSS server-side copies `Drama/staging/ly/poster/zh-rCN.jpg` → `Drama/prod/ly/poster/zh-rCN.jpg`
-- **AND** OSS server-side copies `Drama/staging/ly/poster/en.png` → `Drama/prod/ly/poster/en.png`
+- **THEN** no OSS/TOS `copy_object` call is made
 - **AND** the `POST /sync/dramas` payload's `translations["zh-rCN"].poster_url` is `"https://photobundle.../Drama/prod/ly/poster/zh-rCN.jpg"`
 - **AND** `translations["en"].poster_url` is `"https://photobundle.../Drama/prod/ly/poster/en.png"`
 
@@ -40,13 +39,12 @@ The worker SHALL handle exceptions per-job — a failure in one job MUST NOT cra
 - **GIVEN** drama `ly` has `name` translation in `ja` but no poster file for `ja`
 - **WHEN** the worker handles `SyncDramaJob('ly')`
 - **THEN** the payload's `translations["ja"].poster_url` is `null`
-- **AND** no `Drama/prod/ly/poster/ja.*` object is created
+- **AND** no remote prod/staging lookup is made for `ja`
 
-#### Scenario: episode sync copies cover and subtitles to prod
+#### Scenario: episode sync derives cover and subtitle prod keys
 - **GIVEN** episode `ly-ep-3` `dirty` with cover and subtitles in `en` and `zh-rCN`
 - **WHEN** the worker handles `SyncEpisodeJob('ly', 3)`
-- **THEN** OSS server-side copies cover staging→prod
-- **AND** OSS server-side copies each subtitle staging→prod (two copies)
+- **THEN** no OSS/TOS `copy_object` call is made for cover or subtitles
 - **AND** the `POST /sync/episodes` payload's `cover_url` is `"https://photobundle.../Drama/prod/ly/ep-3/cover.jpg"`
 - **AND** `subtitles[*].url` are absolute prod OSS URLs
 
@@ -71,12 +69,11 @@ The worker SHALL handle exceptions per-job — a failure in one job MUST NOT cra
 - **AND** all `Drama/prod/ly/ep-3/...` objects are gone (covers ladders, cover, subtitles)
 - **AND** the episodes row for `(ly, 3)` is physically gone from the DB
 
-#### Scenario: episode sync fails when staging asset is missing
-- **GIVEN** episode `ly-ep-3` `dirty`, but `Drama/staging/ly/ep-3/cover.jpg` was manually deleted from OSS
+#### Scenario: episode sync does not check staging asset existence
+- **GIVEN** episode `ly-ep-3` `dirty`, but no `Drama/staging/ly/ep-3/cover.jpg` object exists
 - **WHEN** the worker handles `SyncEpisodeJob('ly', 3)`
-- **THEN** `publish_cover_to_prod` raises `PublishError`
-- **AND** the row is set to `sync_failed` with the error mentioning the missing staging cover
-- **AND** the business server is NOT called
+- **THEN** `publish_cover_to_prod` returns the prod cover key
+- **AND** the business server request is allowed to proceed
 
 ### Requirement: business server `/sync/*` wire protocol
 
@@ -101,7 +98,7 @@ The business server (separate codebase) SHALL expose these four endpoints. Each 
 }
 ```
 
-**Field semantics changed**: `translations[lang].poster_url` is now an **absolute prod OSS URL** (e.g. `https://photobundle.oss-ap-southeast-1.aliyuncs.com/Drama/prod/ly/poster/zh-rCN.jpg`) — not a relative path. The bytes already exist at that URL by the time the business server receives the request (HLS-side did the staging→prod copy first). The business server MUST treat the URL as opaque: store it verbatim, return it verbatim to SDK clients.
+**Field semantics changed**: `translations[lang].poster_url` is now an **absolute prod OSS URL** (e.g. `https://photobundle.oss-ap-southeast-1.aliyuncs.com/Drama/prod/ly/poster/zh-rCN.jpg`) — not a relative path. The bytes already exist at that URL by the time the business server receives the request (HLS-side uploaded/encoded directly to prod). The business server MUST treat the URL as opaque: store it verbatim, return it verbatim to SDK clients.
 
 The business server MUST NOT fetch the URL to validate it or to mirror the bytes locally.
 
