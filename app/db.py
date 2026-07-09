@@ -38,6 +38,8 @@ CREATE TABLE IF NOT EXISTS dramas (
   -- 业务字段：免费集数。值=3 表示前 3 集 (ep_number 1..3) 免费，第 4 集起收费。
   -- 0 = 全部付费；默认 3 与业务场景对齐。SDK / 业务服务器据此决定付费墙。
   free_episodes    INTEGER NOT NULL DEFAULT 3,
+  -- 业务字段：是否连载中。1=连载中，0=已完结；同步给业务服务器用于客户端展示。
+  is_ongoing        INTEGER NOT NULL DEFAULT 1 CHECK(is_ongoing IN (0,1)),
   created_at       TEXT    NOT NULL,
   updated_at       TEXT    NOT NULL,
   FOREIGN KEY (default_lang) REFERENCES languages(code) ON DELETE RESTRICT
@@ -439,6 +441,7 @@ def _migrate_add_columns(conn: sqlite3.Connection) -> None:
         # immediately usable without manual data migration.
         "dramas": [
             ("free_episodes", "INTEGER NOT NULL DEFAULT 3"),
+            ("is_ongoing", "INTEGER NOT NULL DEFAULT 1"),
         ],
     }
     for table, cols in wanted.items():
@@ -628,6 +631,7 @@ def create_drama(
     default_lang: str,
     *,
     free_episodes: int = 3,
+    is_ongoing: bool = True,
 ) -> dict:
     """Insert a new drama row + initial `name` translation atomically.
 
@@ -638,6 +642,7 @@ def create_drama(
 
     `free_episodes` is the count of free episodes from the start (1..N); 0
     means everything is paid. Default 3 mirrors typical short-drama UX.
+    `is_ongoing` indicates whether the drama is still serializing.
     """
     if not _SLUG_RE.match(slug):
         raise DramaValidationError("drama_slug", "drama_slug must match ^[a-z0-9][a-z0-9-]*$")
@@ -645,6 +650,7 @@ def create_drama(
     if not name_trimmed:
         raise DramaValidationError("drama_name", "drama_name must not be empty")
     free_episodes = _validate_free_episodes(free_episodes)
+    is_ongoing_value = _validate_is_ongoing(is_ongoing)
 
     lang = get_language(default_lang)
     if lang is None:
@@ -659,9 +665,9 @@ def create_drama(
         try:
             try:
                 conn.execute(
-                    "INSERT INTO dramas(slug, default_lang, free_episodes, "
-                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-                    (slug, default_lang, free_episodes, now, now),
+                    "INSERT INTO dramas(slug, default_lang, free_episodes, is_ongoing, "
+                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (slug, default_lang, free_episodes, is_ongoing_value, now, now),
                 )
             except sqlite3.IntegrityError as e:
                 conn.execute("ROLLBACK")
@@ -798,6 +804,21 @@ def _validate_free_episodes(value) -> int:
     return n
 
 
+def _validate_is_ongoing(value) -> int:
+    """Coerce `is_ongoing` to the SQLite 0/1 representation."""
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, int) and value in (0, 1):
+        return value
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in {"true", "1", "yes", "on"}:
+            return 1
+        if v in {"false", "0", "no", "off"}:
+            return 0
+    raise DramaValidationError("is_ongoing", "is_ongoing must be a boolean")
+
+
 def update_drama_free_episodes(slug: str, new_value: int) -> dict | None:
     """Set drama.free_episodes. Returns the updated row, or None if drama
     doesn't exist. Caller is responsible for marking the drama dirty (we keep
@@ -811,6 +832,21 @@ def update_drama_free_episodes(slug: str, new_value: int) -> dict | None:
     with _connect() as conn:
         conn.execute(
             "UPDATE dramas SET free_episodes=?, updated_at=? WHERE slug=?",
+            (value, now, slug),
+        )
+        row = conn.execute("SELECT * FROM dramas WHERE slug=?", (slug,)).fetchone()
+    return dict(row) if row else None
+
+
+def update_drama_is_ongoing(slug: str, new_value: bool) -> dict | None:
+    """Set drama.is_ongoing. Returns the updated row, or None if missing."""
+    value = _validate_is_ongoing(new_value)
+    if get_drama(slug) is None:
+        return None
+    now = _now_iso()
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE dramas SET is_ongoing=?, updated_at=? WHERE slug=?",
             (value, now, slug),
         )
         row = conn.execute("SELECT * FROM dramas WHERE slug=?", (slug,)).fetchone()
@@ -2537,7 +2573,7 @@ def get_drama_with_sync(slug: str) -> dict | None:
     with _connect() as conn:
         row = conn.execute(
             "SELECT slug, default_lang, sync_status, sync_error, last_synced_at, "
-            "free_episodes, created_at, updated_at FROM dramas WHERE slug=?",
+            "free_episodes, is_ongoing, created_at, updated_at FROM dramas WHERE slug=?",
             (slug,),
         ).fetchone()
     return dict(row) if row else None

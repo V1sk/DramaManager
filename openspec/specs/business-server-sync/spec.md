@@ -35,7 +35,7 @@ Endpoints that change state visible to prod SHALL set the affected drama or epis
 
 **Drama-direct triggers (mark drama dirty):**
 - `POST /admin/dramas` (creation)
-- `PATCH /admin/dramas/{slug}` (default_lang change)
+- `PATCH /admin/dramas/{slug}` (default_lang / free_episodes / is_ongoing change)
 - `PUT /admin/dramas/{slug}/translations/{lang_code}` (name / synopsis upsert)
 - `DELETE /admin/dramas/{slug}/translations/{lang_code}` (translation removal)
 - `POST /admin/dramas/{slug}/poster` (poster upload)
@@ -160,6 +160,8 @@ The business server (separate codebase to be built later) SHALL expose these fou
 {
   "slug": str,                                 // matches ^[a-z0-9][a-z0-9-]*$
   "default_lang": str,                         // matches a `code` in this payload's `languages`
+  "free_episodes": int,                        // 0 = all paid; N = first N episodes free
+  "is_ongoing": bool,                          // true = serializing; false = completed
   "client_updated_at": str,                    // ISO 8601
   "featured_categories": [str],                // fixed values: hot/new/exclusive
   "translations": {                            // by lang_code
@@ -176,7 +178,7 @@ The business server (separate codebase to be built later) SHALL expose these fou
 }
 ```
 
-The business server MUST: validate the API key; upsert language rows; upsert tag rows + tag translations; upsert actor rows + actor translations; upsert drama row + drama translations; persist `poster_key` / `poster_landscape_key` as opaque prod object keys. On success → 200 `{"ok": true, "client_updated_at": "...", "synced_at": "..."}`. If the supplied `client_updated_at` is older than what is already stored → 409 (defensive against out-of-order overwrites).
+The business server MUST: validate the API key; upsert language rows; upsert tag rows + tag translations; upsert actor rows + actor translations; upsert drama row including `free_episodes` and `is_ongoing` + drama translations; persist `poster_key` / `poster_landscape_key` as opaque prod object keys. On success → 200 `{"ok": true, "client_updated_at": "...", "synced_at": "..."}`. If the supplied `client_updated_at` is older than what is already stored → 409 (defensive against out-of-order overwrites).
 
 **`DELETE /sync/dramas/{slug}`** — no body. Removes the drama and every cascading row (episodes, translations, tags-for-this-drama-only relations, posters on disk). Returns 204 on success or if the drama did not exist (idempotent). 401 on key mismatch.
 

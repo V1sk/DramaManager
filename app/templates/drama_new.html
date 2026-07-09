@@ -51,6 +51,14 @@
                 <input type="number" name="free_episodes" required min="0" max="9999" step="1" value="3">
                 <span class="text-[11px] text-on-surface-variant/70">前 N 集免费，第 N+1 集起付费；0 表示全部付费</span>
             </div>
+
+            <div class="flex flex-col gap-1.5">
+                <label class="text-body-sm text-on-surface-variant">连载状态 <span class="text-status-danger">*</span></label>
+                <select name="is_ongoing" required>
+                    <option value="true" selected>连载中</option>
+                    <option value="false">已完结</option>
+                </select>
+            </div>
         </div>
     </div>
 
@@ -171,6 +179,7 @@ document.getElementById('create-form').addEventListener('submit', async (ev) => 
         flash('免费集数必须是 0–9999 之间的整数', 'error');
         btn.disabled = false; return;
     }
+    const isOngoing = form.is_ongoing.value === 'true';
     const synopsis = form.synopsis.value.trim();
     const posterFile = form.poster.files[0] || null;
     const posterLandscapeFile = form.poster_landscape.files[0] || null;
@@ -190,6 +199,7 @@ document.getElementById('create-form').addEventListener('submit', async (ev) => 
         fd.append('drama_name', name);
         fd.append('default_lang', defaultLang);
         fd.append('free_episodes', String(freeEpisodes));
+        fd.append('is_ongoing', isOngoing ? 'true' : 'false');
         const res = await fetch('/admin/dramas', { method: 'POST', body: fd, redirect: 'manual' });
         if (!(res.type === 'opaqueredirect' || res.ok || res.status === 302)) {
             if (res.status === 409) {

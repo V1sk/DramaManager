@@ -142,6 +142,18 @@
                 <div class="text-[11px] text-on-surface-variant/70 mt-1">前 N 集免费，第 N+1 集起付费</div>
             </div>
 
+            <!-- 连载状态 -->
+            <div>
+                <div class="text-[11px] uppercase tracking-wider text-on-surface-variant mb-1">连载状态</div>
+                <div class="flex items-center gap-2 flex-wrap">
+                    <select id="is-ongoing-select" class="inline-input" data-value="{{ 1 if drama.is_ongoing else 0 }}">
+                        <option value="1" {% if drama.is_ongoing %}selected{% endif %}>连载中</option>
+                        <option value="0" {% if not drama.is_ongoing %}selected{% endif %}>已完结</option>
+                    </select>
+                    <span id="is-ongoing-saving" class="progress-text hidden">保存中…</span>
+                </div>
+            </div>
+
             <!-- 简介 -->
             <div>
                 <div class="text-[11px] uppercase tracking-wider text-on-surface-variant mb-1">简介</div>
@@ -588,6 +600,12 @@ async function refreshDrama() {
             feDisplay.textContent = String(DRAMA.free_episodes);
             feDisplay.dataset.value = String(DRAMA.free_episodes);
         }
+        const ongoingSel = document.getElementById('is-ongoing-select');
+        if (ongoingSel && DRAMA.is_ongoing != null) {
+            const value = DRAMA.is_ongoing ? '1' : '0';
+            ongoingSel.value = value;
+            ongoingSel.dataset.value = value;
+        }
         if (!document.getElementById('featured-panel').classList.contains('hidden')) {
             renderFeaturedPanel();
         }
@@ -954,6 +972,40 @@ document.getElementById('save-actors-btn').addEventListener('click', async () =>
             flash('免费集数已更新', 'info');
         } catch (e) { flash(`更新失败: ${e.body?.detail || e}`, 'error'); }
         finally { saveBtn.disabled = false; saveBtn.textContent = '保存'; }
+    });
+})();
+
+// --- Ongoing status selector ---
+(function () {
+    const select = document.getElementById('is-ongoing-select');
+    const saving = document.getElementById('is-ongoing-saving');
+    if (!select) return;
+
+    select.addEventListener('change', async () => {
+        const prev = select.dataset.value || '1';
+        const value = select.value;
+        if (value === prev) return;
+        select.disabled = true;
+        if (saving) saving.classList.remove('hidden');
+        try {
+            const result = await fetchJSON(`/admin/dramas/${encodeURIComponent(SLUG)}`, {
+                method: 'PATCH',
+                body: { is_ongoing: value === '1' },
+            });
+            const row = result.body;
+            const next = row.is_ongoing ? '1' : '0';
+            DRAMA.is_ongoing = row.is_ongoing;
+            select.value = next;
+            select.dataset.value = next;
+            await refreshDrama();
+            flash(row.is_ongoing ? '已标记为连载中' : '已标记为已完结', 'info');
+        } catch (e) {
+            select.value = prev;
+            flash(`更新连载状态失败: ${e.body?.detail || e}`, 'error');
+        } finally {
+            select.disabled = false;
+            if (saving) saving.classList.add('hidden');
+        }
     });
 })();
 

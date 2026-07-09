@@ -183,6 +183,8 @@ def build_drama_payload(
         # 业务字段：免费集数 (0 = 全部付费; N = 前 N 集免费, 第 N+1 集起收费)。
         # 业务服务器决定付费墙时直接读这个字段。
         "free_episodes": drama.get("free_episodes", 3),
+        # 业务字段：是否连载中。SQLite 存 0/1，同步协议使用 JSON boolean。
+        "is_ongoing": bool(drama.get("is_ongoing", 1)),
         "client_updated_at": drama["updated_at"],
         "translations": translations,
         "featured_categories": featured_categories,

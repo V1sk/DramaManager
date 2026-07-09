@@ -208,6 +208,7 @@ async def admin_create_drama(
     # Default 3 free episodes matches typical short-drama UX. Operators can
     # override at create time or edit later via PATCH /admin/dramas/{slug}.
     free_episodes: int = Form(3),
+    is_ongoing: bool = Form(True),
 ) -> RedirectResponse:
     try:
         db.create_drama(
@@ -215,6 +216,7 @@ async def admin_create_drama(
             name=drama_name,
             default_lang=default_lang,
             free_episodes=free_episodes,
+            is_ongoing=is_ongoing,
         )
     except db.DramaValidationError as e:
         raise HTTPException(status_code=400, detail=f"{e.field}: {e}")
@@ -1217,11 +1219,12 @@ async def admin_patch_drama(
     payload: dict = Body(...),
 ) -> JSONResponse:
     """Partial update of a drama row. Supported fields: `default_lang`,
-    `free_episodes`. At least one must be present; both can be set in one call.
+    `free_episodes`, `is_ongoing`. At least one must be present; multiple can
+    be set in one call.
     """
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="body must be a JSON object")
-    allowed = {"default_lang", "free_episodes"}
+    allowed = {"default_lang", "free_episodes", "is_ongoing"}
     extra = set(payload.keys()) - allowed
     if extra:
         raise HTTPException(
@@ -1267,6 +1270,17 @@ async def admin_patch_drama(
         if updated is None:
             raise HTTPException(status_code=404, detail=f"drama '{drama_slug}' not found")
         if updated["free_episodes"] != existing["free_episodes"]:
+            changed = True
+        row = updated
+
+    if "is_ongoing" in payload:
+        try:
+            updated = db.update_drama_is_ongoing(drama_slug, payload["is_ongoing"])
+        except db.DramaValidationError as e:
+            raise HTTPException(status_code=400, detail=f"{e.field}: {e}")
+        if updated is None:
+            raise HTTPException(status_code=404, detail=f"drama '{drama_slug}' not found")
+        if updated["is_ongoing"] != existing["is_ongoing"]:
             changed = True
         row = updated
 

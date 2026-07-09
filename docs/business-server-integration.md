@@ -80,6 +80,8 @@ X-API-Key: <共享密钥>
 {
   "slug": "ly",
   "default_lang": "zh-rCN",
+  "free_episodes": 3,
+  "is_ongoing": true,
   "client_updated_at": "2026-05-07T12:34:56Z",
   "translations": {
     "zh-rCN": {
@@ -118,6 +120,8 @@ X-API-Key: <共享密钥>
 |---|---|---|
 | `slug` | str | 剧 slug，匹配 `^[a-z0-9][a-z0-9-]*$`，主键 |
 | `default_lang` | str | 默认语言 code（必须出现在 `languages` 里） |
+| `free_episodes` | int | 前 N 集免费，第 N+1 集起付费；`0` = 全部付费 |
+| `is_ongoing` | bool | 是否连载中；`true`=连载中，`false`=已完结 |
 | `client_updated_at` | str | ISO 8601 UTC，HLS 端的 `dramas.updated_at`。**用于乱序保护**：如果业务服务器侧已存的 `client_updated_at` 比这个新 → 返回 **409** |
 | `translations` | object | 按 `lang_code` 索引；每个值的 `name` 必填，`synopsis` 和 `poster_url` 可空 |
 | `translations[lang].poster_url` | str ∣ null | **绝对 prod OSS URL**（`https://photobundle.oss-ap-southeast-1.aliyuncs.com/Drama/prod/{slug}/poster/{lang}.{ext}`）。业务服务器**只记录不拉取**；客户端直连 OSS（v2.0 起，详见第 13 节） |
@@ -132,7 +136,7 @@ X-API-Key: <共享密钥>
 3. Upsert `languages` 行（idempotent on `code`）。
 4. Upsert `tags` 行 + tag 翻译。
 5. Upsert `actors` 行 + actor 翻译。
-6. Upsert `dramas` 行 + drama 翻译，把 `poster_url` **opaque 字符串**记录到 `EpisodeInfo` / `DramaSummary` 字段。**不要 GET 这个 URL**；HLS 端在调你们之前已经把对象拷到 `Drama/prod/...` 了，客户端按这个绝对 URL 直连 OSS。
+6. Upsert `dramas` 行（含 `free_episodes` / `is_ongoing`）+ drama 翻译，把 `poster_url` **opaque 字符串**记录到 `EpisodeInfo` / `DramaSummary` 字段。**不要 GET 这个 URL**；HLS 端在调你们之前已经把对象拷到 `Drama/prod/...` 了，客户端按这个绝对 URL 直连 OSS。
 
 **响应**：
 

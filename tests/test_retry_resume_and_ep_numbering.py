@@ -349,14 +349,19 @@ def case_featured_categories_sync_payload_and_overview():
         db.init_db()
         db.create_language(code="zh-rCN", display_label="简体中文")
         db.create_drama(slug="ly", name="测试剧", default_lang="zh-rCN")
+        assert db.get_drama("ly")["is_ongoing"] == 1
         stored = db.replace_drama_featured_categories(
             "ly", ["exclusive", "hot", "hot"],
         )
         assert stored == ["hot", "exclusive"]
+        updated = db.update_drama_is_ongoing("ly", False)
+        assert updated["is_ongoing"] == 0
         full = db.get_drama_full("ly")
+        assert full["is_ongoing"] == 0
         assert full["featured_categories"] == ["hot", "exclusive"]
 
         payload = build_drama_payload("ly")
+        assert payload["is_ongoing"] is False
         assert payload["featured_categories"] == ["hot", "exclusive"]
 
         overview = db.list_featured_category_overview()

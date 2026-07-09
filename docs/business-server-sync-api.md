@@ -48,6 +48,7 @@ HLS 管理服务器通过 4 个 HTTP 接口把剧 / 集 / 翻译 / 标签 / 演�
   "slug": "ly",
   "default_lang": "zh-rCN",
   "free_episodes": 3,
+  "is_ongoing": true,
   "client_updated_at": "2026-05-19T01:23:45Z",
   "featured_categories": ["hot", "exclusive"],
   "translations": {
@@ -90,6 +91,7 @@ HLS 管理服务器通过 4 个 HTTP 接口把剧 / 集 / 翻译 / 标签 / 演�
 | `slug` | str | 剧主键，`^[a-z0-9][a-z0-9-]*$` |
 | `default_lang` | str | 默认语言 code（必须在 `languages` 里） |
 | `free_episodes` | int | 前 N 集免费，第 N+1 集起付费；`0` = 全部付费 |
+| `is_ongoing` | bool | 是否连载中；`true`=连载中，`false`=已完结 |
 | `client_updated_at` | str | HLS 端 `dramas.updated_at`，乱序保护 |
 | `featured_categories` | array[str] | 固定运营分类，可空数组；允许值：`hot`=最热，`new`=最新，`exclusive`=独家 |
 | `translations` | object | 按 `lang_code` 索引；`name` 必填，`synopsis` / `poster_key` / `poster_landscape_key` 可空 |
@@ -98,7 +100,7 @@ HLS 管理服务器通过 4 个 HTTP 接口把剧 / 集 / 翻译 / 标签 / 演�
 | `tags[]` / `actors[]` | array | 各自含 `slug` + `default_lang` + 全部语言翻译 |
 | `languages[]` | array | 该剧涉及的全部语言（drama / tag / actor / 字幕语言的并集） |
 
-**处理顺序**：upsert `languages` → `tags` → `actors` → `dramas` + 翻译。`poster_key` / `poster_landscape_key` opaque 存进 DB；给客户端拼 URL = `f"{MEDIA_BASE_URL}/{key}"`。
+**处理顺序**：upsert `languages` → `tags` → `actors` → `dramas`（含 `free_episodes` / `is_ongoing`）+ 翻译。`poster_key` / `poster_landscape_key` opaque 存进 DB；给客户端拼 URL = `f"{MEDIA_BASE_URL}/{key}"`。
 
 **响应**：
 
