@@ -224,16 +224,21 @@
                 <button class="btn btn-xs btn-ghost" data-toggle="featured-panel"><span class="material-symbols-outlined text-[16px]">close</span></button>
             </div>
             <div class="p-4">
-                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                     <label class="flex items-center gap-2 rounded-md border border-outline-variant bg-surface-container-low px-3 py-2">
-                        <input type="checkbox" class="featured-category" value="hot">
-                        <span class="material-symbols-outlined text-[16px] text-tertiary">local_fire_department</span>
-                        <span>最热</span>
+                        <input type="checkbox" class="featured-category" value="recommend">
+                        <span class="material-symbols-outlined text-[16px] text-secondary-fixed-dim">recommend</span>
+                        <span>推荐</span>
                     </label>
                     <label class="flex items-center gap-2 rounded-md border border-outline-variant bg-surface-container-low px-3 py-2">
                         <input type="checkbox" class="featured-category" value="new">
                         <span class="material-symbols-outlined text-[16px] text-secondary-fixed-dim">new_releases</span>
                         <span>最新</span>
+                    </label>
+                    <label class="flex items-center gap-2 rounded-md border border-outline-variant bg-surface-container-low px-3 py-2">
+                        <input type="checkbox" class="featured-category" value="hot">
+                        <span class="material-symbols-outlined text-[16px] text-tertiary">local_fire_department</span>
+                        <span>最热</span>
                     </label>
                     <label class="flex items-center gap-2 rounded-md border border-outline-variant bg-surface-container-low px-3 py-2">
                         <input type="checkbox" class="featured-category" value="exclusive">
@@ -245,7 +250,7 @@
                     <button class="btn btn-primary" id="save-featured-btn">
                         <span class="material-symbols-outlined text-[16px]">save</span>保存分类
                     </button>
-                    <span class="meta">用于客户端首页分类展示，可多选</span>
+                    <span class="meta">可多选；新增后会追加到分类末尾，排序请到「运营分类」页调整</span>
                 </div>
             </div>
         </section>

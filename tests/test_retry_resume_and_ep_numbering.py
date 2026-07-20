@@ -339,36 +339,43 @@ def case_landscape_poster_sync_payload():
         print("OK landscape poster appears in translations and sync payload")
 
 
-def case_featured_categories_sync_payload_and_overview():
+def case_featured_categories_dedicated_payload_and_overview():
     with tempfile.TemporaryDirectory() as td:
         _setup_env(Path(td))
         _reset_app_modules()
         from app import db
-        from app.sync import build_drama_payload
+        from app.sync import build_drama_payload, build_featured_categories_payload
 
         db.init_db()
         db.create_language(code="zh-rCN", display_label="简体中文")
         db.create_drama(slug="ly", name="测试剧", default_lang="zh-rCN")
         assert db.get_drama("ly")["is_ongoing"] == 1
         stored = db.replace_drama_featured_categories(
-            "ly", ["exclusive", "hot", "hot"],
+            "ly", ["exclusive", "recommend", "hot", "hot"],
         )
-        assert stored == ["hot", "exclusive"]
+        assert stored == ["recommend", "hot", "exclusive"]
         updated = db.update_drama_is_ongoing("ly", False)
         assert updated["is_ongoing"] == 0
         full = db.get_drama_full("ly")
         assert full["is_ongoing"] == 0
-        assert full["featured_categories"] == ["hot", "exclusive"]
+        assert full["featured_categories"] == ["recommend", "hot", "exclusive"]
 
         payload = build_drama_payload("ly")
         assert payload["is_ongoing"] is False
-        assert payload["featured_categories"] == ["hot", "exclusive"]
+        assert "featured_categories" not in payload
+        assert build_featured_categories_payload()["categories"] == {
+            "recommend": ["ly"],
+            "new": [],
+            "hot": ["ly"],
+            "exclusive": ["ly"],
+        }
 
         overview = db.list_featured_category_overview()
+        assert [r["slug"] for r in overview["recommend"]] == ["ly"]
         assert [r["slug"] for r in overview["hot"]] == ["ly"]
         assert overview["new"] == []
         assert [r["slug"] for r in overview["exclusive"]] == ["ly"]
-        print("OK fixed featured categories persist, aggregate, and sync")
+        print("OK ordered featured categories persist, aggregate, and sync separately")
 
 
 def case_default_ladder_keeps_reupload_version():
@@ -437,7 +444,7 @@ def test_landscape_poster_sync_payload():
 
 
 def test_featured_categories_sync_payload_and_overview():
-    case_featured_categories_sync_payload_and_overview()
+    case_featured_categories_dedicated_payload_and_overview()
 
 
 if __name__ == "__main__":
@@ -448,6 +455,6 @@ if __name__ == "__main__":
     case_upsert_pending_computes_versioned_cover_url()
     case_missing_subtitle_file_is_hidden()
     case_landscape_poster_sync_payload()
-    case_featured_categories_sync_payload_and_overview()
+    case_featured_categories_dedicated_payload_and_overview()
     case_default_ladder_keeps_reupload_version()
     print("\nall cases passed")

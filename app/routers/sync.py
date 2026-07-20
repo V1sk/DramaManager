@@ -14,6 +14,7 @@ returns 0 so polling JS doesn't error.
 import logging
 from pathlib import Path
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Path as PathParam, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -130,6 +131,49 @@ async def sync_episode(
         },
         status_code=202,
     )
+
+
+@router.post(
+    "/admin/featured-categories/sync",
+    dependencies=[Depends(require_can_sync)],
+)
+async def sync_featured_categories() -> JSONResponse:
+    """Publish the complete ordered operations-category snapshot directly."""
+    if not settings.business_sync_base_url:
+        raise _sync_disabled_503()
+    from .. import sync_client
+
+    payload = sync_module.build_featured_categories_payload()
+    try:
+        business_response = await sync_client.call_business(
+            "PUT", "/sync/featured-categories", json=payload,
+        )
+    except sync_client.SyncError as e:
+        log.warning(
+            "featured category sync rejected status=%s body=%s",
+            e.status_code, e.body,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"business server rejected featured categories ({e.status_code}): {e.body}",
+        )
+    except (httpx.HTTPError, RuntimeError) as e:
+        log.exception("featured category sync request failed")
+        raise HTTPException(
+            status_code=502,
+            detail=f"business server featured-category sync failed: {e}",
+        )
+    sync_state = db.mark_featured_categories_synced()
+    log.info(
+        "synced featured categories counts=%s",
+        {key: len(value) for key, value in payload["categories"].items()},
+    )
+    return JSONResponse({
+        "ok": True,
+        "categories": payload["categories"],
+        "business_response": business_response,
+        "sync_state": sync_state,
+    })
 
 
 @router.get("/admin/sync", response_class=HTMLResponse)

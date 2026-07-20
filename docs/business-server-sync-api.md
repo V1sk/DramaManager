@@ -1,6 +1,6 @@
-# 业务服务器同步 API（简明版）
+# 业务服务器同步 API
 
-HLS 管理服务器通过 4 个 HTTP 接口把剧 / 集 / 翻译 / 标签 / 演员 / 字幕 / 封面 / 海报 / DRM 推送给业务服务器。媒体字节由 HLS 端在编码/上传阶段直接写入 TOS prod 前缀；同步时业务服务器只接 JSON。
+HLS 管理服务器通过 5 个 HTTP 接口把剧 / 集 / 翻译 / 标签 / 演员 / 字幕 / 封面 / 海报 / DRM，以及四个有序运营分类推送给业务服务器。媒体字节由 HLS 端在编码/上传阶段直接写入 TOS prod 前缀；同步时业务服务器只接 JSON。
 
 ---
 
@@ -50,7 +50,6 @@ HLS 管理服务器通过 4 个 HTTP 接口把剧 / 集 / 翻译 / 标签 / 演�
   "free_episodes": 3,
   "is_ongoing": true,
   "client_updated_at": "2026-05-19T01:23:45Z",
-  "featured_categories": ["hot", "exclusive"],
   "translations": {
     "zh-rCN": {
       "name": "琅琊榜",
@@ -93,7 +92,6 @@ HLS 管理服务器通过 4 个 HTTP 接口把剧 / 集 / 翻译 / 标签 / 演�
 | `free_episodes` | int | 前 N 集免费，第 N+1 集起付费；`0` = 全部付费 |
 | `is_ongoing` | bool | 是否连载中；`true`=连载中，`false`=已完结 |
 | `client_updated_at` | str | HLS 端 `dramas.updated_at`，乱序保护 |
-| `featured_categories` | array[str] | 固定运营分类，可空数组；允许值：`hot`=最热，`new`=最新，`exclusive`=独家 |
 | `translations` | object | 按 `lang_code` 索引；`name` 必填，`synopsis` / `poster_key` / `poster_landscape_key` 可空 |
 | `translations[lang].poster_key` | str ∣ null | **TOS prod 对象 key**，例如 `Drama/prod/ly/poster/zh-rCN.jpg`；业务端存进 DB，给客户端时拼 `MEDIA_BASE_URL` |
 | `translations[lang].poster_landscape_key` | str ∣ null | 横版海报 **TOS prod 对象 key**，例如 `Drama/prod/ly/poster-landscape/zh-rCN.jpg`；没有上传横版时为 `null` |
@@ -301,7 +299,52 @@ def rewrite_m3u8(text: str, media_base: str) -> str:
 
 ---
 
-## 5. 业务端必须实现的 DRM 端点：`GET /drm/{slug}/{ep_dir}/key`
+## 5. `PUT /sync/featured-categories` — 整体替换运营分类
+
+运营分类不再放在 `POST /sync/dramas` 的单剧 payload 中。操作员在 HLS 后台点击“同步运营分类”时，HLS 端独立发送四个分类的**完整有序快照**：
+
+```json
+{
+  "categories": {
+    "recommend": ["ly", "nirvana-in-fire"],
+    "new": ["new-drama"],
+    "hot": ["ly", "hot-drama"],
+    "exclusive": []
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `categories` | object | 必须且只能包含下面四个固定 key |
+| `categories.recommend` | array[str] | 推荐剧目 slug，数组顺序就是客户端展示顺序 |
+| `categories.new` | array[str] | 最新剧目 slug，有序 |
+| `categories.hot` | array[str] | 最热剧目 slug，有序 |
+| `categories.exclusive` | array[str] | 独家剧目 slug，有序；空数组表示清空该分类 |
+
+**校验与落库要求**：
+
+1. 验证 `X-API-Key`，失败返回 401。
+2. 请求必须恰好包含 `recommend / new / hot / exclusive` 四个 key；每个值必须是数组，同一数组内不能有重复 slug。格式错误返回 400。
+3. 在写入前检查每个 slug 都已有对应 drama；任一不存在返回 **409**，四个分类均不得发生变化。
+4. 在**一个数据库事务**中整体替换四个分类及其顺序。推荐表结构：`featured_category_items(category, drama_slug, sort_order)`，并对 `(category, drama_slug)` 与 `(category, sort_order)` 建唯一约束。
+5. 全部成功后提交事务并返回 200。相同快照重复提交必须幂等。
+
+**响应**：
+
+| 状态码 | Body | 含义 |
+|---|---|---|
+| `200` | `{"ok":true}` | 四个分类已原子替换 |
+| `400` | `{"error":"invalid featured categories payload"}` | key、数组、重复 slug 等格式错误 |
+| `401` | `{"error":"..."}` | API key 不匹配 |
+| `409` | `{"error":"drama not synced","slug":"..."}` | 至少一部剧尚未同步；不得部分写入 |
+| `5xx` | `{"error":"..."}` | 业务端内部失败；事务必须回滚 |
+
+> 删除剧时建议通过外键级联移除业务端的分类关系。HLS 端在剧物理删除后也会把运营分类标记为待同步，下一次完整快照会再次收敛两端状态。
+
+---
+
+## 6. 业务端必须实现的 DRM 端点：`GET /drm/{slug}/{ep_dir}/key`
 
 业务端给客户端怎么暴露剧 / 集 / 字幕等数据是你们自己的事（自由组织 API），但 **DRM key 端点是 sync 协议强制约束** —— 因为 m3u8 里 `#EXT-X-KEY:URI` 是 `/drm/{slug}/ep-{n}/key` 相对路径，播放器按 m3u8 自身 host 解析这条 URI，所以这个 host 必须由业务端提供并实现：
 
@@ -312,9 +355,11 @@ def rewrite_m3u8(text: str, media_base: str) -> str:
 
 ---
 
-## 6. 失败 & 重试
+## 7. 失败 & 重试
 
 - 业务端 ≥400 / 网络超时 → HLS 端 row 置 `sync_failed`，红色徽章 + 错误文本。
 - **没有自动重试**：操作员点"重试本集"或"同步整部剧"再触发一次。
 - 同步顺序：drama 先同步（更新 `last_synced_at`），再串行同步该剧名下全部 dirty / pending_delete 集。
 - `pending_delete` 状态：HLS 端"删除一集"后行不立刻消失，等同步 `DELETE /sync/episodes/{slug}/{ep}` 收到 2xx 才物理删行 + 清 TOS prod。
+- 运营分类使用独立 dirty 状态：只有成员或顺序实际变化时“同步运营分类”按钮才高亮；业务端接受 `PUT /sync/featured-categories` 后按钮恢复普通样式。
+- 运营分类同步失败不会修改本地分类，也不会清除 dirty 状态；操作员可再次点击同一按钮重试完整快照。

@@ -2,72 +2,442 @@
 {% block title %}HLS 管理 · 运营分类{% endblock %}
 
 {% block content %}
-<header class="flex items-end justify-between gap-4 mb-6 pb-4 border-b border-outline-variant">
+<header class="flex flex-col sm:flex-row sm:items-end justify-between gap-4 mb-6 pb-4 border-b border-outline-variant">
     <div>
         <h1 class="text-headline-lg text-on-surface">运营分类</h1>
-        <p class="text-body-md text-on-surface-variant mt-1">查看客户端固定分类：最热、最新、独家。</p>
+        <p class="text-body-md text-on-surface-variant mt-1">人工编排客户端固定分类：推荐、最新、最热、独家。按住剧目右侧排序图标即可实时拖动排序。</p>
     </div>
+    <button id="sync-featured-btn"
+            class="btn {% if featured_sync_dirty %}btn-primary{% else %}btn-secondary{% endif %}"
+            data-dirty="{{ 'true' if featured_sync_dirty else 'false' }}"
+            {% if not sync_enabled %}disabled title="业务服务器同步未启用"{% elif not featured_sync_dirty %}title="当前没有未同步的运营分类修改"{% endif %}>
+        <span class="material-symbols-outlined text-[18px]">cloud_upload</span>
+        同步运营分类
+    </button>
 </header>
 
-<div class="grid grid-cols-1 lg:grid-cols-3 gap-gutter items-start">
+<div class="grid grid-cols-1 xl:grid-cols-2 gap-gutter items-start">
     {% for cat in category_order %}
     {% set rows = groups.get(cat, []) %}
-    <section class="bg-surface-container-high border border-outline-variant rounded-lg overflow-hidden">
-        <div class="px-4 py-3 border-b border-outline-variant bg-surface-container flex items-center justify-between">
+    <section class="bg-surface-container-high border border-outline-variant rounded-lg overflow-hidden" data-category-section="{{ cat }}">
+        <div class="px-4 py-3 border-b border-outline-variant bg-surface-container flex items-center justify-between gap-3">
             <h2 class="text-headline-sm flex items-center gap-2">
-                {% if cat == 'hot' %}
-                <span class="material-symbols-outlined text-tertiary text-[18px]">local_fire_department</span>
+                {% if cat == 'recommend' %}
+                <span class="material-symbols-outlined text-secondary-fixed-dim text-[18px]">recommend</span>
                 {% elif cat == 'new' %}
                 <span class="material-symbols-outlined text-secondary-fixed-dim text-[18px]">new_releases</span>
+                {% elif cat == 'hot' %}
+                <span class="material-symbols-outlined text-tertiary text-[18px]">local_fire_department</span>
                 {% else %}
                 <span class="material-symbols-outlined text-primary text-[18px]">workspace_premium</span>
                 {% endif %}
                 {{ category_labels.get(cat, cat) }}
+                <span class="meta font-normal">{{ rows|length }} 部</span>
             </h2>
-            <span class="meta">{{ rows|length }} 部</span>
+            <button class="btn btn-sm btn-secondary" data-action="manage" data-category="{{ cat }}">
+                <span class="material-symbols-outlined text-[16px]">playlist_add</span>添加 / 管理
+            </button>
         </div>
 
         {% if rows %}
-        <div class="divide-y divide-outline-variant">
+        <div class="divide-y divide-outline-variant relative" data-sort-list="{{ cat }}">
             {% for d in rows %}
-            <a href="/admin/dramas/{{ d.slug|e }}"
-               class="flex gap-3 p-3 hover:bg-surface-container transition-colors">
+            <article class="flex items-center gap-3 p-3 relative transition-colors duration-150" data-sort-item data-slug="{{ d.slug }}">
+                <span class="w-6 text-center text-label-caps text-on-surface-variant/60" data-sort-position>{{ loop.index }}</span>
                 {% if d.poster_url %}
-                <img class="w-14 aspect-[2/3] object-cover rounded-md bg-surface-container-lowest border border-outline-variant"
+                <img class="w-11 aspect-[2/3] object-cover rounded-md bg-surface-container-lowest border border-outline-variant"
                      src="{{ d.poster_url|e }}?t={{ d.latest_ready_updated_at or d.drama_updated_at }}" alt="">
                 {% else %}
-                <div class="w-14 aspect-[2/3] rounded-md bg-surface-container-lowest border border-outline-variant flex items-center justify-center text-on-surface-variant/50">
-                    <span class="material-symbols-outlined text-[20px]">photo_library</span>
+                <div class="w-11 aspect-[2/3] rounded-md bg-surface-container-lowest border border-outline-variant flex items-center justify-center text-on-surface-variant/50">
+                    <span class="material-symbols-outlined text-[18px]">photo_library</span>
                 </div>
                 {% endif %}
                 <div class="min-w-0 flex-1">
-                    <div class="flex items-center gap-2 min-w-0">
-                        <span class="text-body-md font-semibold text-on-surface truncate">{{ d.name|e }}</span>
-                        <span class="sync-badge {{ d.sync_status }}" title="{{ d.sync_error or '' }}">{{ d.sync_status }}</span>
-                    </div>
-                    <div class="mt-1 text-[11px] text-on-surface-variant/70 mono truncate">{{ d.slug }}</div>
-                    <div class="mt-2 flex items-center gap-2 text-[11px] text-on-surface-variant/70">
-                        {% if d.ep_count and d.ep_count > 0 %}
-                        <span>{{ d.ep_count }} 集</span>
-                        {% if d.latest_ep_number %}
-                        <span class="opacity-60">·</span>
-                        <span>EP{{ d.latest_ep_number }}</span>
-                        {% endif %}
-                        {% else %}
-                        <span>暂无已就绪集</span>
-                        {% endif %}
-                    </div>
+                    <a href="/admin/dramas/{{ d.slug|e }}" class="text-body-md font-semibold text-on-surface hover:text-secondary truncate block">{{ d.name|e }}</a>
+                    <div class="mt-0.5 text-[11px] text-on-surface-variant/70 mono truncate">{{ d.slug }}</div>
                 </div>
-            </a>
+                <div class="flex items-center gap-1">
+                    <button type="button"
+                            class="btn btn-xs btn-ghost cursor-grab active:cursor-grabbing touch-none select-none text-on-surface-variant"
+                            data-drag-handle data-category="{{ cat }}" data-slug="{{ d.slug }}"
+                            aria-label="调整《{{ d.name|e }}》的排序"
+                            title="按住上下拖动排序；聚焦后可按 ↑ / ↓ 调整">
+                        <span class="material-symbols-outlined text-[18px] pointer-events-none">drag_indicator</span>
+                    </button>
+                    <button class="btn btn-xs btn-ghost text-status-danger" data-action="remove" data-category="{{ cat }}" data-slug="{{ d.slug }}" title="从分类移除">
+                        <span class="material-symbols-outlined text-[16px]">remove_circle</span>
+                    </button>
+                </div>
+            </article>
             {% endfor %}
         </div>
         {% else %}
         <div class="p-8 text-center text-on-surface-variant">
-            <span class="material-symbols-outlined text-[32px] opacity-60">category</span>
-            <p class="mt-2 text-body-sm">暂无剧集</p>
+            <span class="material-symbols-outlined text-[32px] opacity-60">playlist_add</span>
+            <p class="mt-2 text-body-sm">暂无剧，点击“添加 / 管理”开始编排</p>
         </div>
         {% endif %}
     </section>
     {% endfor %}
 </div>
+
+<div id="drama-picker-modal" class="fixed inset-0 z-[60] hidden">
+    <div class="absolute inset-0 bg-black/60" data-picker-close></div>
+    <div class="absolute inset-x-0 top-[7vh] mx-auto max-w-2xl px-4">
+        <div class="bg-surface-container-high border border-outline-variant rounded-lg shadow-xl flex flex-col max-h-[84vh]">
+            <div class="flex items-center justify-between px-4 py-3 border-b border-outline-variant">
+                <div>
+                    <h3 id="picker-title" class="text-headline-sm">选择剧</h3>
+                    <p class="meta mt-0.5">勾选加入，取消勾选移除；新加入的剧排在当前列表末尾。</p>
+                </div>
+                <button class="btn btn-sm btn-ghost" data-picker-close title="关闭">
+                    <span class="material-symbols-outlined text-[18px]">close</span>
+                </button>
+            </div>
+            <div class="p-3 border-b border-outline-variant flex flex-col sm:flex-row gap-2">
+                <input id="picker-search" type="search" class="flex-1" placeholder="搜索剧名或 slug">
+                <button id="picker-select-all" class="btn btn-sm btn-ghost" type="button">全选当前结果</button>
+                <button id="picker-invert" class="btn btn-sm btn-ghost" type="button">反选当前结果</button>
+            </div>
+            <div id="picker-list" class="flex-1 overflow-auto overscroll-contain p-2 min-h-[260px]"></div>
+            <div class="flex items-center justify-between gap-3 px-4 py-3 border-t border-outline-variant">
+                <span id="picker-count" class="meta"></span>
+                <div class="flex items-center gap-2">
+                    <button class="btn btn-sm btn-ghost" data-picker-close>取消</button>
+                    <button id="picker-save" class="btn btn-sm btn-primary">
+                        <span class="material-symbols-outlined text-[16px]">save</span>保存选择
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const CATEGORY_ORDER = {{ category_order | tojson }};
+const CATEGORY_LABELS = {{ category_labels | tojson }};
+const SYNC_ENABLED = {{ sync_enabled | tojson }};
+const CATEGORY_STATE = Object.fromEntries(CATEGORY_ORDER.map(cat => [
+    cat,
+    ({{ groups | tojson }}[cat] || []).map(d => d.slug),
+]));
+const ALL_DRAMAS = {{ dramas | tojson }};
+
+const pickerModal = document.getElementById('drama-picker-modal');
+const pickerList = document.getElementById('picker-list');
+const pickerSearch = document.getElementById('picker-search');
+const pickerCount = document.getElementById('picker-count');
+const syncFeaturedBtn = document.getElementById('sync-featured-btn');
+let pickerCategory = null;
+let pickerSelection = new Set();
+let visiblePickerSlugs = [];
+
+function filteredDramas() {
+    const q = pickerSearch.value.trim().toLowerCase();
+    return ALL_DRAMAS.filter(d => !q || d.slug.toLowerCase().includes(q) || (d.name || '').toLowerCase().includes(q));
+}
+
+function renderPicker() {
+    const rows = filteredDramas();
+    visiblePickerSlugs = rows.map(d => d.slug);
+    if (!rows.length) {
+        pickerList.innerHTML = '<div class="meta text-center py-10">没有匹配的剧</div>';
+    } else {
+        pickerList.innerHTML = rows.map(d => `
+            <label class="flex items-center gap-3 rounded-md px-3 py-2 hover:bg-surface-container cursor-pointer">
+                <input type="checkbox" class="picker-drama" value="${escapeHtml(d.slug)}" ${pickerSelection.has(d.slug) ? 'checked' : ''}>
+                <span class="min-w-0 flex-1">
+                    <span class="block text-body-md text-on-surface truncate">${escapeHtml(d.name || d.slug)}</span>
+                    <span class="block text-[11px] text-on-surface-variant/70 mono truncate">${escapeHtml(d.slug)}</span>
+                </span>
+                ${pickerSelection.has(d.slug) ? '<span class="material-symbols-outlined text-secondary-fixed-dim text-[18px]">check_circle</span>' : ''}
+            </label>`).join('');
+    }
+    pickerCount.textContent = `已选择 ${pickerSelection.size} 部`;
+}
+
+function openPicker(category) {
+    pickerCategory = category;
+    pickerSelection = new Set(CATEGORY_STATE[category]);
+    pickerSearch.value = '';
+    document.getElementById('picker-title').textContent = `选择「${CATEGORY_LABELS[category]}」剧目`;
+    renderPicker();
+    pickerModal.classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+    setTimeout(() => pickerSearch.focus(), 0);
+}
+
+function closePicker() {
+    pickerModal.classList.add('hidden');
+    document.body.style.overflow = '';
+    pickerCategory = null;
+}
+
+function markFeaturedSyncDirty() {
+    syncFeaturedBtn.dataset.dirty = 'true';
+    syncFeaturedBtn.classList.remove('btn-secondary');
+    syncFeaturedBtn.classList.add('btn-primary');
+    if (SYNC_ENABLED) syncFeaturedBtn.title = '存在未同步的运营分类修改';
+}
+
+async function persistCategory(category, slugs, trigger, {reload = true, successMessage = null} = {}) {
+    if (trigger) trigger.disabled = true;
+    try {
+        const result = await fetchJSON(`/admin/featured-categories/${encodeURIComponent(category)}`, {
+            method: 'PUT', body: {drama_slugs: slugs},
+        });
+        CATEGORY_STATE[category] = result.body.drama_slugs;
+        flash(successMessage || `「${CATEGORY_LABELS[category]}」已保存`, 'info');
+        if (reload) location.reload();
+        else {
+            markFeaturedSyncDirty();
+            if (trigger) trigger.disabled = false;
+        }
+        return true;
+    } catch (e) {
+        flash(`保存失败：${e.body?.detail || e}`, 'error');
+        if (trigger) trigger.disabled = false;
+        return false;
+    }
+}
+
+function listSlugs(sortList) {
+    return Array.from(sortList.querySelectorAll('[data-sort-item]')).map(item => item.dataset.slug);
+}
+
+function sameOrder(left, right) {
+    return left.length === right.length && left.every((slug, index) => slug === right[index]);
+}
+
+function refreshSortPositions(sortList) {
+    sortList.querySelectorAll('[data-sort-item]').forEach((item, index) => {
+        item.querySelector('[data-sort-position]').textContent = index + 1;
+    });
+}
+
+const SORT_ANIMATION_ID = 'featured-sort-shift';
+
+function captureSortPositions(sortList) {
+    return new Map(Array.from(sortList.querySelectorAll('[data-sort-item]')).map(item => [
+        item,
+        item.getBoundingClientRect().top,
+    ]));
+}
+
+function animateSortShift(sortList, previousPositions) {
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    sortList.querySelectorAll('[data-sort-item]').forEach(item => {
+        const previousTop = previousPositions.get(item);
+        if (previousTop === undefined) return;
+
+        item.getAnimations().filter(animation => animation.id === SORT_ANIMATION_ID).forEach(animation => animation.cancel());
+        const offsetY = previousTop - item.getBoundingClientRect().top;
+        if (reduceMotion || Math.abs(offsetY) < 0.5) return;
+
+        const animation = item.animate(
+            [
+                {transform: `translateY(${offsetY}px)`},
+                {transform: 'translateY(0)'},
+            ],
+            {duration: 160, easing: 'cubic-bezier(0.2, 0, 0, 1)'},
+        );
+        animation.id = SORT_ANIMATION_ID;
+    });
+}
+
+function restoreSortOrder(sortList, slugs) {
+    const previousPositions = captureSortPositions(sortList);
+    const items = new Map(Array.from(sortList.querySelectorAll('[data-sort-item]')).map(item => [item.dataset.slug, item]));
+    slugs.forEach(slug => {
+        const item = items.get(slug);
+        if (item) sortList.appendChild(item);
+    });
+    refreshSortPositions(sortList);
+    animateSortShift(sortList, previousPositions);
+}
+
+function setSortDisabled(category, disabled) {
+    const section = document.querySelector(`[data-category-section="${category}"]`);
+    section?.querySelectorAll('[data-drag-handle]').forEach(handle => {
+        handle.disabled = disabled;
+    });
+}
+
+async function persistSortOrder(sortList, category, previousOrder, trigger) {
+    const nextOrder = listSlugs(sortList);
+    if (sameOrder(previousOrder, nextOrder)) return true;
+
+    setSortDisabled(category, true);
+    const saved = await persistCategory(category, nextOrder, trigger, {
+        reload: false,
+        successMessage: `「${CATEGORY_LABELS[category]}」排序已保存`,
+    });
+    if (!saved) restoreSortOrder(sortList, previousOrder);
+    setSortDisabled(category, false);
+    return saved;
+}
+
+let activeSortDrag = null;
+
+document.addEventListener('pointerdown', ev => {
+    const handle = ev.target.closest('[data-drag-handle]');
+    if (!handle || handle.disabled || activeSortDrag || ev.button !== 0) return;
+
+    const item = handle.closest('[data-sort-item]');
+    const sortList = item?.closest('[data-sort-list]');
+    if (!item || !sortList) return;
+
+    ev.preventDefault();
+    handle.focus({preventScroll: true});
+    sortList.setPointerCapture(ev.pointerId);
+    activeSortDrag = {
+        pointerId: ev.pointerId,
+        handle,
+        item,
+        sortList,
+        category: handle.dataset.category,
+        previousOrder: listSlugs(sortList),
+    };
+    item.classList.add('z-10', 'bg-surface-container-highest', 'ring-1', 'ring-secondary', 'shadow-lg');
+    handle.classList.add('cursor-grabbing', 'text-secondary');
+});
+
+document.addEventListener('pointermove', ev => {
+    const drag = activeSortDrag;
+    if (!drag || drag.pointerId !== ev.pointerId) return;
+    ev.preventDefault();
+
+    const edge = 72;
+    if (ev.clientY < edge) window.scrollBy(0, -12);
+    else if (ev.clientY > window.innerHeight - edge) window.scrollBy(0, 12);
+
+    const target = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('[data-sort-item]');
+    if (!target || target === drag.item || target.parentElement !== drag.sortList) return;
+
+    const targetRect = target.getBoundingClientRect();
+    const moveAfter = ev.clientY > targetRect.top + targetRect.height / 2;
+    let reference = target;
+    if (moveAfter) {
+        if (target.nextElementSibling === drag.item) return;
+        reference = target.nextElementSibling;
+    } else if (target.previousElementSibling === drag.item) {
+        return;
+    }
+
+    const previousPositions = captureSortPositions(drag.sortList);
+    drag.sortList.insertBefore(drag.item, reference);
+    refreshSortPositions(drag.sortList);
+    animateSortShift(drag.sortList, previousPositions);
+});
+
+async function finishSortDrag(ev, cancelled = false) {
+    const drag = activeSortDrag;
+    if (!drag || drag.pointerId !== ev.pointerId) return;
+    activeSortDrag = null;
+
+    if (drag.sortList.hasPointerCapture(ev.pointerId)) drag.sortList.releasePointerCapture(ev.pointerId);
+    drag.item.classList.remove('z-10', 'bg-surface-container-highest', 'ring-1', 'ring-secondary', 'shadow-lg');
+    drag.handle.classList.remove('cursor-grabbing', 'text-secondary');
+
+    if (cancelled) {
+        restoreSortOrder(drag.sortList, drag.previousOrder);
+        return;
+    }
+    await persistSortOrder(drag.sortList, drag.category, drag.previousOrder, drag.handle);
+}
+
+document.addEventListener('pointerup', ev => { void finishSortDrag(ev); });
+document.addEventListener('pointercancel', ev => { void finishSortDrag(ev, true); });
+document.addEventListener('lostpointercapture', ev => {
+    if (activeSortDrag?.sortList === ev.target) void finishSortDrag(ev, true);
+});
+
+document.addEventListener('keydown', ev => {
+    const handle = ev.target.closest('[data-drag-handle]');
+    if (!handle || handle.disabled || !['ArrowUp', 'ArrowDown'].includes(ev.key)) return;
+
+    const item = handle.closest('[data-sort-item]');
+    const sortList = item?.closest('[data-sort-list]');
+    if (!item || !sortList) return;
+    ev.preventDefault();
+    const target = ev.key === 'ArrowUp' ? item.previousElementSibling : item.nextElementSibling;
+    if (!target?.matches('[data-sort-item]')) return;
+
+    const previousOrder = listSlugs(sortList);
+    const previousPositions = captureSortPositions(sortList);
+    if (ev.key === 'ArrowUp') sortList.insertBefore(item, target);
+    else sortList.insertBefore(target, item);
+    refreshSortPositions(sortList);
+    animateSortShift(sortList, previousPositions);
+    void persistSortOrder(sortList, handle.dataset.category, previousOrder, handle);
+});
+
+document.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('[data-action]');
+    if (!btn) return;
+    const category = btn.dataset.category;
+    const action = btn.dataset.action;
+    if (action === 'manage') {
+        openPicker(category);
+        return;
+    }
+    const slug = btn.dataset.slug;
+    const next = [...CATEGORY_STATE[category]];
+    const index = next.indexOf(slug);
+    if (index < 0) return;
+    if (action !== 'remove') return;
+    next.splice(index, 1);
+    persistCategory(category, next, btn);
+});
+
+pickerList.addEventListener('change', (ev) => {
+    if (!ev.target.matches('.picker-drama')) return;
+    if (ev.target.checked) pickerSelection.add(ev.target.value);
+    else pickerSelection.delete(ev.target.value);
+    renderPicker();
+});
+pickerSearch.addEventListener('input', renderPicker);
+document.getElementById('picker-select-all').addEventListener('click', () => {
+    visiblePickerSlugs.forEach(slug => pickerSelection.add(slug));
+    renderPicker();
+});
+document.getElementById('picker-invert').addEventListener('click', () => {
+    visiblePickerSlugs.forEach(slug => {
+        if (pickerSelection.has(slug)) pickerSelection.delete(slug);
+        else pickerSelection.add(slug);
+    });
+    renderPicker();
+});
+document.getElementById('picker-save').addEventListener('click', (ev) => {
+    const existing = CATEGORY_STATE[pickerCategory].filter(slug => pickerSelection.has(slug));
+    const existingSet = new Set(existing);
+    const added = ALL_DRAMAS.map(d => d.slug).filter(slug => pickerSelection.has(slug) && !existingSet.has(slug));
+    persistCategory(pickerCategory, [...existing, ...added], ev.currentTarget);
+});
+document.querySelectorAll('[data-picker-close]').forEach(el => el.addEventListener('click', closePicker));
+document.addEventListener('keydown', ev => {
+    if (ev.key === 'Escape' && !pickerModal.classList.contains('hidden')) closePicker();
+});
+
+syncFeaturedBtn.addEventListener('click', async () => {
+    const original = syncFeaturedBtn.innerHTML;
+    syncFeaturedBtn.disabled = true;
+    syncFeaturedBtn.innerHTML = '<span class="material-symbols-outlined text-[18px] animate-spin">progress_activity</span>同步中…';
+    try {
+        await fetchJSON('/admin/featured-categories/sync', {method: 'POST'});
+        flash('运营分类已同步到业务服务器', 'info');
+        syncFeaturedBtn.dataset.dirty = 'false';
+        syncFeaturedBtn.classList.remove('btn-primary');
+        syncFeaturedBtn.classList.add('btn-secondary');
+        syncFeaturedBtn.title = '当前没有未同步的运营分类修改';
+    } catch (e) {
+        flash(`同步失败：${e.body?.detail || e}`, 'error');
+    } finally {
+        syncFeaturedBtn.innerHTML = original;
+        syncFeaturedBtn.disabled = {{ 'false' if sync_enabled else 'true' }};
+    }
+});
+</script>
 {% endblock %}

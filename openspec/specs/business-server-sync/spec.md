@@ -1,9 +1,9 @@
 # business-server-sync
 
+## Purpose
+
 操作员手动触发的 staging→prod 同步：状态机（dirty/syncing/clean/sync_failed/pending_delete）+ 库级级联 dirty + 双阶段删除 + HLS 端管理路由 + 后台 sync worker + 业务服务器线协议 + UI 同步徽章 / 总览页 / 导航栏需同步计数 / 配置 env vars。归档自 `business-server-sync`。
-
 ## Requirements
-
 ### Requirement: sync state machine schema
 
 The `dramas` and `episodes` tables SHALL each carry three additional columns:
@@ -153,7 +153,7 @@ The worker SHALL handle exceptions per-job — a failure in one job MUST NOT cra
 
 ### Requirement: business server `/sync/*` wire protocol
 
-The business server (separate codebase to be built later) SHALL expose these four endpoints. Each request MUST carry `X-API-Key: <shared secret>`; mismatch → 401. Each request body is JSON `application/json`.
+The business server (separate codebase to be built later) SHALL expose these five endpoints. Each request MUST carry `X-API-Key: <shared secret>`; mismatch → 401. Each request body is JSON `application/json`.
 
 **`POST /sync/dramas`** — request body:
 ```
@@ -163,7 +163,6 @@ The business server (separate codebase to be built later) SHALL expose these fou
   "free_episodes": int,                        // 0 = all paid; N = first N episodes free
   "is_ongoing": bool,                          // true = serializing; false = completed
   "client_updated_at": str,                    // ISO 8601
-  "featured_categories": [str],                // fixed values: hot/new/exclusive
   "translations": {                            // by lang_code
     "<lang_code>": {
       "name": str,                             // required (the drama-meta-translations invariant)
@@ -221,12 +220,26 @@ The business server MUST: validate the API key; ensure the drama exists (else 40
 
 **`DELETE /sync/episodes/{slug}/{ep}`** — no body. Removes the episode row + on-disk artifacts on the business server. Returns 204 on success or if missing (idempotent). 401 on key mismatch.
 
-#### Scenario: drama sync request shape
+**`PUT /sync/featured-categories`** — request body:
+```
+{
+  "categories": {
+    "recommend": [str],                        // ordered drama slugs
+    "new": [str],
+    "hot": [str],
+    "exclusive": [str]
+  }
+}
+```
+
+The payload MUST contain exactly the four fixed category keys. Each array SHALL be treated as an ordered list and MUST NOT contain duplicate slugs. The business server MUST validate that every referenced drama already exists and atomically replace all four category collections; an empty array clears that category. On success it SHALL return 200 `{"ok": true}`. A missing drama SHALL return 409 without changing any category.
+
+#### Scenario: drama sync request shape excludes featured categories
 - **GIVEN** drama `ly` (default_lang=`zh-rCN`) with translations in `zh-rCN` and `en`, tags `[urban]`, actors `[zhang-san]`
 - **WHEN** the HLS sync worker calls `POST /sync/dramas`
-- **THEN** the request body matches the schema above
+- **THEN** the request body matches the schema above and does not contain `featured_categories`
 - **AND** carries header `X-API-Key: <configured secret>`
-- **AND** `payload.languages` includes `zh-rCN` and `en` (every code referenced by translations / tags / actors)
+- **AND** `payload.languages` includes `zh-rCN` and `en`
 
 #### Scenario: episode sync request shape includes per-rung prod m3u8
 - **GIVEN** episode `ly-ep-3` ready (source 720×1280), with subtitles in `en`
@@ -235,7 +248,7 @@ The business server MUST: validate the API key; ensure the drama exists (else 40
 - **AND** each entry carries the rung's encoded `width` / `height` (e.g. `mid` → 406×720), derived identically to `EpisodeInfo.videoTracks`
 - **AND** the `mid` entry's `playlist` is a full m3u8 text whose `#EXT-X-MAP:URI` references `Drama/prod/ly/ep-3/720p/init-720p.mp4`
 - **AND** the `mid` entry's `playlist` contains `#EXT-X-KEY:METHOD=AES-128,URI="/drm/ly/ep-3/key"...` (verbatim)
-- **AND** `payload.cover_key` is the prod cover object key (storage on) or the staging `/videos/ly/ep-3/cover.jpg` URL (storage off)
+- **AND** `payload.cover_key` is the prod cover object key (storage on) or staging URL (storage off)
 
 #### Scenario: re-uploaded episode sync uses versioned ancillary assets
 - **GIVEN** episode `ly-ep-3` has `upload_version=2`
@@ -243,11 +256,22 @@ The business server MUST: validate the API key; ensure the drama exists (else 40
 - **THEN** playlist object keys, `payload.cover_key`, and subtitle keys use the `Drama/prod/ly/ep-3-v2/...` prefix
 - **AND** the sync worker does not copy legacy staging objects for compatibility; missing prod objects are caught by offline audit
 
+#### Scenario: featured category snapshot replaces all categories
+- **GIVEN** the business server has all referenced dramas
+- **WHEN** HLS calls `PUT /sync/featured-categories` with ordered arrays for all four categories
+- **THEN** the business server atomically persists those exact arrays and returns 200
+
+#### Scenario: featured category snapshot rejects a missing drama atomically
+- **GIVEN** one payload array references an unknown drama slug
+- **WHEN** HLS calls `PUT /sync/featured-categories`
+- **THEN** the business server returns 409
+- **AND** none of the four stored categories change
+
 #### Scenario: API key mismatch returns 401
 - **GIVEN** the business server is running with a different `X-API-Key` than the HLS server is sending
-- **WHEN** the HLS worker calls any `/sync/*` endpoint
+- **WHEN** HLS calls any `/sync/*` endpoint
 - **THEN** the response is 401
-- **AND** the corresponding HLS row is set to `sync_failed` with `sync_error` mentioning 401
+- **AND** drama / episode workers mark their corresponding HLS row `sync_failed`; the direct featured-category action returns 502 to its operator
 
 ### Requirement: HLS-side configuration
 
@@ -300,3 +324,23 @@ The nav-bar `<div id="sync-zone">` SHALL render `需同步: N` (linking to `/adm
 - **THEN** sync jobs are enqueued for `b` and `c`
 - **AND** their `sync_status` becomes `syncing` (or stays `pending_delete` if applicable)
 - **AND** drama `a` is unaffected
+
+### Requirement: HLS featured category sync action
+
+The HLS service SHALL provide `POST /admin/featured-categories/sync`, protected by the existing `can_sync` permission. If business sync is disabled it SHALL return 503. Otherwise it SHALL synchronously send the current complete ordered category snapshot to `PUT /sync/featured-categories`. Business-server non-2xx responses and network errors SHALL return 502 to the operator without changing local category data.
+
+#### Scenario: operator publishes current category snapshot
+- **GIVEN** business sync is configured and local categories contain ordered drama lists
+- **WHEN** an authorized operator posts `/admin/featured-categories/sync`
+- **THEN** HLS sends one `PUT /sync/featured-categories` request using the configured API key
+- **AND** returns 200 only after the business server accepts it
+
+#### Scenario: sync permission is required
+- **GIVEN** a staff account without `can_sync`
+- **WHEN** it posts `/admin/featured-categories/sync`
+- **THEN** the response is 403
+
+#### Scenario: disabled sync returns 503
+- **GIVEN** `BUSINESS_SYNC_BASE_URL` is unset
+- **WHEN** an authorized operator posts `/admin/featured-categories/sync`
+- **THEN** the response is 503 and no outbound request occurs

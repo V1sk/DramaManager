@@ -149,8 +149,6 @@ def build_drama_payload(
             "translations": db.list_translations_for_entity("tag", tag_slug, "label"),
         })
 
-    featured_categories = db.list_drama_featured_categories(slug)
-
     actors_payload: list[dict] = []
     drama_actor_rows = db.list_drama_actors(slug)
     for actor_row in drama_actor_rows:
@@ -187,10 +185,19 @@ def build_drama_payload(
         "is_ongoing": bool(drama.get("is_ongoing", 1)),
         "client_updated_at": drama["updated_at"],
         "translations": translations,
-        "featured_categories": featured_categories,
         "tags": tags_payload,
         "actors": actors_payload,
         "languages": languages_payload,
+    }
+
+
+def build_featured_categories_payload() -> dict:
+    """Build the complete authoritative ordered operations-category snapshot."""
+    return {
+        "categories": {
+            category: db.list_featured_category_slugs(category)
+            for category in db.FEATURED_CATEGORIES
+        },
     }
 
 

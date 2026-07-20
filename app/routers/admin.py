@@ -55,8 +55,9 @@ async def admin_drama_new_page(request: Request) -> HTMLResponse:
 
 @router.get("/admin/featured-categories", response_class=HTMLResponse)
 async def admin_featured_categories_page(request: Request) -> HTMLResponse:
-    """Operations overview for the fixed client-facing drama categories."""
+    """Operations editor for the fixed client-facing drama categories."""
     groups = db.list_featured_category_overview()
+    sync_state = db.get_featured_category_sync_state()
     return _TEMPLATES.TemplateResponse(
         request,
         "featured_categories.html",
@@ -64,9 +65,57 @@ async def admin_featured_categories_page(request: Request) -> HTMLResponse:
             "groups": groups,
             "category_labels": db.FEATURED_CATEGORY_LABELS,
             "category_order": db.FEATURED_CATEGORIES,
+            "dramas": db.list_dramas_for_homepage(),
+            "sync_enabled": bool(settings.business_sync_base_url),
+            "featured_sync_dirty": sync_state["is_dirty"],
             "nav_active": "featured",
         },
     )
+
+
+@router.get("/admin/featured-categories.json")
+async def admin_featured_categories_json() -> JSONResponse:
+    groups = db.list_featured_category_overview()
+    return JSONResponse({
+        "category_order": list(db.FEATURED_CATEGORIES),
+        "category_labels": db.FEATURED_CATEGORY_LABELS,
+        "categories": groups,
+        "dramas": db.list_dramas_for_homepage(),
+        "sync_state": db.get_featured_category_sync_state(),
+    })
+
+
+@router.put("/admin/featured-categories/{category}")
+async def admin_replace_featured_category(
+    category: str,
+    payload: dict = Body(...),
+) -> JSONResponse:
+    if category not in db.FEATURED_CATEGORIES:
+        raise HTTPException(
+            status_code=404, detail=f"featured category '{category}' not found",
+        )
+    if not isinstance(payload, dict) or set(payload) != {"drama_slugs"}:
+        raise HTTPException(
+            status_code=400,
+            detail="body must be a JSON object containing only drama_slugs",
+        )
+    drama_slugs = payload["drama_slugs"]
+    if not isinstance(drama_slugs, list):
+        raise HTTPException(status_code=400, detail="drama_slugs must be an array")
+    try:
+        stored = db.replace_featured_category_members(category, drama_slugs)
+    except db.DramaNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except db.DramaValidationError as e:
+        raise HTTPException(status_code=400, detail=f"{e.field}: {e}")
+    log.info(
+        "replaced featured category category=%s members=%s", category, stored,
+    )
+    return JSONResponse({
+        "category": category,
+        "drama_slugs": stored,
+        "dramas": db.list_featured_category_overview()[category],
+    })
 
 
 @router.get("/admin/dramas/{drama_slug}", response_class=HTMLResponse)
@@ -116,7 +165,6 @@ async def admin_replace_drama_featured_categories(
         raise HTTPException(status_code=404, detail=str(e))
     except db.DramaValidationError as e:
         raise HTTPException(status_code=400, detail=f"{e.field}: {e}")
-    db.mark_drama_dirty(drama_slug)
     log.info(
         "updated featured categories slug=%s categories=%s",
         drama_slug, categories,

@@ -75,10 +75,20 @@ CREATE TABLE IF NOT EXISTS drama_tags (
 -- These are intentionally separate from the free-form tag library.
 CREATE TABLE IF NOT EXISTS drama_featured_categories (
   drama_slug  TEXT NOT NULL,
-  category    TEXT NOT NULL CHECK(category IN ('hot','new','exclusive')),
+  category    TEXT NOT NULL CHECK(category IN ('recommend','new','hot','exclusive')),
+  sort_order  INTEGER NOT NULL CHECK(sort_order >= 0),
   updated_at  TEXT NOT NULL,
   PRIMARY KEY (drama_slug, category),
   FOREIGN KEY (drama_slug) REFERENCES dramas(slug) ON DELETE CASCADE
+);
+
+-- Dedicated operations-category sync state. This is separate from each
+-- drama's content sync_status because categories publish as one full snapshot.
+CREATE TABLE IF NOT EXISTS featured_category_sync_state (
+  id              INTEGER PRIMARY KEY CHECK(id = 1),
+  is_dirty        INTEGER NOT NULL CHECK(is_dirty IN (0,1)),
+  updated_at      TEXT    NOT NULL,
+  last_synced_at  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS actors (
@@ -225,10 +235,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_tjobs_inflight
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _LANG_RE = re.compile(r"^[a-z]{2,3}(-[A-Za-z0-9]{2,8})?$")
-FEATURED_CATEGORIES = ("hot", "new", "exclusive")
+FEATURED_CATEGORIES = ("recommend", "new", "hot", "exclusive")
 FEATURED_CATEGORY_LABELS = {
-    "hot": "最热",
+    "recommend": "推荐",
     "new": "最新",
+    "hot": "最热",
     "exclusive": "独家",
 }
 
@@ -378,6 +389,8 @@ def _connect(db_path: Path = None) -> sqlite3.Connection:
 def init_db() -> None:
     with _connect() as conn:
         conn.executescript(_SCHEMA)
+        _migrate_featured_categories(conn)
+        _ensure_featured_category_sync_state(conn)
         _migrate_add_columns(conn)
         _migrate_drop_columns(conn)
     # FK enforcement self-test: the i18n-foundation spec requires verifying
@@ -451,6 +464,108 @@ def _migrate_add_columns(conn: sqlite3.Connection) -> None:
         for name, decl in cols:
             if name not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+
+def _migrate_featured_categories(conn: sqlite3.Connection) -> None:
+    """Upgrade the legacy unordered three-category junction table in place.
+
+    SQLite cannot alter a CHECK constraint or add a NOT NULL position column
+    while deriving values per category, so the migration uses the standard
+    create/copy/swap pattern. Existing rows get the old overview's stable
+    recency order; fresh databases only need the order index created here.
+    """
+    columns = {
+        r["name"]
+        for r in conn.execute("PRAGMA table_info(drama_featured_categories)")
+    }
+    table_row = conn.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type='table' AND name='drama_featured_categories'"
+    ).fetchone()
+    table_sql = (table_row["sql"] if table_row else "") or ""
+    if "sort_order" in columns and "recommend" in table_sql:
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_featured_category_order "
+            "ON drama_featured_categories(category, sort_order)"
+        )
+        return
+
+    legacy_rows = conn.execute(
+        """
+        SELECT fc.drama_slug, fc.category, fc.updated_at
+          FROM drama_featured_categories fc
+          INNER JOIN dramas d ON d.slug=fc.drama_slug
+         ORDER BY fc.category ASC,
+                  (SELECT MAX(e.updated_at) FROM episodes e
+                    WHERE e.drama_slug=d.slug AND e.status='ready') DESC,
+                  d.updated_at DESC,
+                  fc.drama_slug ASC
+        """
+    ).fetchall()
+
+    conn.execute("BEGIN")
+    try:
+        conn.execute("DROP TABLE IF EXISTS drama_featured_categories_new")
+        conn.execute(
+            """
+            CREATE TABLE drama_featured_categories_new (
+              drama_slug  TEXT NOT NULL,
+              category    TEXT NOT NULL
+                            CHECK(category IN ('recommend','new','hot','exclusive')),
+              sort_order  INTEGER NOT NULL CHECK(sort_order >= 0),
+              updated_at  TEXT NOT NULL,
+              PRIMARY KEY (drama_slug, category),
+              FOREIGN KEY (drama_slug) REFERENCES dramas(slug) ON DELETE CASCADE
+            )
+            """
+        )
+        next_order: dict[str, int] = {}
+        for row in legacy_rows:
+            category = row["category"]
+            sort_order = next_order.get(category, 0)
+            conn.execute(
+                "INSERT INTO drama_featured_categories_new"
+                "(drama_slug, category, sort_order, updated_at) VALUES (?, ?, ?, ?)",
+                (row["drama_slug"], category, sort_order, row["updated_at"]),
+            )
+            next_order[category] = sort_order + 1
+        conn.execute("DROP TABLE drama_featured_categories")
+        conn.execute(
+            "ALTER TABLE drama_featured_categories_new "
+            "RENAME TO drama_featured_categories"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX idx_featured_category_order "
+            "ON drama_featured_categories(category, sort_order)"
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+
+
+def _ensure_featured_category_sync_state(conn: sqlite3.Connection) -> None:
+    """Seed the singleton sync state without overwriting an existing state.
+
+    On the first deploy of this feature, non-empty legacy categories need one
+    explicit snapshot sync, while an empty registry has nothing to publish.
+    """
+    exists = conn.execute(
+        "SELECT 1 FROM featured_category_sync_state WHERE id=1"
+    ).fetchone()
+    if exists:
+        return
+    has_members = conn.execute(
+        "SELECT 1 FROM drama_featured_categories LIMIT 1"
+    ).fetchone() is not None
+    conn.execute(
+        "INSERT INTO featured_category_sync_state"
+        "(id, is_dirty, updated_at, last_synced_at) VALUES (1, ?, ?, NULL)",
+        (1 if has_members else 0, _now_iso()),
+    )
 
 
 def _migrate_drop_columns(conn: sqlite3.Connection) -> None:
@@ -762,6 +877,10 @@ def delete_drama(slug: str) -> tuple[bool, int]:
         ep_count = ep_row["n"] if ep_row else 0
         if ep_count > 0:
             return (False, ep_count)
+        was_featured = conn.execute(
+            "SELECT 1 FROM drama_featured_categories WHERE drama_slug=? LIMIT 1",
+            (slug,),
+        ).fetchone() is not None
         conn.execute("BEGIN")
         try:
             conn.execute(
@@ -769,6 +888,8 @@ def delete_drama(slug: str) -> tuple[bool, int]:
                 (slug,),
             )
             cur = conn.execute("DELETE FROM dramas WHERE slug=?", (slug,))
+            if (cur.rowcount or 0) > 0 and was_featured:
+                _mark_featured_categories_dirty(conn, _now_iso())
             conn.execute("COMMIT")
         except Exception:
             try:
@@ -1850,6 +1971,42 @@ def list_drama_tags(drama_slug: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+def get_featured_category_sync_state() -> dict:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT is_dirty, updated_at, last_synced_at "
+            "FROM featured_category_sync_state WHERE id=1"
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("featured category sync state is not initialized")
+    state = dict(row)
+    state["is_dirty"] = bool(state["is_dirty"])
+    return state
+
+
+def _mark_featured_categories_dirty(
+    conn: sqlite3.Connection,
+    updated_at: str,
+) -> None:
+    conn.execute(
+        "UPDATE featured_category_sync_state "
+        "SET is_dirty=1, updated_at=? WHERE id=1",
+        (updated_at,),
+    )
+
+
+def mark_featured_categories_synced() -> dict:
+    """Clear the category dirty bit after the business snapshot is accepted."""
+    now = _now_iso()
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE featured_category_sync_state "
+            "SET is_dirty=0, last_synced_at=? WHERE id=1",
+            (now,),
+        )
+    return get_featured_category_sync_state()
+
+
 def _validate_featured_categories(categories: list[str]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
@@ -1868,29 +2025,141 @@ def _validate_featured_categories(categories: list[str]) -> list[str]:
     return out
 
 
-def replace_drama_featured_categories(drama_slug: str, categories: list[str]) -> list[str]:
-    """Replace a drama's fixed featured-category set.
+def _validate_featured_category(category: str) -> str:
+    value = str(category).strip()
+    if value not in FEATURED_CATEGORIES:
+        raise DramaValidationError(
+            "featured_category",
+            f"invalid featured category {value!r}; allowed: {list(FEATURED_CATEGORIES)}",
+        )
+    return value
 
-    Categories are stable enum values: `hot`, `new`, `exclusive`.
-    Returns the stored category list in canonical order.
-    """
-    if get_drama(drama_slug) is None:
-        raise DramaNotFoundError(f"drama '{drama_slug}' not found")
-    deduped = _validate_featured_categories(categories)
+
+def _validate_featured_drama_slugs(drama_slugs: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in drama_slugs:
+        slug = str(raw).strip()
+        if not _SLUG_RE.match(slug):
+            raise DramaValidationError(
+                "drama_slugs", f"invalid drama slug {slug!r}",
+            )
+        if slug in seen:
+            continue
+        seen.add(slug)
+        out.append(slug)
+    return out
+
+
+def replace_featured_category_members(
+    category: str,
+    drama_slugs: list[str],
+) -> list[str]:
+    """Atomically replace one category with an explicitly ordered slug list."""
+    category = _validate_featured_category(category)
+    slugs = _validate_featured_drama_slugs(drama_slugs)
     now = _now_iso()
     with _connect() as conn:
         conn.execute("BEGIN")
         try:
+            current_rows = conn.execute(
+                "SELECT drama_slug FROM drama_featured_categories "
+                "WHERE category=? ORDER BY sort_order ASC, drama_slug ASC",
+                (category,),
+            ).fetchall()
+            current = [row["drama_slug"] for row in current_rows]
+            if current == slugs:
+                conn.execute("COMMIT")
+                return slugs
+            if slugs:
+                placeholders = ",".join("?" for _ in slugs)
+                rows = conn.execute(
+                    f"SELECT slug FROM dramas WHERE slug IN ({placeholders})",
+                    slugs,
+                ).fetchall()
+                found = {row["slug"] for row in rows}
+                missing = [slug for slug in slugs if slug not in found]
+                if missing:
+                    raise DramaNotFoundError(
+                        f"drama '{missing[0]}' not found"
+                    )
             conn.execute(
-                "DELETE FROM drama_featured_categories WHERE drama_slug=?",
-                (drama_slug,),
+                "DELETE FROM drama_featured_categories WHERE category=?",
+                (category,),
             )
-            for cat in deduped:
+            for sort_order, slug in enumerate(slugs):
                 conn.execute(
-                    "INSERT INTO drama_featured_categories(drama_slug, category, updated_at) "
-                    "VALUES (?, ?, ?)",
-                    (drama_slug, cat, now),
+                    "INSERT INTO drama_featured_categories"
+                    "(drama_slug, category, sort_order, updated_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (slug, category, sort_order, now),
                 )
+            _mark_featured_categories_dirty(conn, now)
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+    return slugs
+
+
+def list_featured_category_slugs(category: str) -> list[str]:
+    """Return one category's drama slugs in persisted operator order."""
+    category = _validate_featured_category(category)
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT drama_slug FROM drama_featured_categories "
+            "WHERE category=? ORDER BY sort_order ASC, drama_slug ASC",
+            (category,),
+        ).fetchall()
+    return [row["drama_slug"] for row in rows]
+
+
+def replace_drama_featured_categories(drama_slug: str, categories: list[str]) -> list[str]:
+    """Replace a drama's fixed featured-category set.
+
+    Existing category collections keep their member order. Removing this drama
+    only deletes its row; adding it appends after the current last member.
+    Returns this drama's stored category list in canonical display order.
+    """
+    deduped = _validate_featured_categories(categories)
+    desired = set(deduped)
+    now = _now_iso()
+    with _connect() as conn:
+        conn.execute("BEGIN")
+        try:
+            exists = conn.execute(
+                "SELECT 1 FROM dramas WHERE slug=?", (drama_slug,),
+            ).fetchone()
+            if not exists:
+                raise DramaNotFoundError(f"drama '{drama_slug}' not found")
+            current_rows = conn.execute(
+                "SELECT category FROM drama_featured_categories WHERE drama_slug=?",
+                (drama_slug,),
+            ).fetchall()
+            current = {row["category"] for row in current_rows}
+            if current != desired:
+                for cat in current - desired:
+                    conn.execute(
+                        "DELETE FROM drama_featured_categories "
+                        "WHERE drama_slug=? AND category=?",
+                        (drama_slug, cat),
+                    )
+                for cat in desired - current:
+                    next_order = conn.execute(
+                        "SELECT COALESCE(MAX(sort_order), -1) + 1 AS n "
+                        "FROM drama_featured_categories WHERE category=?",
+                        (cat,),
+                    ).fetchone()["n"]
+                    conn.execute(
+                        "INSERT INTO drama_featured_categories"
+                        "(drama_slug, category, sort_order, updated_at) "
+                        "VALUES (?, ?, ?, ?)",
+                        (drama_slug, cat, next_order, now),
+                    )
+                _mark_featured_categories_dirty(conn, now)
             conn.execute("COMMIT")
         except Exception:
             try:
@@ -1949,7 +2218,7 @@ def list_featured_category_overview() -> dict[str, list[dict]]:
           WHERE e.drama_slug=d.slug AND e.status='ready')                   AS latest_ready_updated_at
       FROM drama_featured_categories fc
       INNER JOIN dramas d ON d.slug=fc.drama_slug
-      ORDER BY fc.category ASC, latest_ready_updated_at DESC, d.updated_at DESC, d.slug ASC
+      ORDER BY fc.category ASC, fc.sort_order ASC, d.slug ASC
     """
     with _connect() as conn:
         rows = conn.execute(sql).fetchall()
@@ -2524,6 +2793,10 @@ def physical_delete_drama(slug: str) -> bool:
                 f"physical_delete_drama: drama {slug!r} still has {ep_count} "
                 f"episode rows; the sync worker must delete them first"
             )
+        was_featured = conn.execute(
+            "SELECT 1 FROM drama_featured_categories WHERE drama_slug=? LIMIT 1",
+            (slug,),
+        ).fetchone() is not None
         conn.execute("BEGIN")
         try:
             conn.execute(
@@ -2531,6 +2804,8 @@ def physical_delete_drama(slug: str) -> bool:
                 (slug,),
             )
             cur = conn.execute("DELETE FROM dramas WHERE slug=?", (slug,))
+            if (cur.rowcount or 0) > 0 and was_featured:
+                _mark_featured_categories_dirty(conn, _now_iso())
             conn.execute("COMMIT")
         except Exception:
             try:

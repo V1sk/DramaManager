@@ -10,6 +10,7 @@
 |---|---|---|
 | 视频上传 / 切片 / DRM 加密（FFmpeg + AES-128-CBC） | ✅ | ❌ |
 | 剧 / 集 / 翻译 / 标签 / 演员 / 字幕的录入和编辑 | ✅ | ❌ |
+| 推荐 / 最新 / 最热 / 独家运营分类的选剧与排序 | ✅ | ❌（接收并持久化有序快照） |
 | 操作员管理后台（`/admin/...`） | ✅ | ❌ |
 | OSS staging 前缀（`Drama/staging/...`）的写入和清理 | ✅ | ❌ |
 | OSS prod 前缀（`Drama/prod/...`）的拷贝和清理 | ✅（被动，由 `/sync/*` 触发） | ❌（只读消费） |
@@ -18,7 +19,7 @@
 | 海报 / 封面 / 字幕字节的本地存储 | 临时存（直到同步） | ✅（最终态） |
 | `/drm/{slug}/ep-{n}/key` 端点对客户端提供 16-byte AES key | ❌ | ✅ |
 
-**核心交互**：操作员在 HLS 服务器编辑完成后**手动**点击"同步"按钮，HLS 服务器调用业务服务器的 `/sync/*` 端点把状态推送过去。同步过程是单 worker FIFO 队列，全程异步，操作员通过状态徽章（dirty / syncing / clean / sync_failed / pending_delete）观察进度。
+**核心交互**：操作员在 HLS 服务器编辑完成后**手动**点击"同步"按钮，HLS 服务器调用业务服务器的 `/sync/*` 端点把状态推送过去。剧 / 集同步走单 worker FIFO 队列，操作员通过状态徽章（dirty / syncing / clean / sync_failed / pending_delete）观察进度；运营分类是轻量的完整快照，点击“同步运营分类”后直接等待业务服务器响应。
 
 ---
 
@@ -68,7 +69,7 @@ X-API-Key: <共享密钥>
 
 ---
 
-## 4. `/sync/*` 协议（4 个端点）
+## 4. `/sync/*` 协议（5 个端点）
 
 所有请求 / 响应都是 `application/json`（DELETE 端点除外，无 body）。
 
@@ -265,6 +266,54 @@ HLS 端在收到 2xx 后会调用 `unpublish_episode_from_prod(slug, ep_dir)` �
 
 ---
 
+### 4.5 `PUT /sync/featured-categories` — 整体替换运营分类
+
+运营分类通过独立接口同步，**不再**包含在 `POST /sync/dramas` 的单剧 payload 中。HLS 端发送四个分类的完整有序快照：
+
+```json
+{
+  "categories": {
+    "recommend": ["ly", "nirvana-in-fire"],
+    "new": ["new-drama"],
+    "hot": ["ly", "hot-drama"],
+    "exclusive": []
+  }
+}
+```
+
+数组顺序就是客户端展示顺序；同一部剧可以同时出现在多个分类中。`categories` 必须且只能包含以下四个 key：
+
+| key | 中文 | 值 |
+|---|---|---|
+| `recommend` | 推荐 | 有序 drama slug 数组 |
+| `new` | 最新 | 有序 drama slug 数组 |
+| `hot` | 最热 | 有序 drama slug 数组 |
+| `exclusive` | 独家 | 有序 drama slug 数组；`[]` 表示清空 |
+
+**处理流程**（业务服务器 MUST 在一个事务内完成）：
+
+1. 验证 `X-API-Key`，不匹配 → 401。
+2. 验证四个固定 key 全部存在且没有额外 key；每个值必须是数组，数组内 slug 不得重复。格式错误 → 400。
+3. 验证每个 slug 对应的 drama 已存在；任一不存在 → 409，并且四个分类均不得改变。
+4. 整体删除旧分类关系并按数组下标写入新关系。推荐结构：`featured_category_items(category, drama_slug, sort_order)`，对 `(category, drama_slug)` 和 `(category, sort_order)` 建唯一约束。
+5. 提交事务并返回 200。同一快照重复提交必须幂等。
+
+**响应**：
+
+| 状态码 | body | 含义 |
+|---|---|---|
+| `200` | `{"ok": true}` | 四个分类已原子替换 |
+| `400` | `{"error": "invalid featured categories payload"}` | key / 数组 / 重复 slug 不合法 |
+| `401` | `{"error": "..."}` | API key 不匹配 |
+| `409` | `{"error": "drama not synced", "slug": "..."}` | 引用了业务端不存在的剧；不得部分写入 |
+| `5xx` | `{"error": "..."}` | 内部错误；事务必须回滚 |
+
+HLS 管理端触发入口是 `POST /admin/featured-categories/sync`。本地分类成员或顺序有实际变化时按钮高亮；业务服务器返回 2xx 后恢复普通样式。非 2xx / 网络错误会在 HLS 管理接口表现为 502，按钮保持高亮，操作员可重试完整快照。
+
+删除剧时建议通过业务端外键级联移除其分类关系。HLS 端在剧物理删除后也会标记分类 dirty，下一次完整快照会重新收敛两端状态。
+
+---
+
 ## 5. 资产分发拓扑（v2.0）
 
 > v1.0 → v2.0 BREAKING：海报 / 封面 / 字幕从"业务服务器主动拉 HLS 服务器"改为"OSS 直发"。详见 §13。
@@ -394,6 +443,12 @@ pending_delete ──► syncing ──► (HLS 端的行物理删除)
 - HLS 端**没有**自动重试。操作员看到红色徽章后会点"重试"，重新发同样的 payload。
 - 因此你们的 `/sync/*` 必须**幂等**：同一个 payload 重复调用，结果应该和调一次一样。
 
+运营分类使用独立于 drama / episode 行状态机的 dirty 位：
+
+- 添加、移除或调整分类顺序 → dirty，同步按钮高亮。
+- 重复保存相同的最终有序数组 → 状态不变，不会误高亮。
+- `PUT /sync/featured-categories` 返回 2xx → clean；失败 → 保持 dirty。
+
 ---
 
 ## 10. 部署 / 网络
@@ -424,7 +479,7 @@ pending_delete ──► syncing ──► (HLS 端的行物理删除)
 |---|---|---|
 | 200 / 204 | 成功 | 行 → `clean`（或物理删除） |
 | 401 | `X-API-Key` 不匹配 | 行 → `sync_failed`，错误："业务 sync HTTP 401: ..." |
-| 409 | `client_updated_at` 乱序 / 剧未先同步 | 行 → `sync_failed`，操作员一般通过先点"同步整部剧"解决 |
+| 409 | `client_updated_at` 乱序 / 剧未先同步 / 分类快照引用不存在的剧 | 剧集行 → `sync_failed`；分类按钮保持高亮，先同步缺失剧后重试 |
 | 5xx 其它 | 业务服务器内部错误 | 行 → `sync_failed`，错误字符串截断到 ~512 字符回显 |
 
 > 注：v1.0 协议曾有 502（业务服务器拉海报/封面/字幕字节失败）；v2.0 资产直走 OSS 后该路径不复存在，502 已从协议中移除。
@@ -501,6 +556,15 @@ pending_delete ──► syncing ──► (HLS 端的行物理删除)
 |---|---|---|
 | v1.0 | 2026-05-07 | 首版：4 个 `/sync/*` 端点 + URL 拉取 contract + 双 OSS 前缀 |
 | **v2.0 BREAKING** | 2026-05-07 | 海报 / 封面 / 字幕从"业务服务器主动拉 HLS 服务器"改为"OSS 直发"。`poster_url` / `cover_url` / `subtitles[].url` 从相对路径变为**绝对 prod OSS URL**（业务服务器 opaque 存储不拉取）。`502` 状态码从协议中**移除**。业务服务器侧 `HLS_STAGING_HOST` env 不再需要。 |
+| **v3.0 BREAKING** | 2026-07-20 | 运营分类从 `POST /sync/dramas` 拆出，新增 `PUT /sync/featured-categories` 完整有序快照；固定分类扩展为推荐 / 最新 / 最热 / 独家。 |
+
+### v2.0 → v3.0 业务服务器迁移
+
+1. 从 `POST /sync/dramas` parser 中删除 `featured_categories` 字段；单剧同步不再修改运营分类关系。
+2. 新增有序关系表（建议 `featured_category_items(category, drama_slug, sort_order)`）以及 `PUT /sync/featured-categories`。
+3. 接口必须先验证全部 slug，再在一个事务内替换四类，避免只更新部分分类。
+4. 客户端查询推荐 / 最新 / 最热 / 独家时按 `sort_order ASC` 返回。
+5. 部署接收端后，由运营人员在 HLS 后台点击一次“同步运营分类”发布初始快照。
 
 ### v1.0 → v2.0 业务服务器迁移
 
